@@ -7,6 +7,10 @@
 #include <mutex>
 #include <vector>
 
+#if defined(__SSE2__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 #include "fft.h"
 #include "resample.h"
 
@@ -22,12 +26,30 @@ void rpk_wdl_fft_init_once() {
     std::call_once(once, [] { WDL_fft_init(); });
 }
 
+// Keep WDL's floating-point environment changes local to the bridge call.
+// ResampleOut() intentionally enables FTZ/exception masks in strict builds;
+// preserving/restoring the complete caller MXCSR prevents one media analysis
+// from changing the arithmetic environment observed by the next media.
+class RpkFpEnvScope {
+public:
+#if defined(__SSE2__) || defined(_M_X64)
+    RpkFpEnvScope() : mxcsr_(_mm_getcsr()) {}
+    ~RpkFpEnvScope() { _mm_setcsr(mxcsr_); }
+private:
+    unsigned int mxcsr_;
+#else
+    RpkFpEnvScope() = default;
+    ~RpkFpEnvScope() = default;
+#endif
+};
+
 } // namespace
 
 extern "C" {
 
 int rpk_wdl_real_fft_1024(const double *input, double *out_re, double *out_im) {
     if (!input || !out_re || !out_im) return -1;
+    RpkFpEnvScope fp_env;
     rpk_wdl_fft_init_once();
     double buf[1024];
     std::memcpy(buf, input, sizeof(buf));
@@ -60,6 +82,8 @@ long long rpk_wdl_resample_all(
         return -1;
     }
 
+    RpkFpEnvScope fp_env;
+
     WDL_Resampler rs;
     rs.SetMode(true, 1, false, 64, 32);
     rs.SetFeedMode(true);
@@ -79,6 +103,17 @@ long long rpk_wdl_resample_all(
         WDL_ResampleSample *inbuf = nullptr;
         const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
         if (wanted <= 0 || !inbuf) break;
+
+        // ResamplePrepare() returns writable storage for exactly `wanted`
+        // frames. Clear the whole returned region before copying media data so
+        // a partial EOF block cannot depend on allocator/heap contents from a
+        // previous source. ResampleOut() still receives `avail`, preserving
+        // WDL's own EOF/flush behavior and all established REAPER numerics.
+        std::memset(
+            inbuf,
+            0,
+            static_cast<size_t>(wanted) * static_cast<size_t>(channels) *
+                sizeof(WDL_ResampleSample));
 
         const int avail = static_cast<int>(std::min<long long>(
             wanted, input_frames - in_pos));
