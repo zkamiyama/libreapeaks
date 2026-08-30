@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -18,7 +19,6 @@ int rpk_wdl_real_fft_1024(const double *input, double *out_re, double *out_im) {
     std::memcpy(buf, input, sizeof(buf));
     WDL_real_fft(buf, 1024, 0);
 
-    // WDL real FFT: DC at complex[0].re, Nyquist at complex[0].im.
     auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
     out_re[0] = c[0].re;
     out_im[0] = 0.0;
@@ -54,14 +54,13 @@ long long rpk_wdl_resample_all(
     long long in_pos = 0;
     long long out_pos = 0;
 
-    // REAPER 7.79's ReaPeaks builder uses a 4096-double source work buffer,
-    // divided by channel count. In feed mode we always tell WDL how large that
-    // input block is. On the final media block we then provide fewer samples
-    // than ResamplePrepare() returned. WDL documents this exact condition as
-    // its EOF/flush path; it preserves the real media length while releasing
-    // the resampler/filter latency. This is observably different from either
-    // declaring zero padding as extra media or suppressing the final flush.
-    const int block_frames = std::max(1, 4096 / channels);
+    int block_frames = std::max(1, 4096 / channels);
+    // Research-only override used by the pointwise fresh-process spectral
+    // sweep. Normal library calls do not set this environment variable.
+    if (const char *v = std::getenv("RPK_WDL_BLOCK_FRAMES")) {
+        const long n = std::strtol(v, nullptr, 10);
+        if (n > 0 && n <= (1 << 20)) block_frames = static_cast<int>(n);
+    }
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
         WDL_ResampleSample *inbuf = nullptr;
@@ -85,9 +84,6 @@ long long rpk_wdl_resample_all(
 
         in_pos += avail;
         out_pos += got;
-
-        // avail < wanted is the documented flush signal. There is no more real
-        // source after this call; do not invent another media block.
         if (avail < wanted) break;
     }
     return out_pos;
