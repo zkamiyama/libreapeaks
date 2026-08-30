@@ -132,7 +132,7 @@ fn full_file_codes_i16(
 ) -> Vec<u32> {
     let options = reapeaks::GenerateOptions {
         sample_rate: sr,
-        channels: channels as u16,
+        channels,
         divisions: vec![division],
         source_mtime_low32: 0,
         source_size_low32: 0,
@@ -156,13 +156,13 @@ fn full_file_codes_f32(
 ) -> Vec<u32> {
     let options = reapeaks::GenerateOptions {
         sample_rate: sr,
-        channels: channels as u16,
+        channels,
         divisions: vec![division],
         source_mtime_low32: 0,
         source_size_low32: 0,
         spectral: true,
     };
-    let bytes = reapeaks::generate_f32(pcm, &options).unwrap();
+    let bytes = reapeaks::generate_f32(pcm, &options, true).unwrap();
     let parsed = reapeaks::ReaPeaks::parse(bytes).unwrap();
     assert_eq!(parsed.spectral_layers.len(), 1);
     parsed.spectral_layers[0]
