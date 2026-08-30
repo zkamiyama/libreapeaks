@@ -53,27 +53,35 @@ long long rpk_wdl_resample_all(
 
     long long in_pos = 0;
     long long out_pos = 0;
-    constexpr int kChunk = 16384;
+
+    // REAPER 7.79's ReaPeaks builder allocates a 4096-sample double buffer
+    // and divides it by the channel count. It feeds the resampler in chunks
+    // of at most that many frames and uses the same value as ResampleOut's
+    // output-frame capacity. Matching this call schedule matters at startup
+    // and around impulses because the default WDL IIR filter is stateful.
+    const int block_frames = std::max(1, 4096 / channels);
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
-        const int avail = static_cast<int>(std::min<long long>(kChunk, input_frames - in_pos));
+        const int avail = static_cast<int>(
+            std::min<long long>(block_frames, input_frames - in_pos));
         WDL_ResampleSample *inbuf = nullptr;
         const int wanted = rs.ResamplePrepare(avail, channels, &inbuf);
         if (wanted <= 0 || !inbuf) break;
-        const int feed = std::min(wanted, avail);
+        // In REAPER 7.79 this return value is compared to the requested block
+        // and the peak-building pass aborts on a mismatch.
+        if (wanted != avail) return -3;
         std::memcpy(
             inbuf,
             input + in_pos * channels,
-            static_cast<size_t>(feed) * static_cast<size_t>(channels) * sizeof(double));
+            static_cast<size_t>(avail) * static_cast<size_t>(channels) * sizeof(double));
 
         const int out_cap = static_cast<int>(std::min<long long>(
-            1 << 20, output_capacity_frames - out_pos));
+            block_frames, output_capacity_frames - out_pos));
         const int got = rs.ResampleOut(
-            output + out_pos * channels, feed, out_cap, channels);
+            output + out_pos * channels, avail, out_cap, channels);
         if (got < 0) return -2;
-        in_pos += feed;
+        in_pos += avail;
         out_pos += got;
-        if (feed == 0) break;
     }
     return out_pos;
 }
