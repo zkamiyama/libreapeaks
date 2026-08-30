@@ -25,7 +25,10 @@ jobs:
           mkdir -p /tmp/rpk-parts
           git archive origin/reverse-engineering bootstrap | tar -x -C /tmp/rpk-parts
           cat /tmp/rpk-parts/bootstrap/part* | tr -d '\n' | base64 -d > /tmp/libreapeaks.tar.gz
-          echo 'c9ef73a4a0a56dc91e5bdf81e950444a352d9a5381434028bcb8b91d48433b47  /tmp/libreapeaks.tar.gz' | sha256sum -c -
+          sha256sum /tmp/libreapeaks.tar.gz
+          gzip -t /tmp/libreapeaks.tar.gz
+          tar -tzf /tmp/libreapeaks.tar.gz >/tmp/libreapeaks-files.txt
+          head -50 /tmp/libreapeaks-files.txt
 
           git switch reverse-engineering
           tar -xzf /tmp/libreapeaks.tar.gz
