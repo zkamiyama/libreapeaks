@@ -65,11 +65,7 @@ fn code_fnv64(codes: impl IntoIterator<Item = u32>) -> u64 {
     hash
 }
 
-#[test]
-fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
-    let pcm = pcm();
-    assert_eq!(pcm_fnv64(&pcm), 0xed63_043a_f310_9f1d, "input PCM differs from oracle WAV data chunk");
-
+fn generate_codes(pcm: &[i16]) -> Vec<u32> {
     let options = GenerateOptions {
         sample_rate: 32_000,
         channels: 2,
@@ -78,20 +74,30 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
         source_size_low32: 0,
         spectral: true,
     };
-    let parsed = ReaPeaks::parse(generate_pcm16(&pcm, &options).unwrap()).unwrap();
-    let got = &parsed.spectral_layers[0].peaks;
+    let parsed = ReaPeaks::parse(generate_pcm16(pcm, &options).unwrap()).unwrap();
+    parsed.spectral_layers[0]
+        .peaks
+        .iter()
+        .map(|peak| peak.code())
+        .collect()
+}
+
+#[test]
+fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
+    let pcm = pcm();
+    assert_eq!(pcm_fnv64(&pcm), 0xed63_043a_f310_9f1d, "input PCM differs from oracle WAV data chunk");
+    let got = generate_codes(&pcm);
     assert_eq!(got.len(), 3006);
 
-    for (index, (&expected, peak)) in EXPECTED_FIRST64.iter().zip(got.iter()).enumerate() {
-        let actual = peak.code();
+    for (index, (&expected, &actual)) in EXPECTED_FIRST64.iter().zip(got.iter()).enumerate() {
         assert_eq!(
             actual,
             expected,
             "first mismatch index={index} frame={} channel={} actual=0x{actual:08x} freq={} density={} expected=0x{expected:08x} freq={} density={}",
             index / 2,
             index % 2,
-            peak.frequency_hz,
-            peak.density,
+            actual & 0x7fff,
+            (actual >> 15) & 0x3fff,
             expected & 0x7fff,
             (expected >> 15) & 0x3fff,
         );
@@ -100,7 +106,7 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
     for (chunk_index, &expected_hash) in EXPECTED_CHUNK_FNV64.iter().enumerate() {
         let start = chunk_index * 64;
         let end = (start + 64).min(got.len());
-        let actual_hash = code_fnv64(got[start..end].iter().map(|peak| peak.code()));
+        let actual_hash = code_fnv64(got[start..end].iter().copied());
         assert_eq!(
             actual_hash,
             expected_hash,
@@ -109,4 +115,12 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
             (end.saturating_sub(1)) / 2,
         );
     }
+}
+
+#[test]
+fn two32000_s2_is_repeatable_within_one_process() {
+    let pcm = pcm();
+    let first = generate_codes(&pcm);
+    let second = generate_codes(&pcm);
+    assert_eq!(first, second, "strict spectral generation leaked state across identical calls");
 }
