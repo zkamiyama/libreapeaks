@@ -25,7 +25,9 @@ fn main() {
         // impulse material where REAPER has already flushed to silence.
         .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
         .include(wdl)
-        .file(wdl.join("fft.c"))
+        // fft.c is included verbatim by strict_wdl.cpp so the wrapper can
+        // rebuild WDL's process-global tables at media boundaries. WDL itself
+        // remains an unmodified pinned submodule.
         .file(wdl.join("resample.cpp"))
         .file("src/strict_wdl.cpp")
         .flag_if_supported("-std=c++17")
