@@ -88,6 +88,11 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
     assert_eq!(pcm_fnv64(&pcm), 0xed63_043a_f310_9f1d, "input PCM differs from oracle WAV data chunk");
     let got = generate_codes(&pcm);
     assert_eq!(got.len(), 3006);
+    assert_eq!(
+        code_fnv64(got.iter().copied()),
+        0x1c8f_1796_8093_0120,
+        "stale whole-target FNV despite pointwise/chunk oracle agreement",
+    );
 
     for (index, (&expected, &actual)) in EXPECTED_FIRST64.iter().zip(got.iter()).enumerate() {
         assert_eq!(
