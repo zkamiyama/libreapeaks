@@ -27,9 +27,6 @@ void rpk_wdl_fft_init_once() {
 }
 
 // Keep WDL's floating-point environment changes local to the bridge call.
-// ResampleOut() intentionally enables FTZ/exception masks in strict builds;
-// preserving/restoring the complete caller MXCSR prevents one media analysis
-// from changing the arithmetic environment observed by the next media.
 class RpkFpEnvScope {
 public:
 #if defined(__SSE2__) || defined(_M_X64)
@@ -84,6 +81,12 @@ long long rpk_wdl_resample_all(
 
     RpkFpEnvScope fp_env;
 
+    // WDL FFT owns the only process-global mutable tables used by strict
+    // spectral analysis. Initialize them before *any* media-specific WDL work,
+    // so their first-use environment is independent of the first source's
+    // sample rate, channel count, resampler path, or data.
+    rpk_wdl_fft_init_once();
+
     WDL_Resampler rs;
     rs.SetMode(true, 1, false, 64, 32);
     rs.SetFeedMode(true);
@@ -92,11 +95,8 @@ long long rpk_wdl_resample_all(
     long long in_pos = 0;
     long long out_pos = 0;
 
-    // Fresh-process REAPER 7.79 pointwise probes at the 22.05 kHz boundary
-    // identify a 2048-double source buffer. WDL's IIR prefilter fade depends
-    // on the number of frames passed to ResampleOut(), so this feed granularity
-    // is part of strict spectral compatibility. The buffer is interleaved,
-    // therefore the frame count is divided by the channel count.
+    // Fresh-process REAPER 7.79 pointwise probes identify a 2048-double source
+    // feed buffer. It is interleaved, so the frame count scales by channels.
     const int block_frames = std::max(1, 2048 / channels);
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
@@ -104,11 +104,6 @@ long long rpk_wdl_resample_all(
         const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
         if (wanted <= 0 || !inbuf) break;
 
-        // ResamplePrepare() returns writable storage for exactly `wanted`
-        // frames. Clear the whole returned region before copying media data so
-        // a partial EOF block cannot depend on allocator/heap contents from a
-        // previous source. ResampleOut() still receives `avail`, preserving
-        // WDL's own EOF/flush behavior and all established REAPER numerics.
         std::memset(
             inbuf,
             0,
