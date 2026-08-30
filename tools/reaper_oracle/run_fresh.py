@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run REAPER once per media file and collect .reapeaks spectral hashes.
 
-The X server may be reused. The REAPER process may not: reverse-engineering
-probes observed source-to-source spectral state leakage inside one process.
+The X server may be reused. The REAPER process and its resource/config directory
+may not: reverse-engineering probes observed source-to-source spectral state
+leakage inside one process, and independent config directories keep oracle runs
+free of preference/cache state written by a previous process.
 """
 
 from __future__ import annotations
@@ -144,8 +146,6 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="libreapeaks-reaper-oracle-") as temp:
         tempdir = pathlib.Path(temp)
-        config = tempdir / "reaper.ini"
-        write_config(config, args.peak_rate)
 
         xvfb_log = (logs / "xvfb.log").open("wb")
         xvfb = subprocess.Popen(
@@ -156,10 +156,18 @@ def main() -> int:
         try:
             time.sleep(0.35)
             print("# name\tmagic\tsample_rate\tchannels\tdivisions\tlevel_counts\tlevel_fnv64")
-            for media in media_files(args.media_dir):
+            for index, media in enumerate(media_files(args.media_dir)):
                 remove_old_peaks(media)
-                result = tempdir / "result.txt"
-                result.unlink(missing_ok=True)
+
+                # One fresh resource directory per media. REAPER may rewrite
+                # preferences during shutdown, so do not feed that state to the
+                # next oracle process.
+                case_dir = tempdir / f"case-{index:04d}-{media.stem}"
+                case_dir.mkdir()
+                config = case_dir / "reaper.ini"
+                write_config(config, args.peak_rate)
+                result = case_dir / "result.txt"
+
                 env = os.environ.copy()
                 env.update(
                     DISPLAY=args.display,
@@ -171,6 +179,7 @@ def main() -> int:
                     completed = subprocess.run(
                         [
                             str(args.reaper),
+                            "-newinst",
                             "-cfgfile",
                             str(config),
                             "-new",
