@@ -20,6 +20,8 @@ jobs:
         run: cargo test --all-targets
       - name: strict WDL golden tests (release math)
         run: cargo test --release --all-targets --features strict-wdl
+      - name: fresh-process spectral corpus diagnostic
+        run: cargo test --release --test spectral_corpus_diagnostic --features strict-wdl -- --nocapture
       - name: clippy
         run: cargo clippy --all-targets --features strict-wdl -- -D warnings
 
