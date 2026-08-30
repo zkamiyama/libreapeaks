@@ -1,3 +1,5 @@
+#![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_repeat_n)]
+
 use reapeaks::{generate_f32, generate_pcm16, GenerateOptions, ReaPeaks, SpectralPeak};
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
