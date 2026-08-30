@@ -1,0 +1,26 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d1015; color: #d2dae6; }
+header { display: flex; justify-content: space-between; gap: 24px; align-items: center; padding: 16px 22px; border-bottom: 1px solid #29313d; }
+h1 { margin: 0; font-size: 20px; }
+header p { margin: 4px 0 0; color: #8e9aab; font-size: 13px; }
+main { padding: 16px; display: grid; gap: 12px; }
+.panel { border: 1px solid #29313d; background: #11151b; border-radius: 8px; overflow: hidden; }
+.panelTitle { padding: 7px 10px; font-size: 12px; color: #94a0b2; border-bottom: 1px solid #252d38; }
+.pill { padding: 7px 10px; border-radius: 999px; background: #19212b; font-size: 12px; max-width: 55vw; text-align: right; }
+.canvasStack { position: relative; width: 100%; user-select: none; touch-action: none; }
+.overviewStack { height: 84px; }
+.mainStack { height: 310px; }
+.spectrumStack { height: 230px; }
+canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+canvas.overlay { pointer-events: none; }
+.controls { padding: 10px; }
+.transportRow { display: flex; flex-wrap: wrap; gap: 9px 12px; align-items: center; }
+button { border: 1px solid #384456; background: #1c2531; color: #e8eef7; border-radius: 5px; padding: 6px 11px; cursor: pointer; }
+button:hover { background: #263447; }
+label { font-size: 12px; color: #bac5d4; display: inline-flex; align-items: center; gap: 5px; }
+#positionSlider { width: 100%; margin-top: 9px; }
+#timeLabel { margin-left: auto; font-variant-numeric: tabular-nums; }
+.diagnostics { padding: 10px 12px; display: grid; gap: 5px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.hint { margin-top: 4px; color: #7f8c9f; }
+code { color: #8fd9b2; }

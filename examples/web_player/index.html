@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>libreapeaks tiled web player</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>libreapeaks tiled web player</h1>
+      <p>Waveform and REAPER spectral-code textures are fetched per visible tile.</p>
+    </div>
+    <div id="mediaInfo" class="pill">loading…</div>
+  </header>
+
+  <main>
+    <section class="overview panel">
+      <div class="panelTitle">CPU overview — <code>render_rgba()</code></div>
+      <div class="canvasStack overviewStack">
+        <canvas id="overviewBase"></canvas>
+        <canvas id="overviewOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panelTitle">
+        Tiled waveform — <code>plan_view()</code> → <code>tiles_for_view()</code> → <code>tile_texture()</code>
+      </div>
+      <div class="canvasStack mainStack" id="waveStack">
+        <canvas id="waveBase"></canvas>
+        <canvas id="waveOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panelTitle">
+        Tiled spectral codes — <code>spectral_tile_texture()</code> (frequency + density)
+      </div>
+      <div class="canvasStack spectrumStack" id="spectrumStack">
+        <canvas id="spectrumBase"></canvas>
+        <canvas id="spectrumOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="controls panel">
+      <div class="transportRow">
+        <button id="playButton">Play</button>
+        <button id="stopButton">Stop</button>
+        <button id="zoomInButton">Zoom +</button>
+        <button id="zoomOutButton">Zoom −</button>
+        <button id="fullButton">Full</button>
+        <label><input id="showTiles" type="checkbox" checked> show tile boundaries</label>
+        <label><input id="followPlayhead" type="checkbox" checked> follow playhead</label>
+        <label>Vertical FS <input id="verticalScale" type="range" min="0.25" max="8" value="1" step="0.25"><span id="verticalValue">1.00</span></label>
+        <span id="timeLabel">00:00.00 / 00:00.00</span>
+      </div>
+      <input id="positionSlider" type="range" min="0" max="100000" value="0">
+      <audio id="audio" preload="metadata" src="/audio"></audio>
+    </section>
+
+    <section class="diagnostics panel">
+      <div><strong>Viewport:</strong> <span id="viewportInfo"></span></div>
+      <div><strong>Visible tiles:</strong> <span id="tileInfo"></span></div>
+      <div><strong>Tile LRU:</strong> <span id="cacheInfo"></span></div>
+      <div><strong>Other APIs exercised:</strong> <span id="apiInfo"></span></div>
+      <div class="hint">Mouse wheel = zoom around cursor · drag = pan · click = seek. Tile labels make cache granularity explicit.</div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
