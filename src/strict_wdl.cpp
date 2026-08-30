@@ -54,7 +54,13 @@ long long rpk_wdl_resample_all(
     long long in_pos = 0;
     long long out_pos = 0;
 
-    int block_frames = std::max(1, 4096 / channels);
+    // Fresh-process REAPER 7.79 pointwise probes at the 22.05 kHz boundary
+    // identify a 2048-double source buffer. WDL's IIR prefilter fade depends
+    // on the number of frames passed to ResampleOut(), so this feed granularity
+    // is part of strict spectral compatibility. The buffer is interleaved,
+    // therefore the frame count is divided by the channel count.
+    int block_frames = std::max(1, 2048 / channels);
+
     // Research-only override used by the pointwise fresh-process spectral
     // sweep. Normal library calls do not set this environment variable.
     if (const char *v = std::getenv("RPK_WDL_BLOCK_FRAMES")) {
