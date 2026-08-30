@@ -5,12 +5,11 @@
 //! behavior out of the normal implementation and intercept it only when the
 //! `strict-wdl` feature selects this module.
 //!
-//! REAPER's fine spectral scheduler is also centered on the 22.05 kHz analysis
-//! domain with a 512-analysis-sample half-window. The normal implementation
-//! intentionally keeps its simpler source-domain termination rule; strict mode
-//! extends the source with zeroes only when necessary to let the unchanged WDL
-//! DSP path reach every REAPER-scheduled point, then truncates to the exact
-//! REAPER count.
+//! REAPER's fine spectral scheduler is centered on the 22.05 kHz analysis
+//! domain with a 512-analysis-sample half-window. Strict mode overrides only
+//! the expected output count while leaving the original media length passed to
+//! WDL_Resampler untouched; declaring padded source frames changes WDL's edge
+//! response and therefore does not match REAPER.
 
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
@@ -18,7 +17,6 @@ use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
 const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
 const REAPER_ANALYSIS_RATE: u128 = 22_050;
 const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
-const BASE_SOURCE_MARGIN: usize = 1024;
 
 #[inline]
 fn low_rate_fine_count(frames: usize, division: u32) -> usize {
@@ -79,13 +77,6 @@ fn zero_fine(frames: usize, channels: usize, division: u32) -> Vec<SpectralPeak>
     vec![SpectralPeak::default(); low_rate_fine_count(frames, division) * channels]
 }
 
-fn effective_base_frames(frames: usize, division: u32, target_count: usize) -> usize {
-    frames.max(
-        BASE_SOURCE_MARGIN
-            .saturating_add(target_count.saturating_mul(division as usize)),
-    )
-}
-
 fn build_high_rate_i16(
     pcm: &[i16],
     frames: usize,
@@ -94,37 +85,15 @@ fn build_high_rate_i16(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = high_rate_fine_count(frames, source_rate, division);
-    if target == 0 {
-        return Ok(Vec::new());
-    }
-
-    let effective_frames = effective_base_frames(frames, division, target);
-    let mut got = if effective_frames == frames {
-        crate::spectral_base::build_fine_spectral(
-            pcm,
-            frames,
-            channels,
-            source_rate,
-            division,
-        )?
-    } else {
-        // The extra samples are not additional media. They model REAPER's EOF
-        // zero-extension so the WDL resampler/window scheduler can emit peaks
-        // whose centers are still inside the original source.
-        let mut padded = Vec::with_capacity(effective_frames.saturating_mul(channels));
-        padded.extend_from_slice(&pcm[..frames * channels]);
-        padded.resize(effective_frames.saturating_mul(channels), 0);
-        crate::spectral_base::build_fine_spectral(
-            &padded,
-            effective_frames,
-            channels,
-            source_rate,
-            division,
-        )?
-    };
-    got.truncate(target.saturating_mul(channels));
-    Ok(got)
+    let target = reaper_fine_count(frames, source_rate, division);
+    crate::spectral_base::build_fine_spectral_with_expected(
+        pcm,
+        frames,
+        channels,
+        source_rate,
+        division,
+        target,
+    )
 }
 
 fn build_high_rate_f32(
@@ -135,34 +104,15 @@ fn build_high_rate_f32(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = high_rate_fine_count(frames, source_rate, division);
-    if target == 0 {
-        return Ok(Vec::new());
-    }
-
-    let effective_frames = effective_base_frames(frames, division, target);
-    let mut got = if effective_frames == frames {
-        crate::spectral_base::build_fine_spectral_f32(
-            pcm,
-            frames,
-            channels,
-            source_rate,
-            division,
-        )?
-    } else {
-        let mut padded = Vec::with_capacity(effective_frames.saturating_mul(channels));
-        padded.extend_from_slice(&pcm[..frames * channels]);
-        padded.resize(effective_frames.saturating_mul(channels), 0.0);
-        crate::spectral_base::build_fine_spectral_f32(
-            &padded,
-            effective_frames,
-            channels,
-            source_rate,
-            division,
-        )?
-    };
-    got.truncate(target.saturating_mul(channels));
-    Ok(got)
+    let target = reaper_fine_count(frames, source_rate, division);
+    crate::spectral_base::build_fine_spectral_f32_with_expected(
+        pcm,
+        frames,
+        channels,
+        source_rate,
+        division,
+        target,
+    )
 }
 
 fn zero_layers(
@@ -253,9 +203,9 @@ pub fn build_spectral_layers(
         return Ok(Vec::new());
     }
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        // Keep the existing layer assembler until the expanded fine-level
-        // scheduler corpus is exact; coarse-level scheduling has its own
-        // dedicated golden corpus and will be switched independently.
+        // Fine-level exactness is gated independently. The high-rate coarse
+        // assembler is kept on the historical path until its own full-mipmap
+        // fresh-process oracle is added.
         return crate::spectral_base::build_spectral_layers(
             pcm,
             frames,
