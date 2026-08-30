@@ -5,16 +5,31 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "fft.h"
 #include "resample.h"
 
+namespace {
+
+void rpk_wdl_fft_init_once() {
+    // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+    // filling its process-global twiddle/permutation tables. Concurrent first
+    // calls can therefore observe partially initialized tables. Strict mode is
+    // callable from parallel Rust/Python workers, so complete WDL's one-time
+    // initialization under C++'s thread-safe once primitive before any FFT.
+    static std::once_flag once;
+    std::call_once(once, [] { WDL_fft_init(); });
+}
+
+} // namespace
+
 extern "C" {
 
 int rpk_wdl_real_fft_1024(const double *input, double *out_re, double *out_im) {
     if (!input || !out_re || !out_im) return -1;
-    WDL_fft_init();
+    rpk_wdl_fft_init_once();
     double buf[1024];
     std::memcpy(buf, input, sizeof(buf));
     WDL_real_fft(buf, 1024, 0);
