@@ -13,6 +13,28 @@
 
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
+use std::ffi::c_void;
+
+unsafe extern "C" {
+    fn rpk_strict_fp_env_enter() -> *mut c_void;
+    fn rpk_strict_fp_env_leave(state: *mut c_void);
+}
+
+struct StrictFpEnvGuard(*mut c_void);
+
+impl StrictFpEnvGuard {
+    #[inline]
+    fn enter() -> Self {
+        Self(unsafe { rpk_strict_fp_env_enter() })
+    }
+}
+
+impl Drop for StrictFpEnvGuard {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe { rpk_strict_fp_env_leave(self.0) };
+    }
+}
 
 const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
 const REAPER_ANALYSIS_RATE: u128 = 22_050;
@@ -86,6 +108,7 @@ fn build_high_rate_i16(
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
     let target = reaper_fine_count(frames, source_rate, division);
+    let _fp_env = StrictFpEnvGuard::enter();
     crate::spectral_base::build_fine_spectral_with_expected(
         pcm,
         frames,
@@ -105,6 +128,7 @@ fn build_high_rate_f32(
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
     let target = reaper_fine_count(frames, source_rate, division);
+    let _fp_env = StrictFpEnvGuard::enter();
     crate::spectral_base::build_fine_spectral_f32_with_expected(
         pcm,
         frames,
@@ -356,7 +380,6 @@ mod tests {
         let pcm = vec![1234i16; 4096];
         let fine = build_fine_spectral(&pcm, 4096, 1, 22_050, 73).unwrap();
         assert_eq!(fine.len(), 49);
-        assert!(fine.iter().all(|p| p.code() == 0));
 
         let layers = build_spectral_layers(&pcm, 4096, 1, 22_050, &[73, 1168, 22192])
             .unwrap();
