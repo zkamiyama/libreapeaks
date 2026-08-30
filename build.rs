@@ -2,6 +2,7 @@ use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=src/strict_wdl.cpp");
+    println!("cargo:rerun-if-changed=src/strict_fp_env.cpp");
     println!("cargo:rerun-if-changed=third_party/WDL/WDL/fft.c");
     println!("cargo:rerun-if-changed=third_party/WDL/WDL/resample.cpp");
 
@@ -30,6 +31,7 @@ fn main() {
         // remains an unmodified pinned submodule.
         .file(wdl.join("resample.cpp"))
         .file("src/strict_wdl.cpp")
+        .file("src/strict_fp_env.cpp")
         .flag_if_supported("-std=c++17")
         .compile("reapeaks_wdl");
 }
