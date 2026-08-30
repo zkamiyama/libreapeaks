@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>libreapeaks RGBA8 envelope decode</title>
+<pre id="out"></pre>
+<script>
+// The actual bytes can come from a native host, HTTP endpoint, WASM wrapper,
+// WebSocket, etc. One RGBA texel contains one max/min pair.
+function i16(lo, hi) {
+  const u = lo | (hi << 8);
+  return u >= 0x8000 ? u - 0x10000 : u;
+}
+function decodeEnvelopeTexel(r, g, b, a, rpkl=false) {
+  const maxCode = i16(r, g), minCode = i16(b, a);
+  const rpkn = c => c < 0 ? c / 32768 : c / 32767;
+  const large = c => {
+    const sign = c < 0 ? -1 : 1, m = Math.abs(c);
+    const v = m <= 24576 ? m / 24576 : 2 ** ((m - 24576) / 1024);
+    return sign * v;
+  };
+  const f = rpkl ? large : rpkn;
+  return {max: f(maxCode), min: f(minCode)};
+}
+document.querySelector('#out').textContent = JSON.stringify(
+  decodeEnvelopeTexel(0xff, 0x7f, 0x00, 0x80), null, 2);
+</script>

@@ -1,0 +1,77 @@
+{
+  "oracle": "REAPER 7.79 x86_64 Linux",
+  "date": "2026-08-30",
+  "oracle_process_policy": "one fresh REAPER process per media file",
+  "reaper_preferences": {
+    "peakcachegenmode": 3,
+    "peakcachegenrs": 300
+  },
+  "wave": {
+    "pcm16_exhaustive_input_values": 65536,
+    "total_compared_buckets": 122516,
+    "exact_buckets": 122516,
+    "rpkn_pcm24_constant_buckets": 50000,
+    "rpkn_pcm24_exact": 50000,
+    "rpkl_float_constant_buckets": 43857,
+    "rpkl_float_exact": 43857
+  },
+  "spectral_pre_wdl": {
+    "files": 131,
+    "fine_points": 34127,
+    "frequency_exact": 34040,
+    "density_exact": 31848,
+    "full_code_exact": 31776
+  },
+  "spectral_strict_wdl": {
+    "fresh_process_primary_cases": 188,
+    "fresh_process_primary_codes": 10112,
+    "fresh_process_primary_exact_codes": 10112,
+    "expanded_cases": 169,
+    "expanded_codes": 6188,
+    "expanded_exact_codes": 6188,
+    "expanded_full_file_exact_codes": 6188,
+    "independent_fine_cases_total": 357,
+    "independent_fine_codes_total": 16300,
+    "independent_fine_exact_codes_total": 16300,
+    "mipmap_oracle_cases": 8,
+    "mipmap_oracle_levels": 24,
+    "mipmap_oracle_codes": 96222,
+    "mipmap_oracle_exact_codes": 96222,
+    "mipmap_oracle_scope": [
+      "22051 Hz",
+      "48000 Hz",
+      "96000 Hz",
+      "192000 Hz",
+      "mono",
+      "stereo",
+      "4-channel",
+      "RPKN PCM16",
+      "RPKL float32"
+    ]
+  },
+  "spectral_aggregate": {
+    "tested_points": 3219,
+    "exact_points": 3219
+  },
+  "strict_compatibility_quirks": {
+    "source_rate_le_22050": "spectral layers are present but payload codes are zero",
+    "wdl_resampler_feed_samples": 2048,
+    "wdl_resampler_feed_frames": "max(1, 2048 / channels)",
+    "wdl_fft_init": "wrapped in std::call_once because upstream WDL_fft_init uses an unsynchronized static initialization flag"
+  },
+  "format_probe": {
+    "integer_payload_equivalence": [
+      "WAV PCM16",
+      "WAV PCM24",
+      "WAV PCM32",
+      "FLAC16",
+      "FLAC24"
+    ],
+    "rpkl_sources_observed": [
+      "WAV float32",
+      "MP3",
+      "Vorbis",
+      "Opus"
+    ]
+  }
+}

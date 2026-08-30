@@ -1,0 +1,13 @@
+/target/
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.pyd
+__pycache__/
+*.pyc
+.venv/
+/dist/
+/build/
+/tools/oracle/work/
