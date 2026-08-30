@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -74,14 +73,7 @@ long long rpk_wdl_resample_all(
     // on the number of frames passed to ResampleOut(), so this feed granularity
     // is part of strict spectral compatibility. The buffer is interleaved,
     // therefore the frame count is divided by the channel count.
-    int block_frames = std::max(1, 2048 / channels);
-
-    // Research-only override used by the pointwise fresh-process spectral
-    // sweep. Normal library calls do not set this environment variable.
-    if (const char *v = std::getenv("RPK_WDL_BLOCK_FRAMES")) {
-        const long n = std::strtol(v, nullptr, 10);
-        if (n > 0 && n <= (1 << 20)) block_frames = static_cast<int>(n);
-    }
+    const int block_frames = std::max(1, 2048 / channels);
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
         WDL_ResampleSample *inbuf = nullptr;
