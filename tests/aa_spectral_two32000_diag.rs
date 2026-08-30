@@ -90,8 +90,8 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
     assert_eq!(got.len(), 3006);
     assert_eq!(
         code_fnv64(got.iter().copied()),
-        0x1c8f_1796_8093_0120,
-        "stale whole-target FNV despite pointwise/chunk oracle agreement",
+        0x826b_dbbc_e8b3_9588,
+        "whole-target spectral FNV differs from the verified oracle sequence",
     );
 
     for (index, (&expected, &actual)) in EXPECTED_FIRST64.iter().zip(got.iter()).enumerate() {
