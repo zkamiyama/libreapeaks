@@ -1,0 +1,43 @@
+name: bootstrap-reverse
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bootstrap-reverse.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Materialize reverse-engineering branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin reverse-engineering
+          rm -rf /tmp/rpk-parts
+          mkdir -p /tmp/rpk-parts
+          git archive origin/reverse-engineering bootstrap | tar -x -C /tmp/rpk-parts
+          cat /tmp/rpk-parts/bootstrap/part* | tr -d '\n' | base64 -d > /tmp/libreapeaks.tar.gz
+          echo 'c0ee8f527cb5ca7358cbd74ffc0d86a3f33eb7afe25358cefbe54e1ac1c6ee2  /tmp/libreapeaks.tar.gz' | sha256sum -c -
+
+          git switch reverse-engineering
+          tar -xzf /tmp/libreapeaks.tar.gz
+          rm -rf bootstrap .github/workflows/bootstrap.yml
+
+          rm -rf third_party/WDL
+          mkdir -p third_party
+          git clone https://github.com/justinfrankel/WDL.git third_party/WDL
+          git -C third_party/WDL checkout cc8eaf178ae871b96cd316a27d84e6be34540636
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add initial libreapeaks implementation'
+          git push origin HEAD:reverse-engineering
