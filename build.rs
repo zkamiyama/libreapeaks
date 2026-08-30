@@ -17,6 +17,18 @@ fn main() {
         );
     }
 
+    // WDL's FFT implementation is C and intentionally reinterprets its packed
+    // real-FFT buffer as complex pairs. Compile it as C, not as C++, and turn
+    // off strict-aliasing optimization so the upstream type-punning contract is
+    // deterministic regardless of the final executable's layout.
+    cc::Build::new()
+        .define("WDL_FFT_REALSIZE", Some("8"))
+        .include(wdl)
+        .file(wdl.join("fft.c"))
+        .flag_if_supported("-std=c99")
+        .flag_if_supported("-fno-strict-aliasing")
+        .compile("reapeaks_wdl_fft");
+
     cc::Build::new()
         .cpp(true)
         .define("WDL_FFT_REALSIZE", Some("8"))
@@ -26,12 +38,9 @@ fn main() {
         // impulse material where REAPER has already flushed to silence.
         .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
         .include(wdl)
-        // fft.c is included verbatim by strict_wdl.cpp so the wrapper can
-        // rebuild WDL's process-global tables at media boundaries. WDL itself
-        // remains an unmodified pinned submodule.
         .file(wdl.join("resample.cpp"))
         .file("src/strict_wdl.cpp")
         .file("src/strict_fp_env.cpp")
         .flag_if_supported("-std=c++17")
-        .compile("reapeaks_wdl");
+        .compile("reapeaks_wdl_cpp");
 }
