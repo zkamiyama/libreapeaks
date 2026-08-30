@@ -7,10 +7,11 @@ The primary goal is **cache sharing**: if REAPER and another playback/editing
 application use the same media, they should be able to reuse the same peak
 cache instead of building two waveform/spectral caches.
 
-> Status: early compatibility work. The waveform writer is strongly validated
-> against REAPER 7.79 Linux. Spectral generation is reverse-engineered and the
-> `strict-wdl` backend is continuously compared against REAPER-generated golden
-> fixtures.
+> Status: waveform generation and `-'s'` spectral-peak generation are now
+> byte-exact across the current REAPER 7.79 Linux validation corpora when
+> `strict-wdl` is enabled. This is strong tested compatibility, not a claim that
+> every REAPER version, CPU architecture, preference set, or possible input has
+> been exhaustively proven.
 
 ## What is implemented
 
@@ -19,8 +20,8 @@ cache instead of building two waveform/spectral caches.
 - spectral-peak (`-'s'`) parsing: frequency + density/tonality.
 - RPKN generation from decoded PCM16.
 - RPKN and RPKL generation from decoded float32.
-- optional REAPER-oriented spectral generation.
-- Cockos WDL FFT/resampler backend (`strict-wdl`) for compatibility work.
+- REAPER-oriented spectral generation.
+- Cockos WDL FFT/resampler backend (`strict-wdl`) for byte-level compatibility.
 - stable C ABI (`include/reapeaks.h`).
 - PyO3 module (`reapeaks`).
 - multiresolution GUI waveform index with lazy derived levels.
@@ -29,16 +30,21 @@ cache instead of building two waveform/spectral caches.
 - lossless RGBA8 spectral-code textures.
 - CPU RGBA8 waveform rendering for Qt/PySide6 or browser `ImageData`.
 
-## REAPER 7.79 validation so far
+## REAPER 7.79 validation
 
-The test oracle is REAPER 7.79 x86_64 Linux running headlessly via ReaScript
+The oracle is REAPER 7.79 x86_64 Linux running headlessly via ReaScript
 `PCM_Source_BuildPeaks`.
+
+**Oracle rule:** every media file is processed by a fresh REAPER process.
+Batching several source builds in one REAPER process was observed to leak
+spectral state between sources, so it is deliberately excluded from golden
+fixture production.
 
 ### Waveform
 
-For RPKN PCM16, the quantizer has been exhaustively measured using one REAPER
-fine bucket for every possible int16 value (`-32768..32767`). Together with the
-larger probe corpus, **122,516 compared waveform buckets are byte-exact**.
+For RPKN PCM16, the quantizer was exhaustively measured using one REAPER fine
+bucket for every possible int16 value (`-32768..32767`). Together with the
+larger probe corpus, **122,516 / 122,516 waveform buckets are byte-exact**.
 
 The effective normalized RPKN mapping is asymmetric:
 
@@ -47,40 +53,74 @@ x >= 0:  round_half_up(x * 32767)
 x <  0: -round_half_up(-x * 32768)
 ```
 
-A 50,000-value 24-bit WAV probe independently confirmed the same normalized
-float rule for RPKN: **50,000 / 50,000 constant buckets matched**.
+A 50,000-value PCM24 probe independently confirmed the same normalized rule:
+**50,000 / 50,000 exact**.
 
 For RPKL, 43,857 float values plus high-range probes through +/-512 confirmed
-the official transform with round-half-up. REAPER also initializes a bucket's
-floating extrema as `max=-1.0`, `min=+1.0`, which matters for buckets wholly
-above +1 or below -1.
+the official transform with round-half-up and REAPER's bucket initialization
+`max=-1.0`, `min=+1.0`: **43,857 / 43,857 exact**.
 
 ### Spectral peaks
 
-Binary inspection plus differential probes recover the main REAPER 7.79 path:
+The recovered REAPER 7.79 path uses:
 
-- internal analysis rate: about 22,050 Hz;
-- 1024-point analysis FFT;
-- float32 Hann/sample product promoted into a double FFT input;
-- phase-vocoder-style dominant-frequency refinement using the previous f32
-  complex spectrum;
-- exact density expression based on the second moment around the refined bin;
-- coarser spectral levels aggregated directly from the fine spectral level.
+- a 22,050 Hz analysis domain for source rates above 22,050 Hz;
+- a 1024-point WDL FFT with double FFT storage;
+- float32 sample/window multiplication before promotion to double;
+- phase-vocoder-style frequency refinement using the previous float32 complex
+  spectrum;
+- the recovered second-moment density expression;
+- coarser spectral levels aggregated directly from the fine level;
+- a strict WDL resampler feed buffer of 2048 interleaved samples
+  (`max(1, 2048/channels)` frames), which is required for exact near-unity
+  resampling behavior around 22,051 Hz;
+- thread-safe WDL FFT initialization via `std::call_once`.
 
-Before swapping the numerical core to Cockos WDL, the reconstructed math model
-matched 34,040 / 34,127 fine frequency values (99.745%) and 31,848 / 34,127
-density values (93.32%). Remaining errors are concentrated around numerical
-boundaries, impulses, and very-low-energy cases; `strict-wdl` exists to remove
-FFT/resampler implementation differences.
+REAPER 7.79 also has an observable low-rate compatibility quirk: for
+`source_rate <= 22050`, spectral layers are created but their payload codes are
+zero. `strict-wdl` reproduces this; it is not treated as a general DSP rule.
+
+Current byte-exact strict-WDL gates:
+
+```text
+Fresh-process primary fine corpus:
+  188 cases
+  10,112 / 10,112 u32 codes exact
+
+Expanded fine corpus:
+  169 cases
+  6,188 / 6,188 u32 codes exact
+  also exact after generate -> serialize -> parse
+
+Independent fine total:
+  357 cases
+  16,300 / 16,300 u32 codes exact
+
+Independent all-mipmap corpus:
+  8 fresh-process media cases
+  24 spectral levels
+  96,222 / 96,222 u32 codes exact
+```
+
+The all-mipmap oracle covers 22,051 / 48k / 96k / 192k, mono / stereo /
+4-channel, PCM16 RPKN and float32 RPKL.
+
+Earlier, before substituting Cockos WDL and matching REAPER's resampler feed
+behavior, the handwritten numerical model was only 99.745% exact for frequency
+and 93.32% exact for density. Those residuals are no longer used as the strict
+compatibility result.
+
+See [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md) and
+[`docs/validation-summary.json`](docs/validation-summary.json).
 
 ### Media-format probes
 
-With the same 48 kHz stereo source signal, REAPER 7.79 produced identical
+With the same 48 kHz stereo decoded signal, REAPER 7.79 produced identical
 wave/spectral/loudness payloads for WAV16, WAV24, WAV32, FLAC16 and FLAC24.
 A float WAV produced the same spectral/loudness payload but RPKL waveform
 encoding. On this REAPER build, MP3, Vorbis and Opus also select RPKL.
 
-This is why `generate_f32(..., large_range=...)` makes the output peak encoding
+This is why `generate_f32(..., large_range=...)` makes the output wave encoding
 explicit rather than guessing from the Rust/Python sample type.
 
 ## Build
@@ -92,8 +132,8 @@ cd libreapeaks
 # Pure Rust fallback spectral math
 cargo test
 
-# REAPER compatibility backend using Cockos WDL
-cargo test --features strict-wdl
+# Byte-exact REAPER-oriented backend using Cockos WDL
+cargo test --release --features strict-wdl
 ```
 
 ### Python
@@ -119,13 +159,14 @@ rendering, and PCM16/f32 generation.
 
 ## GUI data model
 
-REAPER's three native waveform mipmaps are excellent for storage but sparse for
-smooth zoom transitions. `WavePyramid` therefore keeps native levels and adds a
-geometric ratio-4 **metadata-only display pyramid**. Derived peaks are generated
-only for the visible range/tile.
+REAPER's native waveform mipmaps are excellent for persistent storage but sparse
+for smooth arbitrary zoom levels. `WavePyramid` keeps native levels and adds a
+geometric ratio-4 **metadata-only display pyramid**. Derived peaks are computed
+only for the visible range/tile, so the application does not create another
+persistent waveform cache.
 
 A default tile contains 4096 peaks. `WaveTileKey { level_index, tile_index }` is
-stable and intended to be the key of a frontend LRU/GPU texture cache.
+stable and intended as the key of a frontend LRU/GPU texture cache.
 
 For a view:
 
@@ -134,30 +175,31 @@ For a view:
 3. `tile_texture(...)` returns a lossless RGBA8 data texture.
 4. cache the texture by `(level_index, tile_index)`.
 
-The waveform texture layout is one row per channel:
+Waveform texture layout, one row per channel:
 
 ```text
 R,G = max i16 little-endian
 B,A = min i16 little-endian
 ```
 
-The spectral texture stores the existing REAPER 32-bit spectral code directly
-as little-endian RGBA8.
+Spectral textures store the existing REAPER 32-bit spectral code directly as
+little-endian RGBA8. This is suitable for Qt6/PySide6 CPU/GPU upload and browser
+WebGL/WebGPU/`ImageData` paths.
 
 See [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md).
 
 ## Important compatibility note
 
-REAPER's peak rate is a preference. The oracle configuration used here has
+REAPER's peak rate is a preference. The main oracle configuration uses
 `peakcachegenrs=300`, giving divisions 147/2205/44100 at 44.1 kHz and
-160/2400/48000 at 48 kHz. Cockos' public format document notes that current
-v7.x defaults can be around 400 peaks/s depending on preferences. Do not assume
-a fixed fine division: either mirror the user's REAPER configuration or reuse
-an existing `.reapeaks` file's positive division factors.
+160/2400/48000 at 48 kHz. At 22,051 Hz REAPER selected 73/1168/22192 in the
+fresh-process oracle. Do not assume fixed divisions: mirror the user's REAPER
+configuration or reuse an existing `.reapeaks` file's positive division factors.
 
 ## Documentation
 
 - [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md)
+- [`docs/validation-summary.json`](docs/validation-summary.json)
 - [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md)
 - [`docs/C_ABI.md`](docs/C_ABI.md)
 
