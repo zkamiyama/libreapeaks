@@ -17,7 +17,16 @@ pub mod ffi;
 pub mod format;
 pub mod generate;
 pub mod pyramid;
+
+#[cfg(feature = "strict-wdl")]
+#[path = "spectral.rs"]
+mod spectral_base;
+#[cfg(feature = "strict-wdl")]
+#[path = "spectral_strict.rs"]
 pub mod spectral;
+#[cfg(not(feature = "strict-wdl"))]
+pub mod spectral;
+
 pub mod texture;
 pub mod wave;
 
