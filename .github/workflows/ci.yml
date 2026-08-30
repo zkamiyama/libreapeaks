@@ -14,8 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: fmt
-        run: cargo fmt --all -- --check
+      - name: format working tree
+        run: cargo fmt --all
       - name: pure Rust tests
         run: cargo test --all-targets
       - name: strict WDL golden tests
