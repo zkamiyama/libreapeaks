@@ -15,16 +15,58 @@
 #include "fft.h"
 #include "resample.h"
 
+// Compile the pinned upstream implementation verbatim in this translation
+// unit. This does not modify WDL; it only lets our wrapper rebuild its
+// file-local twiddle/permutation tables at media boundaries.
+#include "fft.c"
+
 namespace {
 
-void rpk_wdl_fft_init_once() {
-    // WDL's WDL_fft_init() uses a plain static int guard and sets it before
-    // filling its process-global twiddle/permutation tables. Concurrent first
-    // calls can therefore observe partially initialized tables. Strict mode is
-    // callable from parallel Rust/Python workers, so complete WDL's one-time
-    // initialization under C++'s thread-safe once primitive before any FFT.
-    static std::once_flag once;
-    std::call_once(once, [] { WDL_fft_init(); });
+std::mutex &rpk_wdl_fft_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool &rpk_wdl_fft_initialized() {
+    static bool initialized = false;
+    return initialized;
+}
+
+void rpk_wdl_fft_ensure_unlocked() {
+    if (!rpk_wdl_fft_initialized()) {
+        WDL_fft_init();
+        rpk_wdl_fft_initialized() = true;
+    }
+}
+
+void rpk_wdl_fft_rebuild_unlocked() {
+    // Reproduce WDL_fft_init()'s table generation exactly, but do it at every
+    // media boundary. The upstream guard is function-local and intentionally
+    // one-shot; rebuilding here prevents one source from influencing the next
+    // if any table storage is disturbed by prior processing.
+#define RPK_FFT_GEN(x, y, z) __fft_gen(x, y, sizeof(x) / sizeof(x[0]), z)
+    RPK_FFT_GEN(d16, nullptr, 1);
+    RPK_FFT_GEN(d32, d16, 1);
+    RPK_FFT_GEN(d64, d32, 1);
+    RPK_FFT_GEN(d128, d64, 1);
+    RPK_FFT_GEN(d256, d128, 1);
+    RPK_FFT_GEN(d512, d256, 1);
+    RPK_FFT_GEN(d1024, d512, 0);
+    RPK_FFT_GEN(d2048, d1024, 0);
+    RPK_FFT_GEN(d4096, d2048, 0);
+    RPK_FFT_GEN(d8192, d4096, 0);
+    RPK_FFT_GEN(d16384, d8192, 0);
+    RPK_FFT_GEN(d32768, d16384, 0);
+#undef RPK_FFT_GEN
+
+#ifndef WDL_FFT_NO_PERMUTE
+    int offs = 0;
+    for (int n = 2; n <= 32768; n *= 2) {
+        idx_perm_calc(offs, n);
+        offs += n;
+    }
+#endif
+    rpk_wdl_fft_initialized() = true;
 }
 
 class RpkFpEnvScope {
@@ -56,8 +98,6 @@ struct RpkIirCoeffs {
 };
 
 RpkIirCoeffs rpk_wdl_prefilter_coeffs(double ratio) {
-    // Mirrors WDL_Resampler_Filter::setParms() for the exact strict mode we
-    // use: filtercnt=1, sinc=false, source_rate > 22050, output_rate=22050.
     const double fpos2 = static_cast<double>(0.693f);
     const double q = static_cast<double>(0.707f);
     double fpos = 1.0 / ratio;
@@ -92,8 +132,6 @@ void rpk_wdl_filter_block(
     bool fade_in) {
     if (frames <= 0) return;
 
-    // WDL's ApplyBuffer() iterates channel first, then filter stage, then
-    // samples. Keep that ordering because strict compatibility is bit-exact.
     for (int ch = 0; ch < channels; ++ch) {
         RpkIirState &s = state[static_cast<size_t>(ch)];
         double v0 = 0.0;
@@ -127,9 +165,7 @@ long long rpk_local_wdl_linear_resample(
     double *output,
     long long output_capacity_frames) {
     const double ratio = input_rate / output_rate;
-    if (!(ratio > 1.0)) {
-        return -3; // strict spectral path only calls this for source_rate > 22050.
-    }
+    if (!(ratio > 1.0)) return -3;
 
 #ifdef WDL_DENORMAL_WANTS_SCOPED_FTZ
     WDL_denormal_ftz_scope ftz_force;
@@ -137,8 +173,6 @@ long long rpk_local_wdl_linear_resample(
 
     const RpkIirCoeffs co = rpk_wdl_prefilter_coeffs(ratio);
     std::vector<RpkIirState> filter_state(static_cast<size_t>(channels));
-
-    // REAPER 7.79 probes identify 2048 interleaved doubles per source feed.
     const int block_frames = std::max(1, 2048 / channels);
 
     std::vector<double> buffered;
@@ -147,9 +181,6 @@ long long rpk_local_wdl_linear_resample(
     long long out_pos = 0;
     double fracpos = 0.0;
     bool first_filter_block = true;
-
-    // WDL starts the pre-filter fade only for a newly activated near-unity
-    // varispeed path: 1/ratio >= 0.97.
     const bool near_unity = (1.0 / ratio) >= 0.97;
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
@@ -204,9 +235,6 @@ long long rpk_local_wdl_linear_resample(
 
         int returned = produced;
         if (eof) {
-            // Match WDL_Resampler::ResampleOut()'s flush adjustment: padded
-            // samples may be computed into the caller buffer, but they are not
-            // included in the returned valid-frame count.
             const double adj =
                 (srcpos - static_cast<double>(actual_frames)) / ratio;
             if (adj > 0.0) {
@@ -237,7 +265,9 @@ extern "C" {
 int rpk_wdl_real_fft_1024(const double *input, double *out_re, double *out_im) {
     if (!input || !out_re || !out_im) return -1;
     RpkFpEnvScope fp_env;
-    rpk_wdl_fft_init_once();
+    std::lock_guard<std::mutex> lock(rpk_wdl_fft_mutex());
+    rpk_wdl_fft_ensure_unlocked();
+
     double buf[1024];
     std::memcpy(buf, input, sizeof(buf));
     WDL_real_fft(buf, 1024, 0);
@@ -270,7 +300,11 @@ long long rpk_wdl_resample_all(
     }
 
     RpkFpEnvScope fp_env;
-    rpk_wdl_fft_init_once();
+    {
+        std::lock_guard<std::mutex> lock(rpk_wdl_fft_mutex());
+        rpk_wdl_fft_rebuild_unlocked();
+    }
+
     return rpk_local_wdl_linear_resample(
         input,
         input_frames,
