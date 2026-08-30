@@ -232,6 +232,18 @@ fn analyze_channel(
         fft_in[i & (FFT_N - 1)] += product as f64;
     }
     let spec = real_fft_1024(&fft_in);
+
+    // REAPER stores the current complex spectrum to its f32 phase-history
+    // buffer before checking whether the magnitude sum is zero.  Preserve that
+    // ordering so a zero frame still resets the next frame's phase reference.
+    let mut next = [C32::default(); HALF_BINS + 1];
+    for k in 0..=HALF_BINS {
+        next[k] = C32 {
+            re: spec[k].re as f32,
+            im: spec[k].im as f32,
+        };
+    }
+
     let mut mags = [0.0f64; HALF_BINS + 1];
     let mut mags_f32 = [0.0f32; HALF_BINS + 1];
     for k in 0..=HALF_BINS {
@@ -242,6 +254,11 @@ fn analyze_channel(
         };
         mags[k] = m;
         mags_f32[k] = m as f32;
+    }
+
+    let total: f64 = mags.iter().sum();
+    if total <= 0.0 {
+        return (SpectralPeak::default(), next);
     }
 
     // REAPER initializes the candidate to Nyquist and scans bins 1..511.
@@ -276,25 +293,15 @@ fn analyze_channel(
     // Exact formula recovered from REAPER 7.79 x86_64 disassembly.  The total
     // magnitude remains f64, while each magnitude in the second moment is
     // explicitly rounded to f32 first.
-    let total: f64 = mags.iter().sum();
     let mut spread = 0.0f64;
     for k in 0..=HALF_BINS {
         let d = k as f64 - best_bin;
         spread += mags_f32[k] as f64 * d * d;
     }
-    let density = if total <= 0.0 {
-        0
-    } else {
-        (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
-            .trunc()
-            .clamp(0.0, 16383.0) as u16
-    };
+    let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
+        .trunc()
+        .clamp(0.0, 16383.0) as u16;
 
-    // REAPER stores the previous complex spectrum in f32 for phase tracking.
-    let mut next = [C32::default(); HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        next[k] = C32 { re: spec[k].re as f32, im: spec[k].im as f32 };
-    }
     (SpectralPeak { frequency_hz, density }, next)
 }
 
@@ -331,8 +338,24 @@ fn build_fine_spectral_f64(
     let window: Vec<f32> = if nwin <= 1 {
         vec![1.0]
     } else {
+        // REAPER 7.79 stores only floor(N/2)+1 Hann coefficients.  It
+        // computes the angle increment once, advances the f64 phase with
+        // repeated addition, converts each coefficient to f32, then reuses
+        // the half table in reverse for the second half.  This is subtly
+        // different from evaluating cos(2*pi*i/(N-1)) independently.
+        let half = nwin / 2;
+        let step = 2.0 * PI / (nwin - 1) as f64;
+        let mut table = Vec::with_capacity(half + 1);
+        let mut angle = 0.0f64;
+        for _ in 0..=half {
+            table.push((0.5 - 0.5 * angle.cos()) as f32);
+            angle += step;
+        }
         (0..nwin)
-            .map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / (nwin - 1) as f64).cos()) as f32)
+            .map(|i| {
+                let j = if i <= half { i } else { nwin - i };
+                table[j]
+            })
             .collect()
     };
     let mut ring = vec![0.0f32; nwin * channels];
