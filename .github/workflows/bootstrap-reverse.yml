@@ -33,6 +33,9 @@ jobs:
           git switch reverse-engineering
           tar -xzf /tmp/libreapeaks.tar.gz
           rm -rf bootstrap .github/workflows/bootstrap.yml
+          # GitHub Actions' GITHUB_TOKEN cannot introduce a new workflow file.
+          # Add ci.yml afterward through the GitHub connector instead.
+          rm -f .github/workflows/ci.yml
 
           rm -rf third_party/WDL
           mkdir -p third_party
