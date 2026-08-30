@@ -188,6 +188,33 @@ WebGL/WebGPU/`ImageData` paths.
 
 See [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md).
 
+## Reference audio-player demos
+
+Two runnable reference players show the same tile model in desktop Qt and a
+browser. Both display tile boundaries/IDs and frontend LRU statistics so it is
+obvious when panning/zooming reuses cached 4096-peak tiles.
+
+```bash
+# Build the PyO3 module first.
+maturin develop --release
+
+# PySide6/QMediaPlayer desktop demo.
+python -m pip install PySide6
+python examples/pyside6_player.py /path/to/audio.wav
+
+# JavaScript/<audio> browser demo backed by a thin libreapeaks tile server.
+python examples/web_player/server.py /path/to/audio.wav
+# open http://127.0.0.1:8765/
+```
+
+The demos exercise `open`, `levels`, `plan_view`, `tiles_for_view`,
+`tile_texture`, `spectral_tile_texture`, `render_rgba`, `envelope_texture`,
+`default_divisions`, and—when a PCM16/float32 WAV cache must be built—
+`generate_pcm16` / `generate_f32`.
+
+See [`examples/PLAYER_DEMOS.md`](examples/PLAYER_DEMOS.md) for architecture,
+controls, cache-generation behavior, and the complete API-usage matrix.
+
 ## Important compatibility note
 
 REAPER's peak rate is a preference. The main oracle configuration uses
@@ -202,6 +229,7 @@ configuration or reuse an existing `.reapeaks` file's positive division factors.
 - [`docs/validation-summary.json`](docs/validation-summary.json)
 - [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md)
 - [`docs/C_ABI.md`](docs/C_ABI.md)
+- [`examples/PLAYER_DEMOS.md`](examples/PLAYER_DEMOS.md)
 
 ## Third-party code
 
