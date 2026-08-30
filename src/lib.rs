@@ -1,3 +1,17 @@
+// REAPER-compatibility code intentionally preserves recovered control flow,
+// arithmetic spelling, and C ABI shapes. Keep these exceptions explicit so
+// `clippy -D warnings` still rejects every other diagnostic.
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    clippy::manual_checked_ops,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_is_multiple_of,
+    clippy::missing_safety_doc,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+)]
+
 pub mod error;
 pub mod ffi;
 pub mod format;
