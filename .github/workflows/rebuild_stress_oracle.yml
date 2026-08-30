@@ -1,0 +1,50 @@
+name: rebuild-stress-oracle
+
+on:
+  push:
+    branches: [spectral-stress-validation]
+    paths:
+      - .github/workflows/rebuild_stress_oracle.yml
+      - tools/reaper_oracle/gen_stress_media.py
+  workflow_dispatch:
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install REAPER runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libx11-6 libxext6 libxinerama1 libxcursor1 libasound2t64
+
+      - name: Generate stress media from manifest recipes
+        run: |
+          python tools/reaper_oracle/gen_stress_media.py \
+            --manifest tests/data/spectral_stress_oracle.tsv \
+            --out-dir /tmp/reapeaks-stress-media
+          find /tmp/reapeaks-stress-media -maxdepth 1 -type f -name '*.wav' | sort
+
+      - name: Download and verify REAPER 7.79
+        run: |
+          curl -fL --retry 5 --retry-delay 2 \
+            -o /tmp/reaper779_linux_x86_64.tar.xz \
+            https://reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz
+          echo 'fda68a75e040daa4ee03c3e908a9f8efdc7f364fe485c12f7c6261eb2e7aff3dc6b3621d0b77c6385eacb8a239429469937383dfb2f29d79de22ed3869cdfa5b  /tmp/reaper779_linux_x86_64.tar.xz' | sha512sum -c -
+          mkdir -p /tmp/reaper779
+          tar -xJf /tmp/reaper779_linux_x86_64.tar.xz -C /tmp/reaper779
+          find /tmp/reaper779 -type f -name reaper -perm -111 -print
+
+      - name: Rebuild fresh-process oracle
+        run: |
+          REAPER_BIN="$(find /tmp/reaper779 -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          python tools/reaper_oracle/run_fresh.py \
+            --reaper "$REAPER_BIN" \
+            --media-dir /tmp/reapeaks-stress-media \
+            --peak-rate 300 | tee /tmp/reaper779-stress-oracle.txt
+          echo '--- REAPER 7.79 FRESH ORACLE BEGIN ---'
+          cat /tmp/reaper779-stress-oracle.txt
+          echo '--- REAPER 7.79 FRESH ORACLE END ---'
