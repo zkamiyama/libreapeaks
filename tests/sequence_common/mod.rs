@@ -2,7 +2,7 @@
 
 use reapeaks::{generate_pcm16, GenerateOptions, ReaPeaks};
 
-pub const TARGET_HASH: u64 = 0x1c8f_1796_8093_0120;
+pub const TARGET_HASH: u64 = 0x826b_dbbc_e8b3_9588;
 
 pub fn fnv64(codes: impl IntoIterator<Item = u32>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
