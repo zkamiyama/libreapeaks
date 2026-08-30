@@ -52,7 +52,10 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
     let mut len = 2usize;
     while len <= FFT_N {
         let theta = -2.0 * PI / len as f64;
-        let wlen = C64 { re: theta.cos(), im: theta.sin() };
+        let wlen = C64 {
+            re: theta.cos(),
+            im: theta.sin(),
+        };
         for base in (0..FFT_N).step_by(len) {
             let mut w = C64 { re: 1.0, im: 0.0 };
             for k in 0..len / 2 {
@@ -62,8 +65,14 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
                     re: q.re * w.re - q.im * w.im,
                     im: q.re * w.im + q.im * w.re,
                 };
-                a[base + k] = C64 { re: u.re + v.re, im: u.im + v.im };
-                a[base + k + len / 2] = C64 { re: u.re - v.re, im: u.im - v.im };
+                a[base + k] = C64 {
+                    re: u.re + v.re,
+                    im: u.im + v.im,
+                };
+                a[base + k + len / 2] = C64 {
+                    re: u.re - v.re,
+                    im: u.im - v.im,
+                };
                 w = C64 {
                     re: w.re * wlen.re - w.im * wlen.im,
                     im: w.re * wlen.im + w.im * wlen.re,
@@ -78,21 +87,18 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
 #[cfg(feature = "strict-wdl")]
 fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
     unsafe extern "C" {
-        fn rpk_wdl_real_fft_1024(
-            input: *const f64,
-            out_re: *mut f64,
-            out_im: *mut f64,
-        ) -> i32;
+        fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
     }
     let mut re = [0.0f64; HALF_BINS + 1];
     let mut im = [0.0f64; HALF_BINS + 1];
-    let rc = unsafe {
-        rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr())
-    };
+    let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
     assert_eq!(rc, 0, "WDL FFT bridge failed");
     let mut out = [C64::default(); HALF_BINS + 1];
     for k in 0..=HALF_BINS {
-        out[k] = C64 { re: re[k], im: im[k] };
+        out[k] = C64 {
+            re: re[k],
+            im: im[k],
+        };
     }
     out
 }
@@ -234,7 +240,7 @@ fn analyze_channel(
     let spec = real_fft_1024(&fft_in);
 
     // REAPER stores the current complex spectrum to its f32 phase-history
-    // buffer before checking whether the magnitude sum is zero.  Preserve that
+    // buffer before checking whether the magnitude sum is zero. Preserve that
     // ordering so a zero frame still resets the next frame's phase reference.
     let mut next = [C32::default(); HALF_BINS + 1];
     for k in 0..=HALF_BINS {
@@ -290,7 +296,7 @@ fn analyze_channel(
         .trunc()
         .clamp(0.0, 32767.0) as u16;
 
-    // Exact formula recovered from REAPER 7.79 x86_64 disassembly.  The total
+    // Exact formula recovered from REAPER 7.79 x86_64 disassembly. The total
     // magnitude remains f64, while each magnitude in the second moment is
     // explicitly rounded to f32 first.
     let mut spread = 0.0f64;
@@ -302,15 +308,22 @@ fn analyze_channel(
         .trunc()
         .clamp(0.0, 16383.0) as u16;
 
-    (SpectralPeak { frequency_hz, density }, next)
+    (
+        SpectralPeak {
+            frequency_hz,
+            density,
+        },
+        next,
+    )
 }
 
-fn build_fine_spectral_f64(
+fn build_fine_spectral_f64_impl(
     source: &[f64],
     frames: usize,
     channels: usize,
     source_rate: u32,
     division: u32,
+    expected_override: Option<usize>,
 ) -> Result<Vec<SpectralPeak>> {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidArgument("channels=0"));
@@ -319,9 +332,24 @@ fn build_fine_spectral_f64(
         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
     }
     if source.len() < frames.saturating_mul(channels) {
-        return Err(ReaPeaksError::InvalidArgument("PCM buffer shorter than frames*channels"));
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
     }
-    if frames <= 1024 {
+
+    // Normal mode deliberately keeps the historical source-domain termination
+    // rule. Strict mode supplies REAPER's analysis-domain count here, without
+    // changing the source slice or the frame count seen by WDL_Resampler.
+    let expected = match expected_override {
+        Some(expected) => expected,
+        None => {
+            if frames <= 1024 {
+                return Ok(Vec::new());
+            }
+            (frames - 1024) / division as usize
+        }
+    };
+    if expected == 0 {
         return Ok(Vec::new());
     }
 
@@ -338,10 +366,10 @@ fn build_fine_spectral_f64(
     let window: Vec<f32> = if nwin <= 1 {
         vec![1.0]
     } else {
-        // REAPER 7.79 stores only floor(N/2)+1 Hann coefficients.  It
+        // REAPER 7.79 stores only floor(N/2)+1 Hann coefficients. It
         // computes the angle increment once, advances the f64 phase with
         // repeated addition, converts each coefficient to f32, then reuses
-        // the half table in reverse for the second half.  This is subtly
+        // the half table in reverse for the second half. This is subtly
         // different from evaluating cos(2*pi*i/(N-1)) independently.
         let half = nwin / 2;
         let step = 2.0 * PI / (nwin - 1) as f64;
@@ -362,7 +390,6 @@ fn build_fine_spectral_f64(
     let mut write_pos = 0usize;
     let mut elapsed = 0usize;
     let mut previous = vec![[C32::default(); HALF_BINS + 1]; channels];
-    let expected = (frames - 1024) / division as usize;
     let mut out = Vec::with_capacity(expected * channels);
 
     'samples: for f in 0..out_frames {
@@ -400,6 +427,28 @@ fn build_fine_spectral_f64(
     Ok(out)
 }
 
+fn source_from_i16(pcm: &[i16], frames: usize, channels: usize) -> Result<Vec<f64>> {
+    Ok(pcm
+        .get(..frames.saturating_mul(channels))
+        .ok_or(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ))?
+        .iter()
+        .map(|&v| v as f64 / 32768.0)
+        .collect())
+}
+
+fn source_from_f32(pcm: &[f32], frames: usize, channels: usize) -> Result<Vec<f64>> {
+    Ok(pcm
+        .get(..frames.saturating_mul(channels))
+        .ok_or(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ))?
+        .iter()
+        .map(|&v| v as f64)
+        .collect())
+}
+
 pub fn build_fine_spectral(
     pcm: &[i16],
     frames: usize,
@@ -407,13 +456,8 @@ pub fn build_fine_spectral(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    let source: Vec<f64> = pcm
-        .get(..frames.saturating_mul(channels))
-        .ok_or(ReaPeaksError::InvalidArgument("PCM buffer shorter than frames*channels"))?
-        .iter()
-        .map(|&v| v as f64 / 32768.0)
-        .collect();
-    build_fine_spectral_f64(&source, frames, channels, source_rate, division)
+    let source = source_from_i16(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
 }
 
 pub fn build_fine_spectral_f32(
@@ -423,13 +467,48 @@ pub fn build_fine_spectral_f32(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    let source: Vec<f64> = pcm
-        .get(..frames.saturating_mul(channels))
-        .ok_or(ReaPeaksError::InvalidArgument("PCM buffer shorter than frames*channels"))?
-        .iter()
-        .map(|&v| v as f64)
-        .collect();
-    build_fine_spectral_f64(&source, frames, channels, source_rate, division)
+    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_with_expected(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+    expected: usize,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_i16(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        Some(expected),
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_with_expected(
+    pcm: &[f32],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+    expected: usize,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        Some(expected),
+    )
 }
 
 /// REAPER 7.79 aggregation observed for spectral mipmaps: each coarser output
@@ -483,7 +562,11 @@ fn assemble_spectral_layers(
         return Ok(Vec::new());
     }
     let fine_div = divisions[0];
-    let fine_count = if channels == 0 { 0 } else { fine.len() / channels };
+    let fine_count = if channels == 0 {
+        0
+    } else {
+        fine.len() / channels
+    };
     let mut out = Vec::with_capacity(divisions.len());
 
     for (li, &div) in divisions.iter().enumerate() {
