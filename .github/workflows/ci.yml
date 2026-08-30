@@ -20,8 +20,13 @@ jobs:
         run: cargo test --all-targets
       - name: strict WDL golden tests (release math)
         run: cargo test --release --all-targets --features strict-wdl
-      - name: fresh-process spectral corpus diagnostic
-        run: cargo test --release --test spectral_corpus_diagnostic --features strict-wdl -- --nocapture
+      - name: fresh-process spectral corpus exactness gate
+        shell: bash
+        run: |
+          set -o pipefail
+          output="$(cargo test --release --test spectral_corpus_diagnostic --features strict-wdl -- --nocapture 2>&1)"
+          printf '%s\n' "$output"
+          grep -Fq 'SPECTRAL_CORPUS summary cases=188 oracle_points=10112 exact_cases=188 exact_points=10112 count_mismatch=0 hash_mismatch=0' <<<"$output"
       - name: clippy
         run: cargo clippy --all-targets --features strict-wdl -- -D warnings
 
