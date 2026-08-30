@@ -19,6 +19,11 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .define("WDL_FFT_REALSIZE", Some("8"))
+        // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
+        // exact SSE2 mask emitted by WDL when this define is active. Without
+        // it, tiny IIR tails survive and produce non-zero spectral codes after
+        // impulse material where REAPER has already flushed to silence.
+        .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
         .include(wdl)
         .file(wdl.join("fft.c"))
         .file(wdl.join("resample.cpp"))
