@@ -1,0 +1,43 @@
+{
+  "oracle": "REAPER 7.79 x86_64 Linux",
+  "date": "2026-08-30",
+  "reaper_preferences": {
+    "peakcachegenmode": 3,
+    "peakcachegenrs": 300
+  },
+  "wave": {
+    "pcm16_exhaustive_input_values": 65536,
+    "total_compared_buckets": 122516,
+    "exact_buckets": 122516,
+    "rpkn_pcm24_constant_buckets": 50000,
+    "rpkn_pcm24_exact": 50000,
+    "rpkl_float_constant_buckets": 43857,
+    "rpkl_float_exact": 43857
+  },
+  "spectral_pre_wdl": {
+    "files": 131,
+    "fine_points": 34127,
+    "frequency_exact": 34040,
+    "density_exact": 31848,
+    "full_code_exact": 31776
+  },
+  "spectral_aggregate": {
+    "tested_points": 3219,
+    "exact_points": 3219
+  },
+  "format_probe": {
+    "integer_payload_equivalence": [
+      "WAV PCM16",
+      "WAV PCM24",
+      "WAV PCM32",
+      "FLAC16",
+      "FLAC24"
+    ],
+    "rpkl_sources_observed": [
+      "WAV float32",
+      "MP3",
+      "Vorbis",
+      "Opus"
+    ]
+  }
+}

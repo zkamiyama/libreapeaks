@@ -1,0 +1,22 @@
+[package]
+name = "libreapeaks"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "REAPER .ReaPeaks parser/generator, multiresolution waveform pyramid, and GUI texture core"
+repository = "https://github.com/zkamiyama/libreapeaks"
+
+[lib]
+name = "reapeaks"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+strict-wdl = []
+
+[dependencies]
+pyo3 = { version = "0.29.2", optional = true, features = ["extension-module", "abi3-py310"] }
+
+[build-dependencies]
+cc = "1.2"
