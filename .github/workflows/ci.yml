@@ -18,6 +18,8 @@ jobs:
         run: cargo fmt --all
       - name: pure Rust tests
         run: cargo test --all-targets
+      - name: near-unity WDL block-size diagnostic
+        run: cargo test --release --test spectral_block_sweep --features strict-wdl -- --nocapture
       - name: strict WDL golden tests (release math)
         run: cargo test --release --all-targets --features strict-wdl
       - name: fresh-process spectral corpus exactness gate
