@@ -46,18 +46,6 @@ long long rpk_wdl_resample_all(
         return -1;
     }
 
-    // Diagnostic probe: REAPER's spectral path changes abruptly immediately
-    // above 22.05 kHz. Test whether the 22051 -> 22050 case bypasses WDL
-    // resampling altogether. The pointwise fresh-process oracle decides this;
-    // this branch is intentionally narrow and will be removed or generalized
-    // after the experiment.
-    if (input_rate == 22051.0 && output_rate == 22050.0) {
-        const long long n = std::min(input_frames, output_capacity_frames);
-        std::memcpy(output, input,
-                    static_cast<size_t>(n) * static_cast<size_t>(channels) * sizeof(double));
-        return n;
-    }
-
     WDL_Resampler rs;
     rs.SetMode(true, 1, false, 64, 32);
     rs.SetFeedMode(true);
@@ -66,34 +54,41 @@ long long rpk_wdl_resample_all(
     long long in_pos = 0;
     long long out_pos = 0;
 
-    // REAPER 7.79's ReaPeaks builder allocates a 4096-sample double buffer
-    // and divides it by the channel count. It feeds the resampler in chunks
-    // of at most that many frames and uses the same value as ResampleOut's
-    // output-frame capacity. Matching this call schedule matters at startup
-    // and around impulses because the default WDL IIR filter is stateful.
+    // REAPER 7.79's ReaPeaks builder uses a 4096-double source work buffer,
+    // divided by channel count. In feed mode we always tell WDL how large that
+    // input block is. On the final media block we then provide fewer samples
+    // than ResamplePrepare() returned. WDL documents this exact condition as
+    // its EOF/flush path; it preserves the real media length while releasing
+    // the resampler/filter latency. This is observably different from either
+    // declaring zero padding as extra media or suppressing the final flush.
     const int block_frames = std::max(1, 4096 / channels);
 
     while (in_pos < input_frames && out_pos < output_capacity_frames) {
-        const int avail = static_cast<int>(
-            std::min<long long>(block_frames, input_frames - in_pos));
         WDL_ResampleSample *inbuf = nullptr;
-        const int wanted = rs.ResamplePrepare(avail, channels, &inbuf);
+        const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
         if (wanted <= 0 || !inbuf) break;
-        // In REAPER 7.79 this return value is compared to the requested block
-        // and the peak-building pass aborts on a mismatch.
-        if (wanted != avail) return -3;
-        std::memcpy(
-            inbuf,
-            input + in_pos * channels,
-            static_cast<size_t>(avail) * static_cast<size_t>(channels) * sizeof(double));
+
+        const int avail = static_cast<int>(std::min<long long>(
+            wanted, input_frames - in_pos));
+        if (avail > 0) {
+            std::memcpy(
+                inbuf,
+                input + in_pos * channels,
+                static_cast<size_t>(avail) * static_cast<size_t>(channels) * sizeof(double));
+        }
 
         const int out_cap = static_cast<int>(std::min<long long>(
             block_frames, output_capacity_frames - out_pos));
         const int got = rs.ResampleOut(
             output + out_pos * channels, avail, out_cap, channels);
         if (got < 0) return -2;
+
         in_pos += avail;
         out_pos += got;
+
+        // avail < wanted is the documented flush signal. There is no more real
+        // source after this call; do not invent another media block.
+        if (avail < wanted) break;
     }
     return out_pos;
 }
