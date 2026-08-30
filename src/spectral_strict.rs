@@ -115,27 +115,81 @@ fn build_high_rate_f32(
     )
 }
 
-fn zero_layers(
-    frames: usize,
-    channels: usize,
-    divisions: &[u32],
-) -> Result<Vec<GeneratedLayer>> {
+fn validate_divisions(divisions: &[u32]) -> Result<u32> {
     if divisions.is_empty() {
-        return Ok(Vec::new());
+        return Err(ReaPeaksError::InvalidArgument("no spectral divisions"));
     }
     let fine_div = divisions[0];
     if fine_div == 0 {
         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
     }
-    let fine_count = low_rate_fine_count(frames, fine_div);
-    let mut out = Vec::with_capacity(divisions.len());
-
-    for (li, &div) in divisions.iter().enumerate() {
+    for &div in divisions {
         if div == 0 || div % fine_div != 0 {
             return Err(ReaPeaksError::Unsupported(
                 "spectral divisions must be nonzero multiples of fine division",
             ));
         }
+    }
+    Ok(fine_div)
+}
+
+fn encode_layer(peaks: &[SpectralPeak], channels: usize) -> GeneratedLayer {
+    let mut bytes = Vec::with_capacity(peaks.len() * 4);
+    for p in peaks {
+        bytes.extend_from_slice(&p.code().to_le_bytes());
+    }
+    GeneratedLayer {
+        header: LayerHeader {
+            division: TOKEN_SPECTRAL,
+            peak_count: if channels == 0 {
+                0
+            } else {
+                (peaks.len() / channels) as u32
+            },
+        },
+        bytes,
+    }
+}
+
+fn assemble_high_rate_layers(
+    fine: &[SpectralPeak],
+    channels: usize,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
+    let fine_div = validate_divisions(divisions)?;
+    let fine_count = fine.len() / channels;
+    let mut out = Vec::with_capacity(divisions.len());
+
+    for (li, &div) in divisions.iter().enumerate() {
+        let ratio = (div / fine_div) as usize;
+        let peaks = if li == 0 {
+            fine.to_vec()
+        } else {
+            // REAPER's mipmaps are assembled directly from the fine spectral
+            // stream. Counts are therefore floor(fine_count / ratio), not a
+            // second source-domain scheduler calculation. This is observable
+            // in the low-rate quirk and is byte-exact for the independent
+            // REAPER 7.79 spectral0/spectral1 golden fixtures at 44.1 kHz.
+            let count = fine_count / ratio;
+            crate::spectral_base::aggregate_spectral_from_fine(
+                fine, channels, ratio, count,
+            )
+        };
+        out.push(encode_layer(&peaks, channels));
+    }
+    Ok(out)
+}
+
+fn zero_layers(
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
+    let fine_div = validate_divisions(divisions)?;
+    let fine_count = low_rate_fine_count(frames, fine_div);
+    let mut out = Vec::with_capacity(divisions.len());
+
+    for (li, &div) in divisions.iter().enumerate() {
         let ratio = (div / fine_div) as usize;
         // REAPER's coarser low-rate spectral levels are derived from the fine
         // level; their counts are floor(fine_count / ratio).
@@ -202,19 +256,17 @@ pub fn build_spectral_layers(
     if divisions.is_empty() {
         return Ok(Vec::new());
     }
+    validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        // Fine-level exactness is gated independently. The high-rate coarse
-        // assembler is kept on the historical path until its own full-mipmap
-        // fresh-process oracle is added.
-        return crate::spectral_base::build_spectral_layers(
+        let fine = build_high_rate_i16(
             pcm,
             frames,
             channels,
             source_rate,
-            divisions,
-        );
+            divisions[0],
+        )?;
+        return assemble_high_rate_layers(&fine, channels, divisions);
     }
-    validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     zero_layers(frames, channels, divisions)
 }
 
@@ -228,16 +280,17 @@ pub fn build_spectral_layers_f32(
     if divisions.is_empty() {
         return Ok(Vec::new());
     }
+    validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        return crate::spectral_base::build_spectral_layers_f32(
+        let fine = build_high_rate_f32(
             pcm,
             frames,
             channels,
             source_rate,
-            divisions,
-        );
+            divisions[0],
+        )?;
+        return assemble_high_rate_layers(&fine, channels, divisions);
     }
-    validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     zero_layers(frames, channels, divisions)
 }
 
@@ -277,6 +330,25 @@ mod tests {
             assert_eq!(high_rate_fine_count(frames, rate, division), expected);
             assert_eq!(reaper_fine_count(frames, rate, division), expected);
         }
+    }
+
+    #[test]
+    fn high_rate_full_layers_preserve_exact_fine_scheduler() {
+        let pcm = vec![1234i16; 5000];
+        let fine = build_fine_spectral(&pcm, 5000, 1, 22_051, 73).unwrap();
+        assert_eq!(fine.len(), 61);
+
+        let layers = build_spectral_layers(&pcm, 5000, 1, 22_051, &[73, 1095, 21900])
+            .unwrap();
+        assert_eq!(layers[0].header.peak_count, 61);
+        assert_eq!(layers[1].header.peak_count, 4);
+        assert_eq!(layers[2].header.peak_count, 0);
+
+        let mut fine_bytes = Vec::with_capacity(fine.len() * 4);
+        for p in &fine {
+            fine_bytes.extend_from_slice(&p.code().to_le_bytes());
+        }
+        assert_eq!(layers[0].bytes, fine_bytes);
     }
 
     #[test]
