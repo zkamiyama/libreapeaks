@@ -13,6 +13,21 @@ const EXPECTED_FIRST64: [u32; 64] = [
     377193480,377226248,377324552,377979912,377619464,378242056,377750536,378078216,
 ];
 
+const EXPECTED_CHUNK_FNV64: [u64; 47] = [
+    0x1ca780af163c25ab, 0x522ec181ae2dbd6f, 0xec4dfdbb01b34ea4, 0xa5971f64af61a888,
+    0xf9373eb33d13fbb2, 0x7ca47b71917f4433, 0xd95f9e8d4f52440e, 0xf52cd00fb1fc9cd7,
+    0x0d67096ad828079c, 0x61f35bca2b8aaf2c, 0x860d9a703bebd821, 0x70fcdd546aa1dc1a,
+    0x22a41f62b191f655, 0x05a4ed497280e5ea, 0xed90dd3f4e0549ce, 0x67797caef14ab3a3,
+    0xf472d7f1db932136, 0x9433e0df92dd8f19, 0x2210154c6f7c2ff8, 0x4b54d26499a1b9cd,
+    0x7ba66845ccb33101, 0x6064f6f2cf143f71, 0x016c2f9889df2222, 0x955e4e130ab16f4a,
+    0x72f09e5955a36483, 0x4d2872fcf2a6da7a, 0x36cbf58166878c3a, 0x7d31305bdb9a8239,
+    0x1ac6b6239f34b770, 0xa4f25ccdac6c8a3c, 0xa55b42b348d1efe8, 0x4ddd80f0f515911d,
+    0x79804842171bf7e5, 0x25424a62e4d693c8, 0x84a561d492617a2d, 0xc8b0ca0a8ed76a28,
+    0x9159cba04017dfd9, 0x4488fcf43efb3338, 0x2357b7842924212b, 0x72be0fd3d0e29fc8,
+    0xcfaab5542ec84e88, 0xb2be9ae0660f181a, 0xbc446dea181b7f08, 0xdde07b17e3365239,
+    0x0f5a437a6d0e176f, 0xc50777d48ebf7f95, 0x81f2928504b4a523,
+];
+
 fn pcm() -> Vec<i16> {
     let frames = 160_031usize;
     let channels = 2usize;
@@ -39,6 +54,17 @@ fn pcm_fnv64(samples: &[i16]) -> u64 {
     hash
 }
 
+fn code_fnv64(codes: impl IntoIterator<Item = u32>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for code in codes {
+        for byte in code.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
 #[test]
 fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
     let pcm = pcm();
@@ -54,7 +80,7 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
     };
     let parsed = ReaPeaks::parse(generate_pcm16(&pcm, &options).unwrap()).unwrap();
     let got = &parsed.spectral_layers[0].peaks;
-    assert!(got.len() >= EXPECTED_FIRST64.len());
+    assert_eq!(got.len(), 3006);
 
     for (index, (&expected, peak)) in EXPECTED_FIRST64.iter().zip(got.iter()).enumerate() {
         let actual = peak.code();
@@ -68,6 +94,19 @@ fn two32000_s2_input_and_first_codes_match_reaper_oracle() {
             peak.density,
             expected & 0x7fff,
             (expected >> 15) & 0x3fff,
+        );
+    }
+
+    for (chunk_index, &expected_hash) in EXPECTED_CHUNK_FNV64.iter().enumerate() {
+        let start = chunk_index * 64;
+        let end = (start + 64).min(got.len());
+        let actual_hash = code_fnv64(got[start..end].iter().map(|peak| peak.code()));
+        assert_eq!(
+            actual_hash,
+            expected_hash,
+            "first mismatching chunk={chunk_index} code_range={start}..{end} frame_range={}..{}",
+            start / 2,
+            (end.saturating_sub(1)) / 2,
         );
     }
 }
