@@ -46,6 +46,18 @@ long long rpk_wdl_resample_all(
         return -1;
     }
 
+    // Diagnostic probe: REAPER's spectral path changes abruptly immediately
+    // above 22.05 kHz. Test whether the 22051 -> 22050 case bypasses WDL
+    // resampling altogether. The pointwise fresh-process oracle decides this;
+    // this branch is intentionally narrow and will be removed or generalized
+    // after the experiment.
+    if (input_rate == 22051.0 && output_rate == 22050.0) {
+        const long long n = std::min(input_frames, output_capacity_frames);
+        std::memcpy(output, input,
+                    static_cast<size_t>(n) * static_cast<size_t>(channels) * sizeof(double));
+        return n;
+    }
+
     WDL_Resampler rs;
     rs.SetMode(true, 1, false, 64, 32);
     rs.SetFeedMode(true);
