@@ -29,24 +29,20 @@ extern "C" {
 int rpk_wdl_real_fft_1024(const double *input, double *out_re, double *out_im) {
     if (!input || !out_re || !out_im) return -1;
     rpk_wdl_fft_init_once();
-
     double buf[1024];
     std::memcpy(buf, input, sizeof(buf));
     WDL_real_fft(buf, 1024, 0);
 
-    // WDL_real_fft stores 512 permuted complex pairs directly in the packed
-    // double buffer. Read those pairs through the buffer's declared type rather
-    // than reinterpret_casting double[] to WDL_FFT_COMPLEX*, which is undefined
-    // under C++ strict-aliasing and produced executable-layout-dependent output.
-    out_re[0] = buf[0];
+    auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+    out_re[0] = c[0].re;
     out_im[0] = 0.0;
-    out_re[512] = buf[1];
+    out_re[512] = c[0].im;
     out_im[512] = 0.0;
     int *perm = WDL_fft_permute_tab(512);
     for (int k = 1; k < 512; ++k) {
         const int j = perm[k];
-        out_re[k] = buf[2 * j];
-        out_im[k] = buf[2 * j + 1];
+        out_re[k] = c[j].re;
+        out_im[k] = c[j].im;
     }
     return 0;
 }
