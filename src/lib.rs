@@ -18,7 +18,12 @@ pub mod format;
 pub mod generate;
 pub mod pyramid;
 
+// Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
+// deliberately bypasses its public source-domain scheduler entrypoints. Those
+// entrypoints remain live in the normal build; suppress dead-code only on this
+// private strict alias so `clippy -D warnings` keeps its normal coverage.
 #[cfg(feature = "strict-wdl")]
+#[allow(dead_code)]
 #[path = "spectral.rs"]
 mod spectral_base;
 #[cfg(feature = "strict-wdl")]
