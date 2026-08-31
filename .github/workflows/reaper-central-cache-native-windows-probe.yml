@@ -1,0 +1,80 @@
+name: reaper-central-cache-native-windows-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths: ['.github/workflows/reaper-central-cache-native-windows-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract portable REAPER 7.79 x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'reaper-install.exe'
+          $extract = Join-Path $env:RUNNER_TEMP 'reaper-extracted'
+          $portable = Join-Path $env:RUNNER_TEMP 'REAPER-portable'
+          Invoke-WebRequest -Uri 'https://www.reaper.fm/files/7.x/reaper779_x64-install.exe' -OutFile $installer
+          New-Item -ItemType Directory -Force -Path $extract,$portable | Out-Null
+          & 7z x -y $installer "-o$extract" | Out-File (Join-Path $env:RUNNER_TEMP 'reaper-7z.log')
+          $exe = Get-ChildItem $extract -Filter reaper.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'reaper.exe not found after extraction' }
+          Copy-Item -Recurse -Force (Join-Path $exe.DirectoryName '*') $portable
+          "REAPER_EXE=$(Join-Path $portable 'reaper.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "REAPER_PORTABLE=$portable" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Query GetPeakFileNameEx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'central-probe'
+          $cache = Join-Path $root 'cache'
+          $media = Join-Path $root 'Media'
+          New-Item -ItemType Directory -Force -Path $root,$cache,$media | Out-Null
+          $paths = @(
+            (Join-Path $media 'UPPER.WAV'),
+            (Join-Path $media 'upper.wav'),
+            (Join-Path $media 'ÄÖÜ.WAV'),
+            (Join-Path $media 'äöü.wav'),
+            (Join-Path $media 'I.WAV'),
+            (Join-Path $media 'i.wav'),
+            ($media + '\.\UPPER.WAV'),
+            ($media + '\sub\..\UPPER.WAV'),
+            'relative\Path\Take.WAV',
+            'C:\Users\Example\Audio\Take.WAV',
+            '\\server\share\Folder\Take.WAV'
+          )
+          $manifest = Join-Path $root 'paths.txt'
+          $result = Join-Path $root 'results.json'
+          $ini = Join-Path $root 'reaper.ini'
+          $script = (Resolve-Path 'tools/reaper_oracle/query_peak_paths.lua').Path
+          [IO.File]::WriteAllLines($manifest, $paths, [Text.UTF8Encoding]::new($false))
+          $iniText = "[REAPER]`naltpeaks=1`naltpeakspath=$cache`npeakcachegenrs=300`n"
+          [IO.File]::WriteAllText($ini, $iniText, [Text.UTF8Encoding]::new($false))
+          $env:REAPEAKS_MANIFEST = $manifest
+          $env:REAPEAKS_RESULT = $result
+          $process = Start-Process -FilePath $env:REAPER_EXE -ArgumentList @('-newinst','-cfgfile',$ini,'-new','-nosplash',$script) -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'REAPER timed out'
+          }
+          if (-not (Test-Path $result)) { throw "result not created; exit=$($process.ExitCode)" }
+          Get-Content $result
+          "PROBE_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-central-cache-native-windows-${{ github.sha }}
+          path: |
+            ${{ env.PROBE_ROOT }}/results.json
+            ${{ env.PROBE_ROOT }}/paths.txt
+            ${{ env.PROBE_ROOT }}/reaper.ini
+            ${{ runner.temp }}/reaper-7z.log
+          if-no-files-found: warn
+          retention-days: 7
