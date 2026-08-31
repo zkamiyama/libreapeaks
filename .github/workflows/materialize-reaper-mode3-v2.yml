@@ -30,8 +30,54 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/patches/reaper-mode3.part{00..08}.b64 > /tmp/reaper-mode3.patch.gz.b64
-          test "$(wc -c < /tmp/reaper-mode3.patch.gz.b64)" -eq 10696
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          root = Path('.github/patches')
+          parts = [(root / f'reaper-mode3.part{i:02}.b64').read_text() for i in range(9)]
+          expected = [
+              '8b07fb36fee959aa077ef66e18ecb746a78190357cb4ec2350ced590fef6e91e',
+              '3820b3e58337c4b76f417fcf60aa907b85c8303d63a08e3fbf6e4cd96a3564b9',
+              '450b6b9f51eabf784908ca12b93969e252bc2f00bec5c3be7bdedbc0afe078d7',
+              'a72d5fa6a2188d65d941a13fe7c452c555a1ba47da52ebefabd79ff0ced4ec25',
+              'e85edc07bc4a50d9a86eef67ed2f076c39631691d751012f1595a63a37b8500d',
+              'd76e78731f2e539e8af5481a7157106deff249e1c9d2c56475643e4ea1368a28',
+              '3085346a37ff8d04360728971e3c64eb8772e95117bf5fb75dedacce6d436a11',
+              '31bde998b96da2208ee281737ebf33fcdab10d9b621d0caf4a8fbdcd8f792c8e',
+              'e002b6ebc5c7bd2077bd0887cb6f55d9464a8b73ef00836da19909a6e924b846',
+          ]
+
+          def digest(text):
+              return hashlib.sha256(text.encode()).hexdigest()
+
+          if digest(parts[5]) != expected[5]:
+              if len(parts[5]) != 1199:
+                  raise SystemExit(f'unexpected part05 length: {len(parts[5])}')
+              alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+              repaired = None
+              for position in range(len(parts[5]) + 1):
+                  for character in alphabet:
+                      candidate = parts[5][:position] + character + parts[5][position:]
+                      if digest(candidate) == expected[5]:
+                          repaired = candidate
+                          print(f'repaired part05 at offset {position} with {character!r}')
+                          break
+                  if repaired is not None:
+                      break
+              if repaired is None:
+                  raise SystemExit('could not reconstruct the single missing part05 byte')
+              parts[5] = repaired
+
+          for index, (part, wanted) in enumerate(zip(parts, expected)):
+              actual = digest(part)
+              if actual != wanted:
+                  raise SystemExit(f'part{index:02} hash mismatch: {actual} != {wanted}')
+          combined = ''.join(parts)
+          if len(combined) != 10696:
+              raise SystemExit(f'combined length mismatch: {len(combined)}')
+          Path('/tmp/reaper-mode3.patch.gz.b64').write_text(combined)
+          PY
           base64 -d /tmp/reaper-mode3.patch.gz.b64 | gzip -dc > /tmp/reaper-mode3.patch
           echo '1d7fd2d6b7908c6605438a85e80b9bf3f752cede597ccd6c8745aec39a10c675  /tmp/reaper-mode3.patch' | sha256sum -c -
           git apply --check /tmp/reaper-mode3.patch
