@@ -3,8 +3,7 @@ name: reaper-central-cache-windows-probe
 on:
   push:
     branches: [hardening-reapeaks-cache-ffmpeg]
-    paths:
-      - '.github/workflows/reaper-central-cache-windows-probe.yml'
+    paths: ['.github/workflows/reaper-central-cache-windows-probe.yml']
   workflow_dispatch:
 
 permissions:
@@ -66,12 +65,9 @@ jobs:
           ]
           (root / 'paths.txt').write_text('\n'.join(paths) + '\n', encoding='utf-8')
           (root / 'reaper.ini').write_text(
-              '[REAPER]\n'
-              'altpeaks=1\n'
+              '[REAPER]\naltpeaks=1\n'
               'altpeakspath=Z:\\tmp\\reaper-central-win\\cache\n'
-              'peakcachegenmode=3\n'
-              'peakcachegenrs=300\n'
-              'showpeaks=64\n',
+              'peakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n',
               encoding='utf-8',
           )
           (root / 'query.lua').write_text(r'''local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
@@ -94,11 +90,9 @@ jobs:
           export REAPEAKS_MANIFEST='Z:\tmp\reaper-central-win\paths.txt'
           export REAPEAKS_RESULT='Z:\tmp\reaper-central-win\results.tsv'
           set +e
-          timeout 90s wine64 /tmp/REAPER-portable/reaper.exe \
-            -newinst \
-            -cfgfile 'Z:\tmp\reaper-central-win\reaper.ini' \
-            -new -nosplash \
-            'Z:\tmp\reaper-central-win\query.lua' \
+          timeout 90s wine /tmp/REAPER-portable/reaper.exe \
+            -newinst -cfgfile 'Z:\tmp\reaper-central-win\reaper.ini' \
+            -new -nosplash 'Z:\tmp\reaper-central-win\query.lua' \
             >/tmp/reaper-central-win/reaper.log 2>&1
           rc=$?
           set -e
