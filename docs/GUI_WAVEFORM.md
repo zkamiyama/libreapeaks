@@ -1,5 +1,17 @@
 # GUI waveform / spectral data model
 
+This document describes the GUI-facing data structures that are implemented by
+`WavePyramid`, the Python `ReaPeaks` class, and the C tile APIs.
+
+## Current format scope
+
+The interactive waveform pyramid currently requires materialized RPKN or RPKL
+positive waveform layers. The parser recognizes RPKM files, but the compact
+RPKM waveform payload is not currently decoded into `WavePyramid` data.
+
+Spectral GUI access uses parsed `-'s'` layers. `-'r'` loudness is parsed by the
+Rust core but is not currently exposed as a Python/C GUI texture API.
+
 ## Goals
 
 The GUI path is designed for DAW-style interaction:
@@ -8,13 +20,14 @@ The GUI path is designed for DAW-style interaction:
 - low CPU cost while scrubbing/scrolling;
 - bounded incremental allocations;
 - a data representation usable by Qt 6/PySide6, OpenGL/QRhi, WebGL2 and WebGPU;
-- no second application-specific waveform cache when `.reapeaks` already exists.
+- no second application-specific persistent waveform pyramid when compatible
+  `.reapeaks` waveform data already exists.
 
 ## Pyramid structure
 
 `WavePyramid` has two kinds of levels:
 
-1. **native** — exact positive-division wave mipmaps stored in `.reapeaks`;
+1. **native** — exact positive-division waveform mipmaps stored in `.reapeaks`;
 2. **derived display levels** — geometric levels (ratio 4 by default) represented
    only by metadata.
 
@@ -23,9 +36,14 @@ pairs are aggregated from the finest native level on demand. With ratio 4 this
 avoids roughly one third of the fine-level memory that an eager display pyramid
 would otherwise add.
 
-Level selection uses frames-per-pixel and chooses the closest division to about
-1.5 peaks/pixel. The number of levels is logarithmic, so the scan is effectively
-constant-time for media-size purposes.
+Level selection uses frames-per-pixel and chooses the stored/derived division
+closest to about **1.5 peaks per pixel**. The number of levels is logarithmic,
+so the scan is effectively constant-time for media-size purposes.
+
+`.reapeaks` does not store exact source frame count. `WavePyramid::from_reapeaks`
+therefore estimates an upper bound from the finest native level. The reference
+players prefer an exact duration/frame count from the playback media when that
+information is available.
 
 ## Tile identity
 
@@ -45,22 +63,22 @@ first_peak = tile_index * 4096
 count      = min(4096, level_peak_count - first_peak)
 ```
 
-This key should also be the frontend cache key. A practical desktop LRU can
+The same key should be used by the frontend cache. A practical desktop LRU can
 keep dozens to a few hundred decoded/data-texture tiles while the GPU keeps only
-currently visible + neighboring tiles.
+currently visible and neighboring tiles.
 
 ## Waveform RGBA8 data texture
 
-The data texture is *not* a pre-rendered waveform image. It is a lossless
-packing of the max/min envelope so a shader can draw at arbitrary vertical
-scale/color without rebuilding cache data.
+The data texture is **not** a pre-rendered waveform image. It is a lossless
+packing of max/min envelope codes so a shader or CPU renderer can choose its own
+vertical scale, colors, fills, and antialiasing without rebuilding the cache.
 
 Dimensions:
 
 ```text
 width  = number of peaks in tile (<=4096)
 height = source channels
-format = RGBA8_UNORM / 4 raw bytes per texel
+storage = 4 bytes per texel
 ```
 
 Byte packing:
@@ -72,7 +90,7 @@ B = min low byte
 A = min high byte
 ```
 
-JavaScript decode:
+JavaScript byte decode:
 
 ```js
 function i16(lo, hi) {
@@ -84,7 +102,7 @@ const maxCode = i16(r, g);
 const minCode = i16(b, a);
 ```
 
-For RPKN, decode amplitude asymmetrically:
+For RPKN, decode normalized amplitude asymmetrically:
 
 ```js
 const amp = code < 0 ? code / 32768.0 : code / 32767.0;
@@ -103,6 +121,11 @@ function rpkl(code) {
 }
 ```
 
+When a GPU API exposes the texture through a normalized RGBA8 sampler rather
+than integer/byte loads, reconstruct the byte values consistently before
+combining them into i16/u32 fields. The CPU/Python APIs return the original raw
+bytes.
+
 ## Spectral RGBA8 data texture
 
 Each texel is the exact little-endian REAPER spectral u32:
@@ -114,9 +137,22 @@ density      = (code >> 15) & 0x3fff
 ```
 
 This is compact enough to upload directly and lets a shader choose its own
-frequency-to-color/vertical mapping.
+frequency-to-color or frequency-to-height mapping.
 
-## PySide6 / Qt 6
+## Python / PySide6
+
+The Python object exposes:
+
+```text
+ReaPeaks.open()
+levels()
+plan_view()
+tiles_for_view()
+tile_texture()
+envelope_texture()
+spectral_tile_texture()
+render_rgba()
+```
 
 For a CPU-rendered preview:
 
@@ -125,11 +161,30 @@ raw = rp.render_rgba(width, height, start, end)
 img = QImage(raw, width, height, width * 4, QImage.Format_RGBA8888)
 ```
 
-Keep the Python `bytes` object alive as long as a zero-copy `QImage` references
-it, or call `.copy()` on the QImage.
+Keep the Python `bytes` object alive while a zero-copy `QImage` references it,
+or call `.copy()` on the QImage as the reference desktop player does.
 
-For QRhi/OpenGL, use `tile_texture()` and upload the returned bytes as RGBA8.
-The tile key is suitable for an LRU keyed by `(level_index, tile_index)`.
+For QRhi/OpenGL, use `tile_texture()` and upload the returned bytes as a small
+RGBA8 data texture. The tile key is suitable for an LRU keyed by
+`(level_index, tile_index)`.
+
+## C ABI equivalents
+
+The main C entry points are:
+
+```text
+rpk_plan_view
+rpk_tile_peaks
+rpk_tile_count
+rpk_tile_texture_rgba8
+rpk_level_texture_rgba8
+rpk_spectral_layer_count
+rpk_spectral_tile_texture_rgba8
+rpk_render_rgba8
+rpk_render_rgba8_scaled
+```
+
+See [`C_ABI.md`](C_ABI.md) for ownership and generation details.
 
 ## Browser
 
@@ -140,13 +195,18 @@ const image = new ImageData(new Uint8ClampedArray(bytes), width, height);
 ctx.putImageData(image, 0, 0);
 ```
 
-GPU path: upload tile bytes as a 2D RGBA8 texture and decode i16/spectral fields
-in the shader. WebGPU is preferable for a new application, but the packed
-format also works in WebGL2 without integer-texture requirements.
+GPU path: upload tile bytes as a 2D RGBA8 texture and decode the packed
+waveform/spectral fields in the shader. WebGPU is a natural fit for a new
+application, but the packed representation also works in WebGL2.
 
 ## Why not render one giant texture?
 
-A multi-hour source at a few hundred peaks/second produces millions of peaks.
-A single texture either exceeds practical GPU dimensions or forces needless
-uploads whenever only a small viewport is visible. The 4096-peak tiled layout
-keeps uploads bounded and gives natural prefetch granularity for scrolling.
+A multi-hour source at a few hundred peaks per second produces millions of
+peaks. A single texture either exceeds practical GPU dimensions or forces
+needless uploads whenever only a small viewport is visible. The 4096-peak tiled
+layout keeps uploads bounded and gives a natural prefetch granularity for
+scrolling.
+
+The bundled PySide6 and browser demos display tile IDs and LRU statistics so
+this behavior can be inspected directly. See
+[`../examples/PLAYER_DEMOS.md`](../examples/PLAYER_DEMOS.md).
