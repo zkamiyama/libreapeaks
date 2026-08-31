@@ -1,5 +1,6 @@
 #![cfg(feature = "strict-wdl")]
 
+use reapeaks::default_divisions;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -38,6 +39,11 @@ fn fft_bits() -> Vec<(u64, u64)> {
 
 #[test]
 fn fft_bridge_is_deterministic_under_concurrent_first_use() {
+    // Referencing the Rust library target makes Cargo propagate build.rs's
+    // native-link metadata to this integration-test binary. The C bridge is
+    // intentionally called directly below so its raw ABI contract is tested.
+    assert_eq!(default_divisions(48_000, 300), [160, 2_400, 48_000]);
+
     const WORKERS: usize = 32;
     let barrier = Arc::new(Barrier::new(WORKERS));
     let handles: Vec<_> = (0..WORKERS)
