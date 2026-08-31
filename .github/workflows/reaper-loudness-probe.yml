@@ -1,0 +1,214 @@
+name: reaper-loudness-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-loudness-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install REAPER runtime and media tools
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate deterministic PCM16 and ALAC probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loudness-media /tmp/loudness-results
+          python - <<'PY'
+          from pathlib import Path
+          import math
+          import struct
+          import wave
+
+          root = Path('/tmp/loudness-media')
+          sr = 48000
+          frames = sr * 3
+
+          def clamp(v):
+              return max(-32768, min(32767, int(v)))
+
+          cases = {
+              'silence': lambda i: (0, 0),
+              'const_025': lambda i: (8192, 8192),
+              'const_050': lambda i: (16384, 16384),
+              'stereo_025_050': lambda i: (8192, 16384),
+              'alternating_025': lambda i: ((8192 if i & 1 else -8192), (8192 if i & 1 else -8192)),
+              'sine_997': lambda i: (
+                  clamp(round(0.5 * 32767 * math.sin(2 * math.pi * 997 * i / sr))),
+                  clamp(round(0.25 * 32767 * math.sin(2 * math.pi * 997 * i / sr))),
+              ),
+              'step': lambda i: ((0 if i < sr else 8192 if i < 2 * sr else 16384),) * 2,
+              'impulse': lambda i: ((32767 if i in (0, 1200, 38400, 96000) else 0),) * 2,
+          }
+
+          for name, sample in cases.items():
+              wav = root / f'{name}.wav'
+              raw = root / f'{name}.s16le'
+              payload = bytearray()
+              for i in range(frames):
+                  left, right = sample(i)
+                  payload += struct.pack('<hh', left, right)
+              raw.write_bytes(payload)
+              with wave.open(str(wav), 'wb') as out:
+                  out.setnchannels(2)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+          for wav in /tmp/loudness-media/*.wav; do
+            base="${wav%.wav}"
+            ffmpeg -hide_banner -loglevel error -y -i "$wav" -c:a alac "$base.m4a"
+            ffmpeg -hide_banner -loglevel error -y -i "$base.m4a" -f s16le -acodec pcm_s16le "$base.decoded.s16le"
+            cmp "$base.s16le" "$base.decoded.s16le"
+          done
+      - name: Build fresh REAPER mode-3 peaks through VIDEO source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          root = Path('/tmp/loudness-media')
+          results = Path('/tmp/loudness-results')
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+          xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'])
+          try:
+              time.sleep(.35)
+              for index, media in enumerate(sorted(root.glob('*.m4a'))):
+                  for old in root.rglob(media.name + '.reapeaks'):
+                      old.unlink()
+                  case = Path(tempfile.mkdtemp(prefix=f'reaper-loudness-{index}-'))
+                  config = case / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case / 'result.txt'
+                  log_path = results / f'{media.stem}.reaper.log'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  source_type = next((line[5:] for line in status.splitlines() if line.startswith('TYPE=')), '')
+                  if completed.returncode != 0 or 'OK loops=' not in status or source_type != 'VIDEO':
+                      raise SystemExit(
+                          f'{media.name}: expected successful VIDEO source, rc={completed.returncode}, status={status!r}'
+                      )
+                  peaks = list(root.rglob(media.name + '.reapeaks'))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{media.name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{media.stem}.reapeaks')
+                  (results / f'{media.stem}.status.txt').write_text(status, encoding='utf-8')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+          PY
+      - name: Decode and report loudness payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/loudness-results/report.txt
+          from pathlib import Path
+          import hashlib
+          import math
+          import statistics
+          import struct
+
+          root = Path('/tmp/loudness-results')
+
+          def parse(path):
+              data = path.read_bytes()
+              magic = data[:4].decode('ascii')
+              channels = data[4]
+              count = data[5]
+              sr, mtime, size = struct.unpack_from('<III', data, 6)
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(count)]
+              pos = 18 + 8 * count
+              layers = []
+              for division, peaks in headers:
+                  if division > 0 or division in (-115, -114, -108):
+                      payload_size = peaks * channels * 4
+                  elif division == -103:
+                      payload_size = peaks * channels * 192
+                  else:
+                      raise ValueError(f'unknown token {division}')
+                  payload = data[pos:pos + payload_size]
+                  if len(payload) != payload_size:
+                      raise ValueError(f'truncated {path} at {division}')
+                  layers.append((division, peaks, payload))
+                  pos += payload_size
+              if pos != len(data):
+                  raise ValueError(f'unconsumed bytes: {pos} != {len(data)}')
+              return magic, channels, sr, mtime, size, headers, layers, data
+
+          for path in sorted(root.glob('*.reapeaks')):
+              magic, channels, sr, mtime, source_size, headers, layers, data = parse(path)
+              print(f'=== {path.stem} ===')
+              print(f'magic={magic} channels={channels} sample_rate={sr} source_size={source_size} bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}')
+              print('headers=' + ','.join(f'{d}:{n}' for d, n in headers))
+              for layer_index, (division, peaks, payload) in enumerate(layers):
+                  if division != -114:
+                      continue
+                  values = list(struct.unpack('<' + 'f' * (len(payload) // 4), payload))
+                  finite = [v for v in values if math.isfinite(v)]
+                  per_frame = [tuple(values[i * channels:(i + 1) * channels]) for i in range(peaks)]
+                  rounded_unique = sorted({round(v, 9) for v in finite})
+                  print(f'r_layer={layer_index} count={peaks} values={len(values)} hex64={payload[:64].hex()}')
+                  print(f'  min={min(finite) if finite else None!r} max={max(finite) if finite else None!r} unique_count={len(rounded_unique)}')
+                  print(f'  unique_head={rounded_unique[:24]}')
+                  print(f'  first16={per_frame[:16]}')
+                  print(f'  last8={per_frame[-8:]}')
+              print()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaper-loudness-probe-${{ github.sha }}
+          path: |
+            /tmp/loudness-results
+            /tmp/loudness-media/*.m4a
+            /tmp/loudness-media/*.s16le
+          if-no-files-found: error
+          retention-days: 7
