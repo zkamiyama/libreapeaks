@@ -510,11 +510,7 @@ mod tests {
         hash
     }
 
-    fn assert_reaper779_loudness_hashes(
-        pcm: &[i16],
-        base_hash: u64,
-        coarse_hash: u64,
-    ) {
+    fn assert_reaper779_loudness_hashes(pcm: &[i16], base_hash: u64, coarse_hash: u64) {
         let frames = pcm.len() / 2;
         let layers = build_loudness_layers_pcm16(pcm, frames, 2, 48_000, &[160, 2_400, 48_000])
             .expect("loudness generation");
@@ -537,11 +533,7 @@ mod tests {
             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
         }
-        assert_reaper779_loudness_hashes(
-            &pcm,
-            0x0db3_2799_c4f9_f411,
-            0xbd0f_e30e_9f89_cef0,
-        );
+        assert_reaper779_loudness_hashes(&pcm, 0x0db3_2799_c4f9_f411, 0xbd0f_e30e_9f89_cef0);
     }
 
     #[test]
@@ -559,11 +551,7 @@ mod tests {
             };
             pcm.extend_from_slice(&[value, value]);
         }
-        assert_reaper779_loudness_hashes(
-            &pcm,
-            0xc4a9_8514_c210_05f9,
-            0xbc65_0b74_acfe_bb49,
-        );
+        assert_reaper779_loudness_hashes(&pcm, 0xc4a9_8514_c210_05f9, 0xbc65_0b74_acfe_bb49);
     }
 
     #[test]
@@ -575,11 +563,7 @@ mod tests {
             pcm[frame * 2] = 32_767;
             pcm[frame * 2 + 1] = 32_767;
         }
-        assert_reaper779_loudness_hashes(
-            &pcm,
-            0x34a7_949b_1e62_c755,
-            0x2b54_3cf0_b767_c4e9,
-        );
+        assert_reaper779_loudness_hashes(&pcm, 0x34a7_949b_1e62_c755, 0x2b54_3cf0_b767_c4e9);
     }
 
     #[test]
