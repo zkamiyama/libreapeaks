@@ -26,6 +26,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo '=== stale EOF unit test before patch ==='
+          grep -n -B 8 -A 35 'wave_layers_use_ceiling_bucket_counts_and_partial_final_bucket' src/wave.rs || true
           python tools/apply_adversarial_fixes_v1.py
           cargo fmt --all
           cargo fmt --all -- --check
