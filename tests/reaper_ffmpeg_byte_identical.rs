@@ -12,10 +12,11 @@ fn required_path(name: &str) -> PathBuf {
 fn read_pcm16(path: &Path) -> Vec<i16> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     assert_eq!(bytes.len() % 2, 0, "{} has an odd byte count", path.display());
-    bytes
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-        .collect()
+    let mut pcm = Vec::with_capacity(bytes.len() / 2);
+    for sample in bytes.chunks(2) {
+        pcm.push(i16::from_le_bytes([sample[0], sample[1]]));
+    }
+    pcm
 }
 
 fn fnv64(bytes: &[u8]) -> u64 {
