@@ -37,6 +37,9 @@ fn hex_window(bytes: &[u8], center: usize) -> String {
         .join("")
 }
 
+// The workflow feeds this test REAPER-generated cases spanning exact and
+// partial EOF buckets, non-48 kHz sample rates, peakcachegenrs variants, and
+// mono/multichannel inputs. Equality here is whole-file byte equality.
 #[test]
 #[ignore = "requires pinned REAPER, Xvfb and FFmpeg"]
 fn reaper_mode3_pcm16_is_byte_identical_for_adversarial_case() {
