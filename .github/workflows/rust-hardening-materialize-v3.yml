@@ -5,9 +5,14 @@ on:
     branches: [hardening-reapeaks-cache-ffmpeg]
     paths:
       - '.github/workflows/rust-hardening-materialize-v3.yml'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-hardening-materialize-v3-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   harden:
@@ -69,9 +74,6 @@ jobs:
               b, end_size = _flex_find(text, end, a)
               if b < 0:
                   raise SystemExit(f'end marker not found in {path}: {end!r}')
-              # generate.rs used an end marker beginning with the function-closing
-              # brace. The replacement already contains that brace, so consume it
-              # while preserving the following documentation marker.
               if end.startswith('\n}\n'):
                   close_len = len('\n}\n')
                   p.write_text(text[:a] + new + text[b + close_len:])
@@ -88,15 +90,60 @@ jobs:
         run: cargo test --release --all-targets --features strict-wdl
       - name: Clippy hard gate
         run: cargo clippy --all-targets --features strict-wdl -- -D warnings
-      - name: Commit only after every Rust gate passes
+      - name: Export validated repository changes
         shell: bash
         run: |
           set -euo pipefail
           rm -f .github/workflows/rust-hardening-materialize.yml
           rm -f .github/workflows/rust-hardening-materialize-v2.yml
           rm -f .github/workflows/rust-hardening-materialize-v3.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'Harden parser generator pyramid and FFI boundaries'
-          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import subprocess
+          import tarfile
+
+          def lines(*args):
+              out = subprocess.check_output(['git', *args], text=True)
+              return [line for line in out.splitlines() if line]
+
+          changed = lines('diff', '--name-only', '--diff-filter=ACMRTUXB')
+          untracked = lines('ls-files', '--others', '--exclude-standard')
+          deleted = lines('diff', '--name-only', '--diff-filter=D')
+          files = sorted(set(changed + untracked) - set(deleted))
+          manifest = {
+              'base_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'files': [],
+              'deleted': sorted(set(deleted)),
+          }
+          bundle = Path('validated-hardening-tree.tar.gz')
+          with tarfile.open(bundle, 'w:gz') as archive:
+              for name in files:
+                  path = Path(name)
+                  data = path.read_bytes()
+                  manifest['files'].append({
+                      'path': name,
+                      'size': len(data),
+                      'sha256': hashlib.sha256(data).hexdigest(),
+                  })
+                  archive.add(path, arcname=name, recursive=False)
+              payload = json.dumps(manifest, indent=2, sort_keys=True).encode()
+              info = tarfile.TarInfo('validated-manifest.json')
+              info.size = len(payload)
+              archive.addfile(info, __import__('io').BytesIO(payload))
+          Path('validated-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+          subprocess.run(['git', 'status', '--short'], check=True, stdout=Path('validated-status.txt').open('w'))
+          subprocess.run(['git', 'diff', '--stat'], check=True, stdout=Path('validated-diffstat.txt').open('w'))
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-hardening-tree-${{ github.sha }}
+          path: |
+            validated-hardening-tree.tar.gz
+            validated-manifest.json
+            validated-status.txt
+            validated-diffstat.txt
+          if-no-files-found: error
+          retention-days: 7
