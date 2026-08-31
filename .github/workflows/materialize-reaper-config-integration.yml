@@ -1,0 +1,401 @@
+name: materialize-reaper-config-integration
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/materialize-reaper-config-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-reaper-config-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply integration changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              if old not in text:
+                  raise SystemExit(f'marker not found in {path}: {old[:100]!r}')
+              file.write_text(text.replace(old, new, 1))
+
+          # Rust C ABI helper.
+          ffi = Path('src/ffi.rs')
+          text = ffi.read_text()
+          if 'fn rpk_default_divisions(' not in text:
+              if 'use crate::wave::PeakPair;' in text:
+                  text = text.replace(
+                      'use crate::wave::PeakPair;',
+                      'use crate::wave::{default_divisions, PeakPair};',
+                      1,
+                  )
+              elif 'default_divisions' not in '\n'.join(text.splitlines()[:20]):
+                  text = 'use crate::wave::default_divisions;\n' + text
+              function = r'''
+
+          /// Compute the three REAPER-style waveform divisions for a configured peak rate.
+          ///
+          /// # Safety
+          ///
+          /// `out_divisions` must point to writable storage for at least three `u32`
+          /// values. On invalid scalar arguments or a null pointer the output is not
+          /// modified.
+          #[no_mangle]
+          pub unsafe extern "C" fn rpk_default_divisions(
+              sample_rate: u32,
+              fine_peaks_per_second: u32,
+              out_divisions: *mut u32,
+          ) -> i32 {
+              if sample_rate == 0 || fine_peaks_per_second == 0 || out_divisions.is_null() {
+                  return -1;
+              }
+              let values = default_divisions(sample_rate, fine_peaks_per_second);
+              unsafe {
+                  ptr::copy_nonoverlapping(values.as_ptr(), out_divisions, values.len());
+              }
+              0
+          }
+          '''
+              anchor = '#[no_mangle]\npub unsafe extern "C" fn rpk_generate_pcm16('
+              if anchor not in text:
+                  raise SystemExit('rpk_generate_pcm16 anchor missing')
+              text = text.replace(anchor, function + '\n' + anchor, 1)
+              ffi.write_text(text)
+
+          header = Path('include/reapeaks.h')
+          text = header.read_text()
+          if 'rpk_default_divisions' not in text:
+              declaration = r'''
+          /*
+           * Compute the three REAPER-style waveform divisions for a configured fine
+           * peak rate (REAPER's peakcachegenrs value). out_divisions must point to
+           * storage for three uint32_t values.
+           */
+          int32_t rpk_default_divisions(uint32_t sample_rate,
+                                        uint32_t fine_peaks_per_second,
+                                        uint32_t out_divisions[3]);
+
+          '''
+              anchor = '/* RPKN generator for decoded PCM16. */'
+              if anchor not in text:
+                  raise SystemExit('C header generator anchor missing')
+              header.write_text(text.replace(anchor, declaration + anchor, 1))
+
+          hardening = Path('tests/hardening.rs')
+          text = hardening.read_text()
+          if 'ffi_default_divisions_accepts_non_default_peak_rate' not in text:
+              start = text.index('use reapeaks::ffi::{')
+              end = text.index('};', start)
+              segment = text[start:end + 2]
+              if 'rpk_default_divisions' not in segment:
+                  segment = segment.replace('{', '{rpk_default_divisions, ', 1)
+                  text = text[:start] + segment + text[end + 2:]
+              text += r'''
+
+          #[test]
+          fn ffi_default_divisions_accepts_non_default_peak_rate() {
+              let mut output = [0u32; 3];
+              assert_eq!(
+                  unsafe { rpk_default_divisions(44_100, 500, output.as_mut_ptr()) },
+                  0
+              );
+              assert_eq!(output, [88, 2_288, 45_760]);
+
+              assert_eq!(
+                  unsafe { rpk_default_divisions(48_000, 100, output.as_mut_ptr()) },
+                  0
+              );
+              assert_eq!(output, [480, 2_400, 48_000]);
+          }
+
+          #[test]
+          fn ffi_default_divisions_rejects_invalid_arguments_without_writing() {
+              let mut output = [7u32, 8, 9];
+              assert_eq!(
+                  unsafe { rpk_default_divisions(0, 300, output.as_mut_ptr()) },
+                  -1
+              );
+              assert_eq!(output, [7, 8, 9]);
+              assert_eq!(
+                  unsafe { rpk_default_divisions(48_000, 0, output.as_mut_ptr()) },
+                  -1
+              );
+              assert_eq!(output, [7, 8, 9]);
+              assert_eq!(
+                  unsafe { rpk_default_divisions(48_000, 300, std::ptr::null_mut()) },
+                  -1
+              );
+              assert_eq!(output, [7, 8, 9]);
+          }
+          '''
+              hardening.write_text(text)
+
+          def insert_after_import(text: str, module: str, insertion: str) -> str:
+              if insertion.strip().splitlines()[0] in text:
+                  return text
+              tree = ast.parse(text)
+              node = next(
+                  item for item in tree.body
+                  if isinstance(item, ast.ImportFrom) and item.module == module
+              )
+              lines = text.splitlines(keepends=True)
+              lines.insert(node.end_lineno, insertion)
+              return ''.join(lines)
+
+          def replace_argparse_call(
+              text: str,
+              function_name: str,
+              option: str,
+              replacement: str,
+          ) -> str:
+              tree = ast.parse(text)
+              function = next(
+                  item for item in tree.body
+                  if isinstance(item, ast.FunctionDef) and item.name == function_name
+              )
+              call = next(
+                  item for item in ast.walk(function)
+                  if isinstance(item, ast.Call)
+                  and isinstance(item.func, ast.Attribute)
+                  and item.func.attr == 'add_argument'
+                  and item.args
+                  and isinstance(item.args[0], ast.Constant)
+                  and item.args[0].value == option
+              )
+              lines = text.splitlines(keepends=True)
+              lines[call.lineno - 1:call.end_lineno] = [replacement]
+              return ''.join(lines)
+
+          def insert_after_argparse_call(
+              text: str,
+              function_name: str,
+              option: str,
+              insertion: str,
+          ) -> str:
+              if '--reaper-ini' in text:
+                  return text
+              tree = ast.parse(text)
+              function = next(
+                  item for item in tree.body
+                  if isinstance(item, ast.FunctionDef) and item.name == function_name
+              )
+              call = next(
+                  item for item in ast.walk(function)
+                  if isinstance(item, ast.Call)
+                  and isinstance(item.func, ast.Attribute)
+                  and item.func.attr == 'add_argument'
+                  and item.args
+                  and isinstance(item.args[0], ast.Constant)
+                  and item.args[0].value == option
+              )
+              lines = text.splitlines(keepends=True)
+              lines.insert(call.end_lineno, insertion)
+              return ''.join(lines)
+
+          def replace_function(text: str, name: str, source: str) -> str:
+              tree = ast.parse(text)
+              node = next(
+                  item for item in tree.body
+                  if isinstance(item, ast.FunctionDef) and item.name == name
+              )
+              lines = text.splitlines(keepends=True)
+              lines[node.lineno - 1:node.end_lineno] = [source]
+              return ''.join(lines)
+
+          integration_imports = '''from player_reaper_integration import (\n    APPLICATION_CACHE_MODES,\n    resolve_player_peak_policy,\n)\nfrom reaper_config import ReaperConfigError\n'''
+
+          # PySide6 demo.
+          pyside = Path('examples/pyside6_player.py')
+          text = pyside.read_text()
+          text = insert_after_import(text, 'player_common', integration_imports)
+          if 'peak_rate: int,' not in text:
+              text = text.replace(
+                  '        playback_decoder: str,\n    ):',
+                  '        playback_decoder: str,\n        peak_rate: int,\n        path_origin: str,\n    ):',
+                  1,
+              )
+              text = text.replace(
+                  '        self.peaks_path = peaks_path\n',
+                  '        self.peaks_path = peaks_path\n        self.peak_rate = peak_rate\n        self.path_origin = path_origin\n',
+                  1,
+              )
+          text = text.replace(
+              'defaults = reapeaks.default_divisions(self.rp.sample_rate)',
+              'defaults = reapeaks.default_divisions(self.rp.sample_rate, self.peak_rate)',
+          )
+          if 'peak_rate={self.peak_rate}' not in text:
+              text = text.replace(
+                  'f"cache_decoder={cache_decoder} playback_decoder={playback_decoder} | "\n',
+                  'f"cache_decoder={cache_decoder} playback_decoder={playback_decoder} | "\n            f"peak_rate={self.peak_rate} path_origin={self.path_origin} | "\n',
+                  1,
+              )
+          text = replace_argparse_call(
+              text,
+              'parse_args',
+              '--cache-mode',
+              '    parser.add_argument(\n        "--cache-mode", choices=APPLICATION_CACHE_MODES, default="auto"\n    )\n',
+          )
+          text = replace_argparse_call(
+              text,
+              'parse_args',
+              '--fine-peaks-per-second',
+              '    parser.add_argument(\n        "--fine-peaks-per-second",\n        type=int,\n        default=None,\n        help="override REAPER peakcachegenrs (otherwise REAPER.ini, then 300)",\n    )\n',
+          )
+          text = insert_after_argparse_call(
+              text,
+              'parse_args',
+              '--reaper-cache-map',
+              '''    parser.add_argument(\n        "--reaper-ini", type=Path,\n        help="load peakcachegenrs and cache policy from this REAPER.ini",\n    )\n    parser.add_argument(\n        "--auto-reaper-ini", action="store_true",\n        help="discover the platform REAPER.ini when --reaper-ini is omitted",\n    )\n    parser.add_argument(\n        "--reaper-executable", type=Path,\n        help="query GetPeakFileNameEx for exact REAPER cache paths",\n    )\n''',
+          )
+          text = replace_function(
+              text,
+              'main',
+              '''def main(argv: list[str] | None = None) -> int:\n    args = parse_args(sys.argv[1:] if argv is None else argv)\n    audio = args.audio.expanduser().resolve(strict=False)\n    prepared = None\n    try:\n        policy = resolve_player_peak_policy(\n            audio,\n            explicit_peaks=args.peaks,\n            cache_mode=args.cache_mode,\n            cache_directory=args.cache_dir,\n            reaper_cache_map=args.reaper_cache_map,\n            reaper_ini=args.reaper_ini,\n            auto_reaper_ini=args.auto_reaper_ini,\n            reaper_executable=args.reaper_executable,\n            explicit_peak_rate=args.fine_peaks_per_second,\n            allow_stale_cache=args.allow_stale_cache,\n            query_timeout=args.decode_timeout,\n        )\n        peaks, generated = ensure_reapeaks(\n            audio,\n            policy.peaks_path,\n            rebuild=args.rebuild_cache,\n            spectral=not args.no_spectral,\n            decoder=args.cache_decoder,\n            cache_mode=policy.cache_mode,\n            cache_directory=policy.cache_directory,\n            reaper_cache_map=None,\n            allow_stale_cache=args.allow_stale_cache,\n            ffmpeg=args.ffmpeg,\n            ffprobe=args.ffprobe,\n            decode_timeout=args.decode_timeout,\n            max_decode_bytes=args.max_decode_bytes,\n            wave_encoding=args.wave_encoding,\n            divisions=args.divisions,\n            fine_peaks_per_second=policy.peak_rate,\n            lock_timeout=args.lock_timeout,\n        )\n        prepared = prepare_playback_audio(\n            audio,\n            decoder=args.playback_decoder,\n            ffmpeg=args.ffmpeg,\n            ffprobe=args.ffprobe,\n            timeout=args.decode_timeout,\n            max_decode_bytes=args.max_decode_bytes,\n        )\n        app = QApplication([sys.argv[0]])\n        window = PlayerWindow(\n            audio,\n            prepared.path,\n            peaks,\n            generated,\n            cache_decoder=args.cache_decoder,\n            playback_decoder=args.playback_decoder,\n            peak_rate=policy.peak_rate,\n            path_origin=policy.path_origin,\n        )\n        window.show()\n        return app.exec()\n    except (PlayerCacheError, ReaperConfigError) as exc:\n        print(f"pyside6_player: {exc}", file=sys.stderr)\n        return 2\n    finally:\n        if prepared is not None:\n            prepared.close()\n''',
+          )
+          ast.parse(text)
+          pyside.write_text(text)
+
+          # Web demo.
+          server = Path('examples/web_player/server.py')
+          text = server.read_text()
+          text = insert_after_import(text, 'player_common', integration_imports)
+          tree = ast.parse(text)
+          player_import = next(
+              item for item in tree.body
+              if isinstance(item, ast.ImportFrom) and item.module == 'player_common'
+          )
+          if 'PlayerCacheError' not in [item.name for item in player_import.names]:
+              lines = text.splitlines(keepends=True)
+              segment = ''.join(lines[player_import.lineno - 1:player_import.end_lineno])
+              if '(' in segment:
+                  close = segment.rfind(')')
+                  segment = segment[:close] + '    PlayerCacheError,\n' + segment[close:]
+              else:
+                  segment = segment.rstrip('\n') + ', PlayerCacheError\n'
+              lines[player_import.lineno - 1:player_import.end_lineno] = [segment]
+              text = ''.join(lines)
+          if 'peak_rate: int,' not in text:
+              text = text.replace(
+                  'def __init__(self, audio_path: Path, peaks_path: Path, generated: bool):',
+                  'def __init__(\n        self,\n        audio_path: Path,\n        peaks_path: Path,\n        generated: bool,\n        *,\n        peak_rate: int,\n        path_origin: str,\n    ):',
+                  1,
+              )
+              text = text.replace(
+                  '        self.generated = generated\n',
+                  '        self.generated = generated\n        self.peak_rate = peak_rate\n        self.path_origin = path_origin\n',
+                  1,
+              )
+          text = text.replace(
+              '"default_divisions": reapeaks.default_divisions(self.rp.sample_rate),',
+              '"configured_peak_rate": self.peak_rate,\n            "path_origin": self.path_origin,\n            "default_divisions": reapeaks.default_divisions(\n                self.rp.sample_rate, self.peak_rate\n            ),',
+          )
+          text = replace_argparse_call(
+              text,
+              'parse_args',
+              '--cache-mode',
+              '    parser.add_argument(\n        "--cache-mode", choices=APPLICATION_CACHE_MODES, default="auto"\n    )\n',
+          )
+          text = replace_argparse_call(
+              text,
+              'parse_args',
+              '--fine-peaks-per-second',
+              '    parser.add_argument(\n        "--fine-peaks-per-second",\n        type=int,\n        default=None,\n        help="override REAPER peakcachegenrs (otherwise REAPER.ini, then 300)",\n    )\n',
+          )
+          text = insert_after_argparse_call(
+              text,
+              'parse_args',
+              '--reaper-cache-map',
+              '''    parser.add_argument(\n        "--reaper-ini", type=Path,\n        help="load peakcachegenrs and cache policy from this REAPER.ini",\n    )\n    parser.add_argument(\n        "--auto-reaper-ini", action="store_true",\n        help="discover the platform REAPER.ini when --reaper-ini is omitted",\n    )\n    parser.add_argument(\n        "--reaper-executable", type=Path,\n        help="query GetPeakFileNameEx for exact REAPER cache paths",\n    )\n''',
+          )
+          text = replace_function(
+              text,
+              'main',
+              '''def main(argv: list[str] | None = None) -> int:\n    args = parse_args(sys.argv[1:] if argv is None else argv)\n    audio = args.audio.expanduser().resolve(strict=False)\n    try:\n        policy = resolve_player_peak_policy(\n            audio,\n            explicit_peaks=args.peaks,\n            cache_mode=args.cache_mode,\n            cache_directory=args.cache_dir,\n            reaper_cache_map=args.reaper_cache_map,\n            reaper_ini=args.reaper_ini,\n            auto_reaper_ini=args.auto_reaper_ini,\n            reaper_executable=args.reaper_executable,\n            explicit_peak_rate=args.fine_peaks_per_second,\n            allow_stale_cache=args.allow_stale_cache,\n            query_timeout=args.decode_timeout,\n        )\n        peaks, generated = ensure_reapeaks(\n            audio,\n            policy.peaks_path,\n            rebuild=args.rebuild_cache,\n            spectral=not args.no_spectral,\n            decoder=args.cache_decoder,\n            cache_mode=policy.cache_mode,\n            cache_directory=policy.cache_directory,\n            reaper_cache_map=None,\n            allow_stale_cache=args.allow_stale_cache,\n            ffmpeg=args.ffmpeg,\n            ffprobe=args.ffprobe,\n            decode_timeout=args.decode_timeout,\n            max_decode_bytes=args.max_decode_bytes,\n            wave_encoding=args.wave_encoding,\n            divisions=args.divisions,\n            fine_peaks_per_second=policy.peak_rate,\n            lock_timeout=args.lock_timeout,\n        )\n    except (PlayerCacheError, ReaperConfigError) as exc:\n        print(f"web_player: {exc}", file=sys.stderr)\n        return 2\n\n    service = TileService(\n        audio,\n        peaks,\n        generated,\n        peak_rate=policy.peak_rate,\n        path_origin=policy.path_origin,\n    )\n    server = ThreadingHTTPServer((args.host, args.port), DemoHandler)\n    server.service = service  # type: ignore[attr-defined]\n    print(f"libreapeaks web player: http://{args.host}:{args.port}/")\n    print(f"audio={audio}")\n    print(f"peaks={peaks}{' (generated)' if generated else ' (reused)'}")\n    print(f"peak_rate={policy.peak_rate} path_origin={policy.path_origin}")\n    try:\n        server.serve_forever()\n    except KeyboardInterrupt:\n        pass\n    finally:\n        server.server_close()\n    return 0\n''',
+          )
+          ast.parse(text)
+          server.write_text(text)
+
+          # Documentation additions.
+          readme = Path('README.md')
+          text = readme.read_text()
+          section = '''\n\n## REAPER settings and exact central caches\n\nThe reference players can load `peakcachegenrs` from an explicit or discovered\n`reaper.ini`. Their `central` mode uses REAPER's canonical\n`GetPeakFileNameEx` read/write path, obtained live or from a saved cache map;\nit never substitutes libreapeaks' own hash namespace. The independent\ncollision-safe namespace is available as `private-central`.\n\nC callers can use `rpk_default_divisions(sample_rate, fine_peaks_per_second,\nout_divisions)` before passing the resulting array to a generation function.\n\nSee [`docs/REAPER_CENTRAL_CACHE.md`](docs/REAPER_CENTRAL_CACHE.md).\n'''
+          if '## REAPER settings and exact central caches' not in text:
+              anchor = '## Documentation'
+              text = text.replace(anchor, section + '\n' + anchor, 1) if anchor in text else text + section
+              readme.write_text(text)
+
+          demos = Path('examples/PLAYER_DEMOS.md')
+          text = demos.read_text()
+          section = '''\n\n## REAPER.ini and cache placement\n\nBoth reference applications accept:\n\n```text\n--reaper-ini PATH\n--auto-reaper-ini\n--reaper-executable PATH\n--reaper-cache-map PATH\n--fine-peaks-per-second N\n--cache-mode auto|sidecar|subdir|central|reaper|private-central\n```\n\n`central` means the exact path selected by REAPER. It requires either a live\n`GetPeakFileNameEx` query or a previously generated map and fails closed if the\npath cannot be established. `private-central` keeps libreapeaks' separate\nSHA-256 filename scheme. The path query does not generate peaks.\n\nSee [`../docs/REAPER_CENTRAL_CACHE.md`](../docs/REAPER_CENTRAL_CACHE.md).\n'''
+          if '## REAPER.ini and cache placement' not in text:
+              demos.write_text(text + section)
+
+          cabi = Path('docs/C_ABI.md')
+          text = cabi.read_text()
+          section = '''\n\n## Division calculation\n\nGeneration functions always accept an explicit division array. C callers that\nwant REAPER-style defaults for a particular `peakcachegenrs` value can use:\n\n```c\nuint32_t divisions[3];\nint32_t rc = rpk_default_divisions(\n    sample_rate,\n    fine_peaks_per_second,\n    divisions\n);\n```\n\nThe second argument is configurable; `300` is only REAPER's common default.\n'''
+          if '## Division calculation' not in text:
+              cabi.write_text(text + section)
+
+          for path in [
+              'examples/reaper_config.py',
+              'examples/player_reaper_integration.py',
+              'examples/pyside6_player.py',
+              'examples/web_player/server.py',
+              'tools/reaper_oracle/make_cache_map.py',
+              'tests/python/test_reaper_config.py',
+          ]:
+              compile(Path(path).read_text(), path, 'exec')
+          PY
+          cargo fmt --all
+      - name: Rust tests
+        run: cargo test --all-targets
+      - name: Strict WDL tests
+        run: cargo test --release --all-targets --features strict-wdl
+      - name: Clippy hard gate
+        run: cargo clippy --all-targets --features strict-wdl -- -D warnings
+      - name: Python build and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/libreapeaks-venv
+          . /tmp/libreapeaks-venv/bin/activate
+          python -m pip install --disable-pip-version-check maturin
+          maturin develop --release --features strict-wdl
+          python -m unittest discover -s tests/python -p 'test_*.py' -v
+          python -m py_compile \
+            examples/reaper_config.py \
+            examples/player_reaper_integration.py \
+            examples/pyside6_player.py \
+            examples/web_player/server.py \
+            tools/reaper_oracle/make_cache_map.py
+      - name: Commit validated changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/materialize-reaper-config-integration.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Integrate REAPER.ini and canonical central cache paths'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
