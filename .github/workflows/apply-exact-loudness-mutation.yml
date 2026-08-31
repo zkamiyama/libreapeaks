@@ -1,0 +1,147 @@
+name: apply-exact-loudness-mutation
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - 'oracle-reports/loudness-source-mutation-sweep/report.json'
+      - 'oracle-reports/loudness-source-mutation-sweep/exact-pass-*.patch'
+      - '.github/workflows/apply-exact-loudness-mutation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Select an exact-passing single-change patch
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          root = Path('oracle-reports/loudness-source-mutation-sweep')
+          report_path = root / 'report.json'
+          if not report_path.exists():
+              Path('/tmp/no-exact-mutation').write_text('report missing\n')
+              raise SystemExit(0)
+          report = json.loads(report_path.read_text(encoding='utf-8'))
+          indices = report.get('exact_passing_mutations', [])
+          patches = sorted(root.glob('exact-pass-*.patch'))
+          if not indices or not patches:
+              Path('/tmp/no-exact-mutation').write_text('no single semantic mutation passed the exact oracle\n')
+              raise SystemExit(0)
+          # Reject ambiguity rather than silently choosing a behavior-changing patch.
+          if len(indices) != 1 or len(patches) != 1:
+              Path('/tmp/no-exact-mutation').write_text(
+                  f'ambiguous exact mutations: indices={indices}, patches={[p.name for p in patches]}\n'
+              )
+              raise SystemExit(0)
+          Path('/tmp/selected-patch').write_text(str(patches[0]) + '\n')
+          Path('/tmp/selected-index').write_text(str(indices[0]) + '\n')
+          PY
+
+      - name: Apply candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/no-exact-mutation ]; then
+            cat /tmp/no-exact-mutation
+            exit 0
+          fi
+          patch_file="$(cat /tmp/selected-patch)"
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+
+      - name: Download fixed oracle artifact and rediscover the test environment
+        if: hashFiles('oracle-reports/loudness-source-mutation-sweep/exact-pass-*.patch') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f /tmp/no-exact-mutation || exit 0
+          root=/tmp/reverify-loudness-mutation
+          mkdir -p "$root/input"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import re
+          import subprocess
+
+          root = Path('/tmp/reverify-loudness-mutation/input')
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          dirs = [path for path in root.rglob('*') if path.is_dir()]
+          peak = max(dirs or [root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm = max(dirs or [root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+          output = Path('/tmp/reverify-loudness-mutation/output'); output.mkdir(parents=True, exist_ok=True)
+          env = os.environ.copy()
+          assignments = {}
+          for name in names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = output
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm
+              else:
+                  value = peak
+              env[name] = str(value)
+              assignments[name] = str(value)
+          completed = subprocess.run(
+              ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture'],
+              env=env,
+              text=True,
+              capture_output=True,
+              timeout=420,
+          )
+          Path('/tmp/reverify-loudness-mutation/exact-test.log').write_text(
+              (completed.stdout or '') + '\n' + (completed.stderr or ''), encoding='utf-8'
+          )
+          Path('/tmp/reverify-loudness-mutation/environment.json').write_text(json.dumps(assignments, indent=2), encoding='utf-8')
+          if completed.returncode != 0 or '0 tests' in ((completed.stdout or '') + (completed.stderr or '')).lower():
+              raise SystemExit('selected patch did not independently pass the exact integration test')
+          PY
+
+      - name: Run all repository gates
+        if: hashFiles('oracle-reports/loudness-source-mutation-sweep/exact-pass-*.patch') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f /tmp/no-exact-mutation || exit 0
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Commit only the independently verified mutation
+        if: hashFiles('oracle-reports/loudness-source-mutation-sweep/exact-pass-*.patch') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f /tmp/no-exact-mutation || exit 0
+          git add src native build.rs
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          index="$(cat /tmp/selected-index)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "match REAPER loudness exact oracle (mutation ${index})"
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
