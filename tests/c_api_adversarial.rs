@@ -48,13 +48,13 @@ fn c_null_handles_are_total_and_return_neutral_values() {
 
 #[test]
 fn c_open_rejects_null_and_non_utf8_paths_without_touching_output() {
-    let mut handle = 1usize as *mut _;
+    let mut handle = ptr::dangling_mut();
     assert_eq!(unsafe { rpk_open(ptr::null(), &mut handle) }, -1);
     assert!(handle.is_null());
     assert_eq!(unsafe { rpk_open(ptr::null(), ptr::null_mut()) }, -1);
 
     let path = CString::new(vec![0xff]).expect("CString");
-    handle = 1usize as *mut _;
+    handle = ptr::dangling_mut();
     assert_eq!(unsafe { rpk_open(path.as_ptr(), &mut handle) }, -2);
     assert!(handle.is_null());
 }
@@ -191,7 +191,7 @@ fn c_generator_errors_zero_the_output_and_successful_buffers_free_idempotently()
     let pcm = [1i16, -1, 2, -2];
     let bad_division = [0u32];
     let mut out = RpkBuffer {
-        data: 1usize as *mut u8,
+        data: ptr::dangling_mut::<u8>(),
         len: 123,
         capacity: 456,
     };
