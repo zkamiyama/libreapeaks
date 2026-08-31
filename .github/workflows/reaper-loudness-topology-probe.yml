@@ -85,9 +85,6 @@ jobs:
           try:
               time.sleep(0.35)
               for index, media in enumerate(sorted(media_root.glob('*.wav'))):
-                  peak = Path(str(media) + '.reapeaks')
-                  if peak.exists():
-                      peak.unlink()
                   case = Path(tempfile.mkdtemp(prefix=f'reaper-topology-{index:02d}-'))
                   config = case / 'reaper.ini'
                   config.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n', encoding='utf-8')
@@ -101,8 +98,14 @@ jobs:
                   (results / f'{media.stem}.status.txt').write_text(status, encoding='utf-8')
                   if completed.returncode != 0 or 'OK loops=' not in status:
                       raise SystemExit(f'{media.name}: REAPER failed rc={completed.returncode}, status={status!r}')
-                  if not peak.exists():
-                      raise SystemExit(f'{media.name}: peak file missing')
+                  write_path = next((line[len('PEAK_WRITE='):] for line in status.splitlines() if line.startswith('PEAK_WRITE=')), '')
+                  candidates = []
+                  if write_path:
+                      candidates.append(Path(write_path))
+                  candidates.extend(media_root.rglob(media.name + '.reapeaks'))
+                  peak = next((candidate for candidate in candidates if candidate.exists()), None)
+                  if peak is None:
+                      raise SystemExit(f'{media.name}: peak file missing; write_path={write_path!r}; status={status!r}')
                   shutil.copy2(peak, results / f'{media.stem}.reaper.reapeaks')
           finally:
               xvfb.terminate()
@@ -150,6 +153,7 @@ jobs:
           print(destination.read_text())
           PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: reaper-loudness-topology-${{ github.sha }}
           path: |
