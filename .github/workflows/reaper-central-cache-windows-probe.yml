@@ -15,20 +15,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install REAPER 7.79 x64
+      - name: Install portable REAPER 7.79 x64
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = Join-Path $env:RUNNER_TEMP 'reaper779_x64-install.exe'
+          $portable = Join-Path $env:RUNNER_TEMP 'REAPER-portable'
           Invoke-WebRequest 'https://www.reaper.fm/files/7.x/reaper779_x64-install.exe' -OutFile $installer
-          $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          $arguments = @('/S', '/PORTABLE', "/D=$portable")
+          $process = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -Wait
           if ($process.ExitCode -ne 0) { throw "REAPER installer failed: $($process.ExitCode)" }
-          $candidates = @(
-            (Join-Path $env:ProgramFiles 'REAPER (x64)\reaper.exe'),
-            (Join-Path $env:ProgramFiles 'REAPER\reaper.exe')
-          )
-          $reaper = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $reaper) { throw 'reaper.exe not found after install' }
+          $reaper = Join-Path $portable 'reaper.exe'
+          if (-not (Test-Path $reaper)) { throw "portable reaper.exe not found: $reaper" }
           "REAPER_BIN=$reaper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Query central-cache paths
         shell: pwsh
@@ -50,7 +49,7 @@ jobs:
             'C:\Users\Example\Audio\Take.WAV',
             '\\server\share\Folder\Take.WAV'
           )
-          Set-Content -LiteralPath (Join-Path $root 'paths.txt') -Value $paths -Encoding utf8
+          [IO.File]::WriteAllLines((Join-Path $root 'paths.txt'), $paths, [Text.UTF8Encoding]::new($false))
           @"
           [REAPER]
           altpeaks=1
@@ -58,7 +57,7 @@ jobs:
           peakcachegenmode=3
           peakcachegenrs=300
           showpeaks=64
-          "@ | Set-Content -LiteralPath (Join-Path $root 'reaper.ini') -Encoding utf8
+          "@ | Set-Content -LiteralPath (Join-Path $root 'reaper.ini') -Encoding utf8NoBOM
           @'
           local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
           local result = assert(os.getenv("REAPEAKS_RESULT"))
@@ -71,7 +70,7 @@ jobs:
           end
           out:close()
           reaper.Main_OnCommand(40004, 0)
-          '@ | Set-Content -LiteralPath (Join-Path $root 'query.lua') -Encoding utf8
+          '@ | Set-Content -LiteralPath (Join-Path $root 'query.lua') -Encoding utf8NoBOM
           $env:REAPEAKS_MANIFEST = Join-Path $root 'paths.txt'
           $env:REAPEAKS_RESULT = Join-Path $root 'results.tsv'
           $process = Start-Process -FilePath $env:REAPER_BIN -ArgumentList @(
