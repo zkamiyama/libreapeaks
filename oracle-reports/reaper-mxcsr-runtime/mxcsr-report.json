@@ -1,0 +1,161 @@
+{
+  "schema": 1,
+  "source": "REAPER 7.79 Linux ALAC/VIDEO FFmpeg worker call sites",
+  "call_counts": [
+    37,
+    39,
+    75
+  ],
+  "samples": [
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    },
+    {
+      "raw": 8096,
+      "ftz": false,
+      "daz": false,
+      "rounding_control": 0
+    }
+  ],
+  "all_ftz": false,
+  "all_daz": false,
+  "unique_raw": [
+    8096
+  ],
+  "status": "TYPE=VIDEO\nLENGTH=3.0;QN=false\nOK loops=26\n"
+}

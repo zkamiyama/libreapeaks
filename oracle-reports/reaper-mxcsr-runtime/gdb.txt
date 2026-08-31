@@ -1,0 +1,186 @@
+Function "av_read_frame" not defined.
+Breakpoint 1 (av_read_frame) pending.
+Function "avcodec_send_packet" not defined.
+Breakpoint 2 (avcodec_send_packet) pending.
+Function "avcodec_receive_frame" not defined.
+Breakpoint 3 (avcodec_receive_frame) pending.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+Cannot connect to server socket err = No such file or directory
+Cannot connect to server request channel
+jack server is not running or cannot be started
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+MXCSR_SEND hit=1 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$1 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd86964bb in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc30782 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+MXCSR_RECEIVE hit=1 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$2 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd8696795 in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc30782 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+MXCSR_SEND hit=2 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$3 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd86964bb in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc3053f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+MXCSR_RECEIVE hit=2 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$4 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd8696795 in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc3053f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+MXCSR_SEND hit=3 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$5 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd86964bb in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc3053f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+MXCSR_RECEIVE hit=3 thread=[Current thread is 1 (Thread 0x7ffff7e98080 (LWP 3802))]
+$6 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffd8696795 in ?? () from /lib/x86_64-linux-gnu/libavformat.so.60
+#2  0x00007fffd869bac5 in avformat_find_stream_info () from /lib/x86_64-linux-gnu/libavformat.so.60
+#3  0x00007fffdfd5331a in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00007fffdfc3053f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+[Switching to Thread 0x7fffd6bff6c0 (LWP 3809)]
+MXCSR_READ hit=1 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$7 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_SEND hit=4 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$8 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd5528f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=4 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$9 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=5 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$10 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_READ hit=2 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$11 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_SEND hit=5 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$12 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd5528f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=6 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$13 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=7 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$14 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_READ hit=3 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$15 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_SEND hit=6 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$16 = 0x1fa0
+#0  0x00007fffdd6a8a20 in avcodec_send_packet () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd5528f in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=8 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$17 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=9 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$18 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_READ hit=4 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$19 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=10 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$20 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=11 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$21 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_READ hit=5 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$22 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_RECEIVE hit=12 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$23 = 0x1fa0
+#0  0x00007fffdd5d1f10 in avcodec_receive_frame () from /lib/x86_64-linux-gnu/libavcodec.so.60
+#1  0x00007fffdfd552a2 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+MXCSR_READ hit=6 thread=[Current thread is 5 (Thread 0x7fffd6bff6c0 (LWP 3809))]
+$24 = 0x1fa0
+#0  0x00007fffd869a140 in av_read_frame () from /lib/x86_64-linux-gnu/libavformat.so.60
+#1  0x00007fffdfd551f8 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#2  0x00007fffdfc31b0e in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#3  0x00007fffdfc19186 in ?? () from /tmp/reaper-mxcsr/reaper/reaper_linux_x86_64/REAPER/Plugins/reaper_video.so
+#4  0x00000000009438aa in ?? ()
+error creating client
+LC_NUMERIC / LANG is set to 'C.UTF-8', overriding LC_NUMERIC environment to POSIX
+[Inferior 1 (process 3802) exited normally]
+MXCSR_SUMMARY read=37 send=39 receive=75
