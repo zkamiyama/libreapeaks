@@ -1,5 +1,6 @@
 name: apply-adversarial-hardening2
 
+# Retry marker: apply fail-closed config fixes and Rust 1.98 formatting/clippy fixes.
 on:
   push:
     branches:
