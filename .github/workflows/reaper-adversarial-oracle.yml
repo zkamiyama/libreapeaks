@@ -1,9 +1,18 @@
 name: reaper-adversarial-oracle
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-adversarial-oracle.yml'
+      - 'src/**'
+      - 'tests/reaper_adversarial_oracle.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
   push:
     branches:
-      - adversarial-reaper-oracle
+      - main
     paths:
       - '.github/workflows/reaper-adversarial-oracle.yml'
       - 'src/**'
@@ -80,7 +89,7 @@ jobs:
 
           for case in cases:
               sr, frames, channels = case['sr'], case['frames'], case['ch']
-              block = max(1, round(sr / 40))
+              block = max(1, sr // 40)
               seed = 0x13579BDF
               payload = bytearray()
               for frame in range(frames):
