@@ -1,0 +1,74 @@
+name: classify-strict-wdl-float-sweep
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - 'oracle-reports/strict-wdl-float-model-sweep/sweep.json'
+      - 'oracle-reports/strict-wdl-float-model-sweep/environment.json'
+      - '.github/workflows/classify-strict-wdl-float-sweep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+
+      - name: Classify only valid exact-test executions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          root = Path('oracle-reports/strict-wdl-float-model-sweep')
+          sweep_path = root / 'sweep.json'
+          environment_path = root / 'environment.json'
+          if not sweep_path.exists() or not environment_path.exists():
+              raise SystemExit('sweep report has not been published yet')
+          rows = json.loads(sweep_path.read_text(encoding='utf-8'))
+          environment = json.loads(environment_path.read_text(encoding='utf-8'))
+          probe_score = int(environment.get('probe_score', -1))
+          valid_rows = []
+          for row in rows:
+              text = str(row.get('tail', '')).lower()
+              # A zero exit code is accepted only if Cargo actually ran the named integration test.
+              valid = (
+                  row.get('returncode') == 0
+                  and ('reaper_ffmpeg_byte_identical' in text or 'test result: ok' in text)
+                  and '0 tests' not in text
+              )
+              valid_rows.append({**row, 'valid_exact_pass': valid})
+          passing = [row['name'] for row in valid_rows if row['valid_exact_pass']]
+          baseline = next((row for row in valid_rows if row['name'] == 'baseline'), None)
+          conclusion = {
+              'probe_score': probe_score,
+              'environment_valid': probe_score >= 30,
+              'passing_variants': passing,
+              'baseline_passed': bool(baseline and baseline['valid_exact_pass']),
+              'floating_point_model_alone_explains_mismatch': bool(
+                  probe_score >= 30
+                  and passing
+                  and not (baseline and baseline['valid_exact_pass'])
+              ),
+              'rows': valid_rows,
+          }
+          (root / 'conclusion.json').write_text(json.dumps(conclusion, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(conclusion, indent=2))
+          PY
+          git add oracle-reports/strict-wdl-float-model-sweep/conclusion.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'classify strict-WDL floating-point sweep'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
