@@ -12,8 +12,11 @@ fn required_path(name: &str) -> PathBuf {
 fn read_pcm16(path: &Path) -> Vec<i16> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     assert_eq!(bytes.len() % 2, 0, "{} has odd byte length", path.display());
-    bytes.chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample))
         .collect()
 }
 
@@ -62,11 +65,17 @@ fn reaper_mode3_pcm16_is_byte_identical_for_adversarial_case() {
 
     let source_metadata = fs::metadata(&source_path)
         .unwrap_or_else(|error| panic!("stat {}: {error}", source_path.display()));
-    assert_eq!(parsed.header.source_size_low32, source_metadata.len() as u32);
+    assert_eq!(
+        parsed.header.source_size_low32,
+        source_metadata.len() as u32
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        assert_eq!(parsed.header.source_mtime_low32, source_metadata.mtime() as u32);
+        assert_eq!(
+            parsed.header.source_mtime_low32,
+            source_metadata.mtime() as u32
+        );
     }
 
     let options = GenerateOptions {

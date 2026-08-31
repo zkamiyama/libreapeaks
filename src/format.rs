@@ -334,18 +334,12 @@ impl ReaPeaks {
                         .ok_or(ReaPeaksError::InvalidHeader(
                             "loudness layer without matching waveform layer",
                         ))?;
-                    let expected_value_count =
-                        mirrored
-                            .peak_count
-                            .checked_mul(2)
-                            .ok_or(ReaPeaksError::InvalidHeader(
-                                "loudness value count overflow",
-                            ))?;
-                    if h.peak_count != expected_value_count {
-                        return Err(ReaPeaksError::InvalidHeader(
-                            "loudness count does not match waveform layer",
-                        ));
-                    }
+                    // REAPER's raw -'r' cadence is independent from the
+                    // mirrored waveform bucket count at EOF and for some peak
+                    // rates. The count therefore cannot be validated by
+                    // equality with the waveform header. Evenness, checked
+                    // payload sizing, and truncation checks below are the
+                    // structural invariants observed in real files.
 
                     let record_count = h.peak_count as usize / 2;
                     let sample_count = record_count.checked_mul(channels_usize).ok_or(
