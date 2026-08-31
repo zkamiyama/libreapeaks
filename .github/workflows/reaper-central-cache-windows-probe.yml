@@ -1,0 +1,91 @@
+name: reaper-central-cache-windows-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-central-cache-windows-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER 7.79 x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'reaper779_x64-install.exe'
+          Invoke-WebRequest 'https://www.reaper.fm/files/7.x/reaper779_x64-install.exe' -OutFile $installer
+          $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "REAPER installer failed: $($process.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'REAPER (x64)\reaper.exe'),
+            (Join-Path $env:ProgramFiles 'REAPER\reaper.exe')
+          )
+          $reaper = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $reaper) { throw 'reaper.exe not found after install' }
+          "REAPER_BIN=$reaper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Query central-cache paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'reaper-central-win'
+          $cache = Join-Path $root 'cache'
+          $media = Join-Path $root 'Media'
+          New-Item -ItemType Directory -Force -Path $cache,$media | Out-Null
+          $paths = @(
+            (Join-Path $media 'UPPER.WAV'),
+            (Join-Path $media 'upper.wav'),
+            (Join-Path $media 'ÄÖÜ.WAV'),
+            (Join-Path $media 'äöü.wav'),
+            (Join-Path $media 'I.WAV'),
+            (Join-Path $media 'i.wav'),
+            ((Join-Path $media 'UPPER.WAV') -replace '\\','/'),
+            'relative\Path\Take.WAV',
+            'C:\Users\Example\Audio\Take.WAV',
+            '\\server\share\Folder\Take.WAV'
+          )
+          Set-Content -LiteralPath (Join-Path $root 'paths.txt') -Value $paths -Encoding utf8
+          @"
+          [REAPER]
+          altpeaks=1
+          altpeakspath=$cache
+          peakcachegenmode=3
+          peakcachegenrs=300
+          showpeaks=64
+          "@ | Set-Content -LiteralPath (Join-Path $root 'reaper.ini') -Encoding utf8
+          @'
+          local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
+          local result = assert(os.getenv("REAPEAKS_RESULT"))
+          local out = assert(io.open(result, "w"))
+          out:write("source\tread\twrite\tresource\n")
+          for fn in io.lines(manifest) do
+            local read = reaper.GetPeakFileNameEx(fn, "", false)
+            local write = reaper.GetPeakFileNameEx(fn, "", true)
+            out:write(fn, "\t", read, "\t", write, "\t", reaper.GetResourcePath(), "\n")
+          end
+          out:close()
+          reaper.Main_OnCommand(40004, 0)
+          '@ | Set-Content -LiteralPath (Join-Path $root 'query.lua') -Encoding utf8
+          $env:REAPEAKS_MANIFEST = Join-Path $root 'paths.txt'
+          $env:REAPEAKS_RESULT = Join-Path $root 'results.tsv'
+          $process = Start-Process -FilePath $env:REAPER_BIN -ArgumentList @(
+            '-newinst', '-cfgfile', (Join-Path $root 'reaper.ini'), '-new', '-nosplash', (Join-Path $root 'query.lua')
+          ) -PassThru
+          Wait-Process -Id $process.Id -Timeout 120
+          if ($process.ExitCode -ne 0) { throw "REAPER failed: $($process.ExitCode)" }
+          Get-Content -LiteralPath (Join-Path $root 'results.tsv')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaper-central-cache-windows-probe-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/reaper-central-win/results.tsv
+            ${{ runner.temp }}/reaper-central-win/reaper.ini
+            ${{ runner.temp }}/reaper-central-win/paths.txt
+          if-no-files-found: error
+          retention-days: 7
