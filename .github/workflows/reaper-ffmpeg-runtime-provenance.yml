@@ -6,7 +6,6 @@ on:
       - hardening-reapeaks-cache-ffmpeg
     paths:
       - '.github/workflows/reaper-ffmpeg-runtime-provenance.yml'
-      - 'tools/reaper_oracle/runtime_provenance_probe.lua'
       - 'tools/reaper_oracle/build_probe.lua'
   workflow_dispatch:
 
@@ -24,21 +23,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install REAPER runtime dependencies and FFmpeg
+      - name: Install tracing and decoder dependencies
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y xvfb ffmpeg
+          sudo apt-get install -y xvfb ffmpeg gdb binutils
           ffmpeg -version | head -1
+          gdb --version | head -1
           if command -v vlc >/dev/null 2>&1; then
             echo 'VLC executable is unexpectedly present' >&2
             exit 1
           fi
           if ldconfig -p | grep -Eiq 'libvlc|libvlccore'; then
             echo 'VLC runtime libraries are unexpectedly present' >&2
-            ldconfig -p | grep -Ei 'libvlc|libvlccore' >&2 || true
             exit 1
           fi
+          AVFORMAT="$(ldconfig -p | awk '/libavformat\.so\.60/{print $NF; exit}')"
+          AVCODEC="$(ldconfig -p | awk '/libavcodec\.so\.60/{print $NF; exit}')"
+          test -n "$AVFORMAT"
+          test -n "$AVCODEC"
+          nm -D "$AVFORMAT" | grep -E ' avformat_open_input(@@|$)'
+          nm -D "$AVFORMAT" | grep -E ' av_read_frame(@@|$)'
+          nm -D "$AVCODEC" | grep -E ' avcodec_send_packet(@@|$)'
+          nm -D "$AVCODEC" | grep -E ' avcodec_receive_frame(@@|$)'
+          echo "AVFORMAT=$AVFORMAT" >> "$GITHUB_ENV"
+          echo "AVCODEC=$AVCODEC" >> "$GITHUB_ENV"
 
       - name: Download pinned REAPER 7.79 Linux x86_64
         shell: bash
@@ -96,7 +106,7 @@ jobs:
             -of default=noprint_wrappers=1 "$root/media/step.m4a" \
             | tee "$root/results/source-ffprobe.txt"
 
-      - name: Prove the decoder dependency by process maps and causal ablation
+      - name: Trace REAPER calls into libavformat and libavcodec
         shell: bash
         run: |
           set -euo pipefail
@@ -104,7 +114,6 @@ jobs:
           from pathlib import Path
           import os
           import re
-          import shutil
           import subprocess
           import tempfile
           import time
@@ -113,12 +122,79 @@ jobs:
           root = Path('/tmp/reaper-ffmpeg-provenance')
           media_root = root / 'media'
           results = root / 'results'
-          hold_script = Path('tools/reaper_oracle/runtime_provenance_probe.lua').resolve()
-          build_script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          probe = Path('tools/reaper_oracle/build_probe.lua').resolve()
           display = ':97'
 
-          def make_config(tag: str) -> tuple[Path, Path]:
-              case = Path(tempfile.mkdtemp(prefix=f'reaper-provenance-{tag}-'))
+          gdb_commands = r'''
+          set pagination off
+          set confirm off
+          set breakpoint pending on
+          set debuginfod enabled off
+          set print thread-events off
+          handle SIGPIPE nostop noprint pass
+          handle SIGUSR1 nostop noprint pass
+          handle SIGUSR2 nostop noprint pass
+          set $open_hits = 0
+          set $read_hits = 0
+          set $send_hits = 0
+          set $receive_hits = 0
+
+          break avformat_open_input
+          commands
+            silent
+            set $open_hits = $open_hits + 1
+            printf "FFTRACE_OPEN hit=%d url=%s\n", $open_hits, (char *)$rsi
+            if $open_hits == 1
+              info sharedlibrary libavformat
+              bt 8
+            end
+            continue
+          end
+
+          break av_read_frame
+          commands
+            silent
+            set $read_hits = $read_hits + 1
+            if $read_hits == 1
+              printf "FFTRACE_READ first-hit\n"
+              bt 8
+            end
+            continue
+          end
+
+          break avcodec_send_packet
+          commands
+            silent
+            set $send_hits = $send_hits + 1
+            if $send_hits == 1
+              printf "FFTRACE_SEND first-hit\n"
+              info sharedlibrary libavcodec
+              bt 8
+            end
+            continue
+          end
+
+          break avcodec_receive_frame
+          commands
+            silent
+            set $receive_hits = $receive_hits + 1
+            if $receive_hits == 1
+              printf "FFTRACE_RECEIVE first-hit\n"
+              bt 8
+            end
+            continue
+          end
+
+          run
+          printf "FFTRACE_SUMMARY open=%d read=%d send=%d receive=%d\n", $open_hits, $read_hits, $send_hits, $receive_hits
+          quit
+          '''
+
+          def run_trace(tag: str, media: Path) -> dict[str, object]:
+              peak = Path(str(media) + '.reapeaks')
+              if peak.exists():
+                  peak.unlink()
+              case = Path(tempfile.mkdtemp(prefix=f'reaper-gdb-{tag}-'))
               config = case / 'reaper.ini'
               config.write_text(
                   '[REAPER]\n'
@@ -127,164 +203,57 @@ jobs:
                   'showpeaks=64\n',
                   encoding='utf-8',
               )
-              return case, config
-
-          def process_tree(root_pid: int) -> list[int]:
-              parents: dict[int, int] = {}
-              for entry in Path('/proc').iterdir():
-                  if not entry.name.isdigit():
-                      continue
-                  try:
-                      status = (entry / 'status').read_text(errors='replace')
-                  except (FileNotFoundError, PermissionError, ProcessLookupError):
-                      continue
-                  match = re.search(r'^PPid:\s+(\d+)$', status, re.MULTILINE)
-                  if match:
-                      parents[int(entry.name)] = int(match.group(1))
-              found = {root_pid}
-              changed = True
-              while changed:
-                  changed = False
-                  for pid, parent in parents.items():
-                      if parent in found and pid not in found:
-                          found.add(pid)
-                          changed = True
-              return sorted(found)
-
-          def remove_peak(media: Path) -> Path:
-              peak = Path(str(media) + '.reapeaks')
-              if peak.exists():
-                  peak.unlink()
-              return peak
-
-          def capture_loaded_modules(tag: str, media: Path, expected_type: str) -> dict[str, object]:
-              remove_peak(media)
-              case, config = make_config(tag)
-              status_path = case / 'result.txt'
-              ready_path = case / 'ready.txt'
-              release_path = case / 'release.txt'
-              log_path = results / f'{tag}.reaper.log'
+              status_path = case / 'status.txt'
+              command_path = case / 'trace.gdb'
+              command_path.write_text(gdb_commands, encoding='utf-8')
+              trace_path = results / f'{tag}.gdb.txt'
               env = os.environ.copy()
               env.update(
                   DISPLAY=display,
                   REAPEAKS_MEDIA=str(media.resolve()),
                   REAPEAKS_RESULT=str(status_path),
-                  REAPEAKS_READY=str(ready_path),
-                  REAPEAKS_RELEASE=str(release_path),
               )
-              with log_path.open('wb') as log:
-                  process = subprocess.Popen(
+              with trace_path.open('wb') as output:
+                  completed = subprocess.run(
                       [
+                          'gdb', '-q', '--batch', '-x', str(command_path), '--args',
                           str(reaper), '-newinst', '-cfgfile', str(config),
-                          '-new', '-nosplash', str(hold_script),
+                          '-new', '-nosplash', str(probe),
                       ],
                       env=env,
-                      stdout=log,
+                      stdout=output,
                       stderr=subprocess.STDOUT,
+                      timeout=150,
+                      check=False,
                   )
-                  deadline = time.monotonic() + 90
-                  while not ready_path.exists():
-                      returncode = process.poll()
-                      if returncode is not None:
-                          status = status_path.read_text(errors='replace') if status_path.exists() else ''
-                          raise SystemExit(
-                              f'{tag}: REAPER exited before capture rc={returncode}, status={status!r}'
-                          )
-                      if time.monotonic() >= deadline:
-                          process.kill()
-                          raise SystemExit(f'{tag}: timed out waiting for runtime capture point')
-                      time.sleep(0.05)
-
-                  status = status_path.read_text(encoding='utf-8')
-                  (results / f'{tag}.status.txt').write_text(status, encoding='utf-8')
-                  source_type = next(
-                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
-                      '',
-                  )
-                  if source_type != expected_type or 'OK loops=' not in status:
-                      release_path.touch()
-                      process.wait(timeout=10)
-                      raise SystemExit(
-                          f'{tag}: expected completed {expected_type} source, status={status!r}'
-                      )
-
-                  pids = process_tree(process.pid)
-                  maps_sections: list[str] = []
-                  module_paths: set[str] = set()
-                  for pid in pids:
-                      maps_path = Path(f'/proc/{pid}/maps')
-                      try:
-                          maps = maps_path.read_text(errors='replace')
-                      except (FileNotFoundError, PermissionError, ProcessLookupError):
-                          continue
-                      maps_sections.append(f'===== PID {pid} =====\n{maps}')
-                      for line in maps.splitlines():
-                          fields = line.split()
-                          if fields and fields[-1].startswith('/'):
-                              module_paths.add(fields[-1])
-                  combined_maps = '\n'.join(maps_sections)
-                  (results / f'{tag}.process-maps.txt').write_text(combined_maps, encoding='utf-8')
-                  (results / f'{tag}.modules.txt').write_text(
-                      '\n'.join(sorted(module_paths)) + '\n',
-                      encoding='utf-8',
-                  )
-
-                  release_path.touch()
-                  returncode = process.wait(timeout=20)
-                  if returncode != 0:
-                      raise SystemExit(f'{tag}: REAPER exited with rc={returncode}')
-
-              return {
-                  'type': source_type,
-                  'pids': pids,
-                  'maps': combined_maps,
-                  'modules': sorted(module_paths),
-              }
-
-          def run_once(tag: str, media: Path) -> dict[str, object]:
-              peak = remove_peak(media)
-              case, config = make_config(tag)
-              status_path = case / 'result.txt'
-              log_path = results / f'{tag}.reaper.log'
-              env = os.environ.copy()
-              env.update(
-                  DISPLAY=display,
-                  REAPEAKS_MEDIA=str(media.resolve()),
-                  REAPEAKS_RESULT=str(status_path),
-              )
-              with log_path.open('wb') as log:
-                  try:
-                      completed = subprocess.run(
-                          [
-                              str(reaper), '-newinst', '-cfgfile', str(config),
-                              '-new', '-nosplash', str(build_script),
-                          ],
-                          env=env,
-                          stdout=log,
-                          stderr=subprocess.STDOUT,
-                          timeout=90,
-                          check=False,
-                      )
-                      returncode: int | None = completed.returncode
-                  except subprocess.TimeoutExpired:
-                      returncode = None
+              trace = trace_path.read_text(errors='replace')
               status = status_path.read_text(errors='replace') if status_path.exists() else ''
               (results / f'{tag}.status.txt').write_text(status, encoding='utf-8')
+              summary_match = re.search(
+                  r'FFTRACE_SUMMARY open=(\d+) read=(\d+) send=(\d+) receive=(\d+)',
+                  trace,
+              )
+              if not summary_match:
+                  raise SystemExit(
+                      f'{tag}: missing GDB trace summary, rc={completed.returncode}; tail={trace[-4000:]}'
+                  )
+              counts = tuple(int(value) for value in summary_match.groups())
+              urls = re.findall(r'^FFTRACE_OPEN hit=\d+ url=(.*)$', trace, re.MULTILINE)
+              source_type = next(
+                  (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                  '',
+              )
+              length_match = re.search(r'^LENGTH=([^;]+);', status, re.MULTILINE)
+              length = float(length_match.group(1)) if length_match else -1.0
               return {
-                  'returncode': returncode,
+                  'returncode': completed.returncode,
                   'status': status,
-                  'peak_exists': peak.exists(),
-                  'source_type': next(
-                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
-                      '',
-                  ),
-                  'ok': 'OK loops=' in status and peak.exists(),
+                  'source_type': source_type,
+                  'length': length,
+                  'counts': counts,
+                  'urls': urls,
+                  'trace_path': str(trace_path),
               }
-
-          ffmpeg_names = (
-              'libavcodec', 'libavformat', 'libavutil', 'libavfilter',
-              'libavdevice', 'libswresample', 'libswscale', 'libpostproc',
-          )
 
           xvfb_log = (results / 'xvfb.log').open('wb')
           xvfb = subprocess.Popen(
@@ -294,115 +263,8 @@ jobs:
           )
           try:
               time.sleep(0.35)
-              native = capture_loaded_modules('baseline-native-wave', media_root / 'step.wav', 'WAVE')
-              video = capture_loaded_modules('baseline-video-alac', media_root / 'step.m4a', 'VIDEO')
-
-              video_lower = str(video['maps']).lower()
-              required = ('libavformat', 'libavcodec', 'libavutil')
-              missing = [name for name in required if name not in video_lower]
-              if missing:
-                  raise SystemExit(
-                      'baseline VIDEO source completed but FFmpeg modules were absent: '
-                      + ', '.join(missing)
-                  )
-              if 'libvlc' in video_lower or 'libvlccore' in video_lower:
-                  raise SystemExit('baseline VIDEO source loaded VLC')
-
-              video_ffmpeg_modules = [
-                  path for path in video['modules']
-                  if any(name in Path(path).name.lower() for name in ffmpeg_names)
-              ]
-              native_ffmpeg_modules = [
-                  path for path in native['modules']
-                  if any(name in Path(path).name.lower() for name in ffmpeg_names)
-              ]
-
-              # Loaded-module presence alone is deliberately not accepted as proof:
-              # REAPER may load the VIDEO backend eagerly even for a WAVE-only process.
-              # Remove the FFmpeg runtime suite and require WAVE to keep working while
-              # the ALAC/VIDEO source stops working.
-              library_dir = Path('/usr/lib/x86_64-linux-gnu')
-              hidden_root = root / 'hidden-ffmpeg-runtime'
-              hidden_root.mkdir(parents=True, exist_ok=True)
-              patterns = (
-                  'libavcodec.so*', 'libavformat.so*', 'libavutil.so*',
-                  'libavfilter.so*', 'libavdevice.so*', 'libswresample.so*',
-                  'libswscale.so*', 'libpostproc.so*',
-              )
-              candidates: list[Path] = []
-              for pattern in patterns:
-                  candidates.extend(library_dir.glob(pattern))
-              candidates = sorted(set(candidates), key=lambda path: (path.is_symlink(), path.name))
-              if not any(path.name.startswith('libavcodec.so') for path in candidates):
-                  raise SystemExit('could not locate the installed FFmpeg shared libraries')
-
-              moved: list[tuple[Path, Path]] = []
-              try:
-                  for original in candidates:
-                      destination = hidden_root / original.name
-                      subprocess.run(
-                          ['sudo', 'mv', '--', str(original), str(destination)],
-                          check=True,
-                      )
-                      moved.append((destination, original))
-                  (results / 'hidden-ffmpeg-libraries.txt').write_text(
-                      '\n'.join(str(original) for _, original in moved) + '\n',
-                      encoding='utf-8',
-                  )
-
-                  ablated_wave = run_once('ablated-native-wave', media_root / 'step.wav')
-                  ablated_alac = run_once('ablated-video-alac', media_root / 'step.m4a')
-              finally:
-                  restore_errors: list[str] = []
-                  for hidden, original in reversed(moved):
-                      if not hidden.exists() and not hidden.is_symlink():
-                          restore_errors.append(f'missing hidden library {hidden}')
-                          continue
-                      restored = subprocess.run(
-                          ['sudo', 'mv', '--', str(hidden), str(original)],
-                          text=True,
-                          capture_output=True,
-                          check=False,
-                      )
-                      if restored.returncode != 0:
-                          restore_errors.append(
-                              f'restore {hidden} -> {original}: {restored.stderr.strip()}'
-                          )
-                  if restore_errors:
-                      raise SystemExit('; '.join(restore_errors))
-
-              subprocess.run(['ffmpeg', '-version'], stdout=subprocess.DEVNULL, check=True)
-
-              if not ablated_wave['ok'] or ablated_wave['source_type'] != 'WAVE':
-                  raise SystemExit(
-                      'FFmpeg ablation also broke native WAVE decoding; '
-                      f'cannot attribute the dependency: {ablated_wave!r}'
-                  )
-              if ablated_alac['ok'] or ablated_alac['peak_exists']:
-                  raise SystemExit(
-                      'ALAC/VIDEO peak generation still succeeded without the FFmpeg runtime; '
-                      f'FFmpeg use was not proven: {ablated_alac!r}'
-                  )
-
-              report = [
-                  'REAPER_FFMPEG_CAUSAL_PROVENANCE=confirmed',
-                  f'baseline_native_source_type={native["type"]}',
-                  f'baseline_video_source_type={video["type"]}',
-                  f'baseline_native_pids={native["pids"]}',
-                  f'baseline_video_pids={video["pids"]}',
-                  'baseline_video_ffmpeg_modules:',
-                  *[f'  {path}' for path in video_ffmpeg_modules],
-                  'baseline_native_ffmpeg_modules:',
-                  *[f'  {path}' for path in native_ffmpeg_modules],
-                  'loaded_module_presence_is_path_specific=false',
-                  f'ablated_wave={ablated_wave!r}',
-                  f'ablated_alac={ablated_alac!r}',
-                  'causal_result=removing_ffmpeg_breaks_alac_video_but_not_wave',
-                  'vlc_runtime_present=false',
-              ]
-              text = '\n'.join(report) + '\n'
-              (results / 'runtime-provenance-report.txt').write_text(text, encoding='utf-8')
-              print(text, end='')
+              wave = run_trace('native-wave', media_root / 'step.wav')
+              alac = run_trace('video-alac', media_root / 'step.m4a')
           finally:
               xvfb.terminate()
               try:
@@ -410,11 +272,54 @@ jobs:
               except subprocess.TimeoutExpired:
                   xvfb.kill()
               xvfb_log.close()
+
+          if wave['source_type'] != 'WAVE' or wave['length'] != 3.0:
+              raise SystemExit(f'native control was not a valid WAVE source: {wave!r}')
+          if alac['source_type'] != 'VIDEO' or alac['length'] != 3.0:
+              raise SystemExit(f'ALAC case was not a valid VIDEO source: {alac!r}')
+          if 'OK loops=' not in wave['status'] or 'OK loops=' not in alac['status']:
+              raise SystemExit(f'peak generation did not complete: wave={wave!r}, alac={alac!r}')
+
+          wave_open, wave_read, wave_send, wave_receive = wave['counts']
+          alac_open, alac_read, alac_send, alac_receive = alac['counts']
+          target = str((media_root / 'step.m4a').resolve())
+          if not any(url == target or url.endswith('/step.m4a') for url in alac['urls']):
+              raise SystemExit(f'avformat_open_input never received the ALAC path: {alac!r}')
+          if not (alac_open > 0 and alac_read > 0 and alac_send > 0 and alac_receive > 0):
+              raise SystemExit(f'ALAC did not execute the full FFmpeg demux/decode chain: {alac!r}')
+          if any(url.endswith('/step.wav') for url in wave['urls']):
+              raise SystemExit(f'native WAVE control was opened through libavformat: {wave!r}')
+          if wave_open or wave_read or wave_send or wave_receive:
+              raise SystemExit(
+                  'fresh WAVE-only control unexpectedly executed FFmpeg demux/decode calls: '
+                  f'{wave!r}'
+              )
+
+          report = [
+              'REAPER_FFMPEG_FUNCTION_CALL_PROVENANCE=confirmed',
+              f'native_source_type={wave["source_type"]}',
+              f'native_length={wave["length"]}',
+              f'native_ffmpeg_counts={wave["counts"]}',
+              f'native_avformat_urls={wave["urls"]}',
+              f'video_source_type={alac["source_type"]}',
+              f'video_length={alac["length"]}',
+              f'video_ffmpeg_counts={alac["counts"]}',
+              f'video_avformat_urls={alac["urls"]}',
+              f'system_avformat={os.environ["AVFORMAT"]}',
+              f'system_avcodec={os.environ["AVCODEC"]}',
+              'vlc_runtime_present=false',
+              'proof=GDB breakpoints observed REAPER opening the exact M4A path through '
+              'avformat_open_input and executing av_read_frame, avcodec_send_packet, '
+              'and avcodec_receive_frame; the matched WAVE control executed none of them',
+          ]
+          text = '\n'.join(report) + '\n'
+          (results / 'runtime-provenance-report.txt').write_text(text, encoding='utf-8')
+          print(text, end='')
           PY
           cat /tmp/reaper-ffmpeg-provenance/results/runtime-provenance-report.txt \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload runtime provenance evidence
+      - name: Upload function-call provenance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
