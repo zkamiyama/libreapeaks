@@ -1,0 +1,268 @@
+name: reaper-adversarial-oracle
+
+on:
+  push:
+    branches:
+      - adversarial-reaper-oracle
+    paths:
+      - '.github/workflows/reaper-adversarial-oracle.yml'
+      - 'src/**'
+      - 'tests/reaper_adversarial_oracle.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-adversarial-oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install REAPER runtime and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/adversarial-oracle/results /tmp/adversarial-oracle/reaper
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o /tmp/adversarial-oracle/reaper779_linux_x86_64.tar.xz
+          tar -xJf /tmp/adversarial-oracle/reaper779_linux_x86_64.tar.xz \
+            -C /tmp/adversarial-oracle/reaper
+          REAPER_BIN="$(find /tmp/adversarial-oracle/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create adversarial lossless inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/adversarial-oracle/media
+          python - <<'PY'
+          from pathlib import Path
+          import json, math, struct, wave
+
+          root = Path('/tmp/adversarial-oracle/media')
+          cases = [
+              dict(name='baseline_48k_300', sr=48000, pps=300, frames=144000, ch=2, kind='step'),
+              dict(name='eof_minus1_48k_300', sr=48000, pps=300, frames=143999, ch=2, kind='step'),
+              dict(name='eof_plus1_48k_300', sr=48000, pps=300, frames=144001, ch=2, kind='step'),
+              dict(name='window_minus1_48k_300', sr=48000, pps=300, frames=19199, ch=2, kind='impulse'),
+              dict(name='window_exact_48k_300', sr=48000, pps=300, frames=19200, ch=2, kind='impulse'),
+              dict(name='window_plus1_48k_300', sr=48000, pps=300, frames=19201, ch=2, kind='impulse'),
+              dict(name='rate_44100_300', sr=44100, pps=300, frames=132300, ch=2, kind='step'),
+              dict(name='rate_44100_500', sr=44100, pps=500, frames=132300, ch=2, kind='impulse'),
+              dict(name='rate_32000_300', sr=32000, pps=300, frames=96000, ch=2, kind='step'),
+              dict(name='rate_22050_300', sr=22050, pps=300, frames=66150, ch=2, kind='impulse'),
+              dict(name='rate_88200_300', sr=88200, pps=300, frames=264600, ch=2, kind='step'),
+              dict(name='rate_96000_150', sr=96000, pps=150, frames=288000, ch=2, kind='impulse'),
+              dict(name='peakrate_48k_150', sr=48000, pps=150, frames=144000, ch=2, kind='step'),
+              dict(name='peakrate_48k_500', sr=48000, pps=500, frames=144000, ch=2, kind='impulse'),
+              dict(name='mono_48k_300', sr=48000, pps=300, frames=144000, ch=1, kind='noise'),
+              dict(name='sixch_48k_300', sr=48000, pps=300, frames=144000, ch=6, kind='noise'),
+          ]
+          (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          def clamp(v):
+              return max(-32768, min(32767, int(v)))
+
+          for case in cases:
+              sr, frames, channels = case['sr'], case['frames'], case['ch']
+              block = max(1, round(sr / 40))
+              seed = 0x13579BDF
+              payload = bytearray()
+              for frame in range(frames):
+                  vals = []
+                  for channel in range(channels):
+                      if case['kind'] == 'step':
+                          third = max(1, frames // 3)
+                          level = 0 if frame < third else 4096 if frame < 2 * third else 16384
+                          value = level if channel % 2 == 0 else -level // 2
+                      elif case['kind'] == 'impulse':
+                          points = {0, max(0, block - 1), block, 2 * block - 1, 2 * block,
+                                    max(0, frames - 2), max(0, frames - 1)}
+                          value = (32767 if channel % 2 == 0 else -32768) if frame in points else 0
+                      else:
+                          seed = (1664525 * seed + 1013904223 + channel) & 0xffffffff
+                          value = ((seed >> 16) & 0xffff) - 32768
+                          value = clamp(value // (channel + 2))
+                      vals.append(clamp(value))
+                  payload += struct.pack('<' + 'h' * channels, *vals)
+              raw = root / f"{case['name']}.s16le"
+              wav = root / f"{case['name']}.wav"
+              raw.write_bytes(payload)
+              with wave.open(str(wav), 'wb') as out:
+                  out.setnchannels(channels)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          import json, subprocess
+          root = Path('/tmp/adversarial-oracle/media')
+          cases = json.loads((root / 'cases.json').read_text())
+          for case in cases:
+              name = case['name']
+              wav = root / f'{name}.wav'
+              m4a = root / f'{name}.m4a'
+              decoded = root / f'{name}.decoded.s16le'
+              subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(wav),'-map_metadata','-1','-c:a','alac',str(m4a)], check=True)
+              subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(m4a),'-f','s16le','-acodec','pcm_s16le',str(decoded)], check=True)
+              original = (root / f'{name}.s16le').read_bytes()
+              got = decoded.read_bytes()
+              if original != got:
+                  raise SystemExit(f'{name}: FFmpeg ALAC roundtrip changed PCM: {len(original)} != {len(got)}')
+          PY
+      - name: Build REAPER mode-3 oracle files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess, tempfile, time
+
+          root = Path('/tmp/adversarial-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], stdout=xvfb_log, stderr=subprocess.STDOUT)
+          try:
+              time.sleep(0.4)
+              for index, case_info in enumerate(cases):
+                  name = case_info['name']
+                  media = media_root / f'{name}.m4a'
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case_dir = Path(tempfile.mkdtemp(prefix=f'adversarial-{index:02d}-'))
+                  config = case_dir / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      f"peakcachegenrs={case_info['pps']}\n"
+                      'showpeaks=64\n', encoding='utf-8')
+                  status_path = case_dir / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status_path))
+                  log_path = results / f'{name}.reaper.log'
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run([
+                          str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)
+                      ], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=90, check=False)
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{name}.status.txt').write_text(status, encoding='utf-8')
+                  source_type = next((line[5:] for line in status.splitlines() if line.startswith('TYPE=')), '')
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{name}: REAPER failed rc={completed.returncode}: {status!r}')
+                  if source_type != 'VIDEO':
+                      raise SystemExit(f'{name}: expected VIDEO source, got {source_type!r}')
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{name}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try: xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired: xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Compare every adversarial case and collect all failures
+        id: compare
+        shell: bash
+        run: |
+          set +e
+          failures=0
+          : > /tmp/adversarial-oracle/results/summary.txt
+          for name in $(python -c "import json;print(' '.join(x['name'] for x in json.load(open('/tmp/adversarial-oracle/media/cases.json'))))"); do
+            echo "=== $name ===" | tee -a /tmp/adversarial-oracle/results/summary.txt
+            REAPEAKS_PCM16="/tmp/adversarial-oracle/media/$name.decoded.s16le" \
+            REAPEAKS_SOURCE="/tmp/adversarial-oracle/media/$name.m4a" \
+            REAPEAKS_ORACLE="/tmp/adversarial-oracle/results/$name.reaper.reapeaks" \
+            LIBREAPEAKS_OUTPUT="/tmp/adversarial-oracle/results/$name.libreapeaks.reapeaks" \
+              cargo test --release --features strict-wdl \
+                --test reaper_adversarial_oracle \
+                reaper_mode3_pcm16_is_byte_identical_for_adversarial_case \
+                -- --ignored --exact --nocapture \
+                > "/tmp/adversarial-oracle/results/$name.test.txt" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "PASS $name" | tee -a /tmp/adversarial-oracle/results/summary.txt
+            else
+              echo "FAIL $name rc=$rc" | tee -a /tmp/adversarial-oracle/results/summary.txt
+              tail -40 "/tmp/adversarial-oracle/results/$name.test.txt" | tee -a /tmp/adversarial-oracle/results/summary.txt
+              failures=$((failures+1))
+            fi
+          done
+          echo "FAILURES=$failures" | tee -a /tmp/adversarial-oracle/results/summary.txt
+          cat /tmp/adversarial-oracle/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          exit "$failures"
+      - name: Analyze first differences by layer
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/adversarial-oracle/results/diff-report.txt
+          from pathlib import Path
+          import hashlib, struct
+          root = Path('/tmp/adversarial-oracle/results')
+
+          def parse(path):
+              data = path.read_bytes()
+              channels = data[4]
+              n = data[5]
+              headers = [struct.unpack_from('<iI', data, 18 + 8*i) for i in range(n)]
+              off = 18 + 8*n
+              layers = []
+              for div,count in headers:
+                  if div > 0 or div in (-115,-114): size = count * channels * 4
+                  elif div == -103: size = count * channels * 192
+                  else: raise ValueError((path, div))
+                  layers.append((div,count,off,data[off:off+size]))
+                  off += size
+              return data, headers, layers
+
+          for oracle_path in sorted(root.glob('*.reaper.reapeaks')):
+              name = oracle_path.name.removesuffix('.reaper.reapeaks')
+              generated_path = root / f'{name}.libreapeaks.reapeaks'
+              if not generated_path.exists():
+                  print(f'{name}: NO_GENERATED_FILE')
+                  continue
+              a, ah, al = parse(oracle_path); b, bh, bl = parse(generated_path)
+              if a == b:
+                  print(f'{name}: BYTE_IDENTICAL bytes={len(a)} sha256={hashlib.sha256(a).hexdigest()}')
+                  continue
+              first = next((i for i,(x,y) in enumerate(zip(a,b)) if x != y), min(len(a),len(b)))
+              print(f'{name}: DIFFER first_byte={first} oracle_len={len(a)} generated_len={len(b)} headers_equal={ah==bh}')
+              for idx, (la, lb) in enumerate(zip(al, bl)):
+                  da,ca,oa,pa = la; db,cb,ob,pb = lb
+                  diffs = sum(x != y for x,y in zip(pa,pb)) + abs(len(pa)-len(pb))
+                  if diffs or (da,ca) != (db,cb):
+                      firstp = next((i for i,(x,y) in enumerate(zip(pa,pb)) if x != y), min(len(pa),len(pb)))
+                      print(f'  layer={idx} div={da}/{db} count={ca}/{cb} differing_bytes={diffs} first_payload_byte={firstp}')
+          PY
+      - name: Upload adversarial oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-adversarial-oracle-${{ github.sha }}
+          path: |
+            /tmp/adversarial-oracle/results
+            /tmp/adversarial-oracle/media/cases.json
+          if-no-files-found: error
+          retention-days: 7
