@@ -1,0 +1,102 @@
+name: rust-hardening-materialize-v3
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/rust-hardening-materialize-v3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply staged hardening with robust patch adapters
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          yaml = Path('.github/workflows/rust-hardening-materialize.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = yaml.index(marker) + len(marker)
+          end = yaml.index("\n          PY\n", start)
+          block = yaml[start:end]
+          script = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in block.splitlines()
+          )
+
+          a = script.index('def replace_once(')
+          b = script.index('\ndef replace_section(', a)
+          c = script.index('\n\n# generate.rs:', b)
+          adapters = r'''def _flex_find(text, marker, start=0):
+              pos = text.find(marker, start)
+              if pos >= 0:
+                  return pos, len(marker)
+              parts = re.split(r'(\s+)', marker)
+              pattern = ''.join(r'\s+' if part.isspace() else re.escape(part) for part in parts)
+              match = re.search(pattern, text[start:], flags=re.MULTILINE)
+              if match is None:
+                  return -1, 0
+              return start + match.start(), match.end() - match.start()
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              pos, size = _flex_find(text, old)
+              if pos < 0:
+                  raise SystemExit(f'flexible marker not found in {path}: {old[:80]!r}')
+              p.write_text(text[:pos] + new + text[pos + size:])
+
+          def replace_section(path, start, end, new):
+              p = Path(path)
+              text = p.read_text()
+              a, _ = _flex_find(text, start)
+              if a < 0:
+                  raise SystemExit(f'start marker not found in {path}: {start!r}')
+              b, end_size = _flex_find(text, end, a)
+              if b < 0:
+                  raise SystemExit(f'end marker not found in {path}: {end!r}')
+              # generate.rs used an end marker beginning with the function-closing
+              # brace. The replacement already contains that brace, so consume it
+              # while preserving the following documentation marker.
+              if end.startswith('\n}\n'):
+                  close_len = len('\n}\n')
+                  p.write_text(text[:a] + new + text[b + close_len:])
+              else:
+                  p.write_text(text[:a] + new + text[b:])
+          '''
+          script = script[:a] + adapters + script[c:]
+          exec(compile(script, '<rust-hardening-materialize>', 'exec'), {'Path': Path, 're': re})
+          PY
+          cargo fmt --all
+      - name: Pure Rust adversarial and regression tests
+        run: cargo test --all-targets
+      - name: Strict WDL full regression suite
+        run: cargo test --release --all-targets --features strict-wdl
+      - name: Clippy hard gate
+        run: cargo clippy --all-targets --features strict-wdl -- -D warnings
+      - name: Commit only after every Rust gate passes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/rust-hardening-materialize.yml
+          rm -f .github/workflows/rust-hardening-materialize-v2.yml
+          rm -f .github/workflows/rust-hardening-materialize-v3.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Harden parser generator pyramid and FFI boundaries'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
