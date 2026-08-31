@@ -21,8 +21,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Materialize generated Rust demo helper
-        run: cargo test --all-targets
+      - name: Reproduce pre-Clippy CI sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets
+          cargo test --release --all-targets --features strict-wdl
+          cargo test --release --test spectral_corpus_diagnostic --features strict-wdl -- --nocapture
       - name: Package full source tree
         shell: bash
         run: |
