@@ -1,0 +1,13 @@
+diff --git a/src/strict_wdl.cpp b/src/strict_wdl.cpp
+index 7e1f11e..adf5159 100644
+--- a/src/strict_wdl.cpp
++++ b/src/strict_wdl.cpp
+@@ -108,7 +108,7 @@ long long rpk_wdl_resample_all(
+         long long out_pos = 0;
+ 
+         // Fresh-process REAPER 7.79 pointwise probes at the 22.05 kHz boundary
+-        // identify a 2048-double source buffer. WDL's IIR prefilter fade depends
++        // identify a 1200-double source buffer. WDL's IIR prefilter fade depends
+         // on the number of frames passed to ResampleOut(), so this feed granularity
+         // is part of strict spectral compatibility. The buffer is interleaved,
+         // therefore the frame count is divided by the channel count.
