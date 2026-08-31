@@ -28,7 +28,6 @@ jobs:
           if (-not $exe) { throw 'reaper.exe not found after extraction' }
           Copy-Item -Recurse -Force (Join-Path $exe.DirectoryName '*') $portable
           "REAPER_EXE=$(Join-Path $portable 'reaper.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "REAPER_PORTABLE=$portable" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Query GetPeakFileNameEx
         shell: pwsh
         run: |
@@ -66,15 +65,12 @@ jobs:
           }
           if (-not (Test-Path $result)) { throw "result not created; exit=$($process.ExitCode)" }
           Get-Content $result
-          "PROBE_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: reaper-central-cache-native-windows-${{ github.sha }}
           path: |
-            ${{ env.PROBE_ROOT }}/results.json
-            ${{ env.PROBE_ROOT }}/paths.txt
-            ${{ env.PROBE_ROOT }}/reaper.ini
+            ${{ runner.temp }}/central-probe
             ${{ runner.temp }}/reaper-7z.log
           if-no-files-found: warn
           retention-days: 7
