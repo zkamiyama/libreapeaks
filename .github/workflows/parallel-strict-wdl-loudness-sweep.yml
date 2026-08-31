@@ -1,0 +1,239 @@
+name: parallel-strict-wdl-loudness-sweep
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/parallel-strict-wdl-loudness-sweep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: parallel-strict-wdl-loudness-sweep
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+      - id: matrix
+        name: Build bounded hypothesis matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import json
+          import os
+          import re
+
+          files=[]
+          for root in (Path('src'),Path('native'),Path('include')):
+              if root.exists():
+                  files.extend(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.rs','.c','.cc','.cpp','.h','.hpp'})
+          if Path('build.rs').exists(): files.append(Path('build.rs'))
+          relevant=re.compile(r'loudness|momentary|short.?term|strict.?wdl|wdl_|-114|-115|ebu|r128|k.?weight|filter|biquad|energy|rms',re.I)
+          descriptors=[]; seen=set()
+          def add(kind,path,start,end,replacement,description,extra=None):
+              key=(kind,str(path),start,end,replacement,json.dumps(extra or {},sort_keys=True))
+              if key in seen:return
+              seen.add(key)
+              descriptors.append({'id':len(descriptors),'kind':kind,'path':str(path),'start':start,'end':end,'replacement_b64':base64.b64encode(replacement.encode()).decode(),'description':description,'extra':extra or {}})
+          for path in sorted(set(files)):
+              text=path.read_text(encoding='utf-8',errors='replace')
+              lines=text.splitlines(keepends=True); offsets=[]; cur=0
+              for line in lines: offsets.append(cur); cur+=len(line)
+              rel={i for i,line in enumerate(lines) if relevant.search(line)}; expanded=set()
+              for i in rel: expanded.update(range(max(0,i-60),min(len(lines),i+61)))
+              for i in sorted(expanded):
+                  line=lines[i]; base=offsets[i]
+                  replacements=[
+                    ('.round()','.floor()','round-floor'),('.round()','.trunc()','round-trunc'),('.round()','.ceil()','round-ceil'),
+                    ('roundf(','floorf(','roundf-floorf'),('roundf(','truncf(','roundf-truncf'),('roundf(','ceilf(','roundf-ceilf'),
+                    ('std::round(','std::floor(','std-round-floor'),('std::round(','std::trunc(','std-round-trunc'),('std::round(','std::ceil(','std-round-ceil'),
+                    ('lrint(','lround(','lrint-lround'),('sqrtf(','sqrt(','sqrtf-double'),('log10f(','log10(','log10f-double'),
+                    ('powf(','pow(','powf-double'),('expf(','exp(','expf-double'),('sinf(','sin(','sinf-double'),('cosf(','cos(','cosf-double'),('tanf(','tan(','tanf-double'),
+                    ('32768.0f','32768.0','scale-literal-double'),('32768.0','32767.0','scale-32767'),('32767.0','32768.0','scale-32768'),
+                  ]
+                  for old,new,desc in replacements:
+                      pos=0
+                      while True:
+                          pos=line.find(old,pos)
+                          if pos<0:break
+                          add('source',path,base+pos,base+pos+len(old),new,f'{desc}:{path}:{i+1}')
+                          pos+=len(old)
+                  for match in re.finditer(r'\b(float|f32)\b',line):
+                      if any(token in line.lower() for token in ('state','coeff','accum','energy','sum','loud','mean','square','filter','biquad','z1','z2','rms')):
+                          add('source',path,base+match.start(),base+match.end(),'double' if match.group(1)=='float' else 'f64',f'local-precision64:{path}:{i+1}:{match.start()}')
+                  for match in re.finditer(r'(?<![A-Za-z0-9_])(1200|4800|19200|24000|144000)(?![A-Za-z0-9_])',line):
+                      value=int(match.group(1))
+                      for delta in (-1,1):add('source',path,base+match.start(),base+match.end(),str(value+delta),f'boundary-{value}{delta:+d}:{path}:{i+1}')
+                  for old,new,desc in [(' < ',' <= ','lt-le'),(' <= ',' < ','le-lt'),(' > ',' >= ','gt-ge'),(' >= ',' > ','ge-gt')]:
+                      pos=line.find(old)
+                      if pos>=0 and any(token in line.lower() for token in ('frame','sample','window','hop','count','length','position','offset')):
+                          add('source',path,base+pos,base+pos+len(old),new,f'{desc}:{path}:{i+1}')
+              # Broad precision conversions, line range bounded by relevant function-like blocks.
+              starts=[m.start() for m in re.finditer(r'(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?(?:extern\s+"C"\s+)?fn\s+[A-Za-z0-9_]+',text)]
+              starts+= [m.start() for m in re.finditer(r'(?m)^\s*(?:class|struct)\s+[A-Za-z0-9_]+',text)]
+              starts=sorted(set(starts))
+              for n,start in enumerate(starts):
+                  end=starts[n+1] if n+1<len(starts) else min(len(text),start+12000)
+                  block=text[start:end]
+                  if relevant.search(block) and ('f32' in block or re.search(r'\bfloat\b',block)):
+                      converted=re.sub(r'\bf32\b','f64',block);converted=re.sub(r'\bfloat\b','double',converted)
+                      if converted!=block:add('source',path,start,end,converted,f'block-precision64:{path}:{text.count(chr(10),0,start)+1}')
+          build_variants=[
+            ('gcc-fast-math',{'CXXFLAGS':'-ffast-math','CFLAGS':'-ffast-math'}),
+            ('gcc-ofast',{'CXXFLAGS':'-Ofast','CFLAGS':'-Ofast'}),
+            ('gcc-contract-fast',{'CXXFLAGS':'-ffp-contract=fast','CFLAGS':'-ffp-contract=fast'}),
+            ('gcc-contract-off',{'CXXFLAGS':'-ffp-contract=off','CFLAGS':'-ffp-contract=off'}),
+            ('gcc-float-store',{'CXXFLAGS':'-ffloat-store','CFLAGS':'-ffloat-store'}),
+            ('gcc-excess-standard',{'CXXFLAGS':'-fexcess-precision=standard','CFLAGS':'-fexcess-precision=standard'}),
+            ('gcc-opt2-fast',{'CXXFLAGS':'-O2 -ffast-math','CFLAGS':'-O2 -ffast-math'}),
+            ('gcc-opt3-fast',{'CXXFLAGS':'-O3 -ffast-math','CFLAGS':'-O3 -ffast-math'}),
+            ('gcc-opt2-strict',{'CXXFLAGS':'-O2 -ffp-contract=off -frounding-math -fexcess-precision=standard -fno-tree-reassoc','CFLAGS':'-O2 -ffp-contract=off -frounding-math -fexcess-precision=standard -fno-tree-reassoc'}),
+            ('clang-opt2',{'CXX':'clang++','CC':'clang','CXXFLAGS':'-O2','CFLAGS':'-O2'}),
+            ('clang-opt3',{'CXX':'clang++','CC':'clang','CXXFLAGS':'-O3','CFLAGS':'-O3'}),
+            ('clang-fast',{'CXX':'clang++','CC':'clang','CXXFLAGS':'-O3 -ffast-math','CFLAGS':'-O3 -ffast-math'}),
+          ]
+          for name,extra in build_variants:add('env',Path('build.rs'),0,0,'',name,extra)
+          priority=('round','precision64','sqrt','log','pow','exp','scale','boundary','lt-','le-','gt-','ge-')
+          descriptors.sort(key=lambda d:(next((i for i,t in enumerate(priority) if t in d['description']),99),d['description']))
+          descriptors=descriptors[:180]
+          for i,d in enumerate(descriptors):d['id']=i
+          matrix={'include':descriptors}
+          encoded=json.dumps(matrix,separators=(',',':'))
+          if len(encoded)>900000:raise SystemExit('matrix output too large')
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as out:out.write('matrix='+encoded+'\n')
+          Path('/tmp/matrix.json').write_text(json.dumps(matrix,indent=2)+'\n')
+          print(f'hypotheses={len(descriptors)}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypothesis-matrix-${{ github.sha }}
+          path: /tmp/matrix.json
+          retention-days: 14
+
+  test:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+      - name: Install optional compiler
+        if: startsWith(matrix.description, 'clang-')
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Download fixed oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/parallel-loudness
+          mkdir -p "$root/input" "$root/output" "$root/result"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+      - name: Apply hypothesis and run exact test
+        shell: bash
+        env:
+          HYPOTHESIS: ${{ toJSON(matrix) }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64,json,os,re,shutil,subprocess,time
+          h=json.loads(os.environ['HYPOTHESIS']);root=Path('/tmp/parallel-loudness');inputs=root/'input';output=root/'output';result=root/'result'
+          if h['kind']=='source':
+              path=Path(h['path']);text=path.read_text(encoding='utf-8',errors='replace');replacement=base64.b64decode(h['replacement_b64']).decode()
+              if h['start']<0 or h['end']>len(text):raise SystemExit('invalid mutation range')
+              path.write_text(text[:h['start']]+replacement+text[h['end']:],encoding='utf-8')
+          source=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8');names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',source)))
+          dirs=[p for p in inputs.rglob('*') if p.is_dir()]
+          peak=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*.reapeaks')))
+          pcm=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le','.pcm','.raw','.wav','.m4a'}))
+          env=os.environ.copy();env.update({str(k):str(v) for k,v in h.get('extra',{}).items()})
+          for name in names:
+              if any(t in name for t in ('OUT','RESULT','CANDIDATE','GENERATED')):value=output
+              elif any(t in name for t in ('PCM','DECODE','AUDIO','MEDIA','SOURCE')):value=pcm
+              else:value=peak
+              env[name]=str(value)
+          started=time.monotonic();completed=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1200)
+          text=(completed.stdout or '')+'\n'+(completed.stderr or '');(result/'test.log').write_text(text)
+          exact=completed.returncode==0 and '0 tests' not in text.lower()
+          patch=subprocess.run(['git','diff'],text=True,capture_output=True,check=True).stdout
+          if exact and h['kind']=='source':(result/'exact.patch').write_text(patch)
+          numbers=[int(x) for x in re.findall(r'(?i)(?:diff(?:ering)?[_ ]bytes|mismatch(?:es)?)[^0-9]{0,20}(\d+)',text)]
+          status={'id':h['id'],'description':h['description'],'kind':h['kind'],'extra':h.get('extra',{}),'returncode':completed.returncode,'exact_pass':exact,'reported_distance':min(numbers) if numbers else None,'elapsed_seconds':time.monotonic()-started,'tail':text[-6000:]}
+          (result/'status.json').write_text(json.dumps(status,indent=2)+'\n');print(json.dumps(status,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loudness-hypothesis-${{ matrix.id }}
+          path: /tmp/parallel-loudness/result
+          retention-days: 14
+
+  collect:
+    needs: [prepare, test]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: loudness-hypothesis-*
+          path: /tmp/parallel-results
+      - name: Aggregate, independently verify unique exact patches, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,shutil,subprocess
+          root=Path('/tmp/parallel-results');statuses=[];patches={}
+          for path in root.rglob('status.json'):
+              status=json.loads(path.read_text());statuses.append(status)
+              patch=path.with_name('exact.patch')
+              if patch.exists():
+                  digest=hashlib.sha256(patch.read_bytes()).hexdigest();patches.setdefault(digest,patch)
+          statuses.sort(key=lambda s:(not s['exact_pass'],s['reported_distance'] is None,s['reported_distance'] if s['reported_distance'] is not None else 10**18,s['id']))
+          destination=Path('oracle-reports/parallel-strict-wdl-loudness-sweep');destination.mkdir(parents=True,exist_ok=True)
+          report={'schema':1,'status_count':len(statuses),'exact_passes':[s for s in statuses if s['exact_pass']],'unique_source_patch_count':len(patches),'ranked':statuses}
+          (destination/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+          for i,(digest,patch) in enumerate(sorted(patches.items())):shutil.copy2(patch,destination/f'exact-{i}-{digest[:16]}.patch')
+          print(json.dumps({'status_count':len(statuses),'exact_pass_count':len(report['exact_passes']),'unique_source_patch_count':len(patches),'top':statuses[:10]},indent=2))
+          PY
+          git add oracle-reports/parallel-strict-wdl-loudness-sweep
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'record parallel strict-WDL loudness sweep'
+            git push origin HEAD:hardening-reapeaks-cache-ffmpeg
+          fi
