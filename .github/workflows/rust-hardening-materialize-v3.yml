@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rust-hardening-materialize-v3-${{ github.ref }}
@@ -71,7 +71,7 @@ jobs:
               a, _ = _flex_find(text, start)
               if a < 0:
                   raise SystemExit(f'start marker not found in {path}: {start!r}')
-              b, end_size = _flex_find(text, end, a)
+              b, _ = _flex_find(text, end, a)
               if b < 0:
                   raise SystemExit(f'end marker not found in {path}: {end!r}')
               if end.startswith('\n}\n'):
@@ -137,6 +137,103 @@ jobs:
           subprocess.run(['git', 'diff', '--stat'], check=True, stdout=Path('validated-diffstat.txt').open('w'))
           print(json.dumps(manifest, indent=2, sort_keys=True))
           PY
+      - name: Create validated Git commit object without moving a ref
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          token = os.environ['GH_TOKEN']
+          repository = os.environ['GITHUB_REPOSITORY']
+          base_sha = os.environ['GITHUB_SHA']
+          api_root = f'https://api.github.com/repos/{repository}'
+
+          def api(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(
+                  api_root + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      'Accept': 'application/vnd.github+json',
+                      'Authorization': f'Bearer {token}',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                      'Content-Type': 'application/json',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  body = error.read().decode(errors='replace')
+                  raise SystemExit(f'GitHub API {method} {path} failed: {error.code}: {body}')
+
+          manifest = json.loads(Path('validated-manifest.json').read_text())
+          if manifest['base_sha'] != base_sha:
+              raise SystemExit(
+                  f"manifest base {manifest['base_sha']} does not match workflow SHA {base_sha}"
+              )
+
+          tree_entries = []
+          for item in manifest['files']:
+              path = Path(item['path'])
+              data = path.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              if len(data) != item['size'] or digest != item['sha256']:
+                  raise SystemExit(f'manifest mismatch for {item["path"]}')
+              blob = api('POST', '/git/blobs', {
+                  'content': base64.b64encode(data).decode(),
+                  'encoding': 'base64',
+              })
+              stage = subprocess.run(
+                  ['git', 'ls-files', '-s', '--', item['path']],
+                  check=True,
+                  text=True,
+                  capture_output=True,
+              ).stdout.strip()
+              mode = stage.split()[0] if stage else '100644'
+              tree_entries.append({
+                  'path': item['path'],
+                  'mode': mode,
+                  'type': 'blob',
+                  'sha': blob['sha'],
+              })
+
+          for path in manifest['deleted']:
+              tree_entries.append({
+                  'path': path,
+                  'mode': '100644',
+                  'type': 'blob',
+                  'sha': None,
+              })
+
+          base_tree = subprocess.check_output(
+              ['git', 'rev-parse', f'{base_sha}^{{tree}}'], text=True
+          ).strip()
+          tree = api('POST', '/git/trees', {
+              'base_tree': base_tree,
+              'tree': tree_entries,
+          })
+          commit = api('POST', '/git/commits', {
+              'message': 'Harden parser generator pyramid and FFI boundaries',
+              'tree': tree['sha'],
+              'parents': [base_sha],
+          })
+          Path('validated-commit-sha.txt').write_text(commit['sha'] + '\n')
+          print(f"validated commit object: {commit['sha']}")
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Validated commit object: `{commit['sha']}`\n")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: validated-hardening-tree-${{ github.sha }}
@@ -145,5 +242,6 @@ jobs:
             validated-manifest.json
             validated-status.txt
             validated-diffstat.txt
+            validated-commit-sha.txt
           if-no-files-found: error
           retention-days: 7
