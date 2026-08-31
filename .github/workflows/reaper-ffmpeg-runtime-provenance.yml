@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/reaper-ffmpeg-runtime-provenance.yml'
       - 'tools/reaper_oracle/runtime_provenance_probe.lua'
+      - 'tools/reaper_oracle/build_probe.lua'
   workflow_dispatch:
 
 permissions:
@@ -95,7 +96,7 @@ jobs:
             -of default=noprint_wrappers=1 "$root/media/step.m4a" \
             | tee "$root/results/source-ffprobe.txt"
 
-      - name: Capture REAPER process maps after real peak decoding
+      - name: Prove the decoder dependency by process maps and causal ablation
         shell: bash
         run: |
           set -euo pipefail
@@ -103,6 +104,7 @@ jobs:
           from pathlib import Path
           import os
           import re
+          import shutil
           import subprocess
           import tempfile
           import time
@@ -111,8 +113,21 @@ jobs:
           root = Path('/tmp/reaper-ffmpeg-provenance')
           media_root = root / 'media'
           results = root / 'results'
-          script = Path('tools/reaper_oracle/runtime_provenance_probe.lua').resolve()
+          hold_script = Path('tools/reaper_oracle/runtime_provenance_probe.lua').resolve()
+          build_script = Path('tools/reaper_oracle/build_probe.lua').resolve()
           display = ':97'
+
+          def make_config(tag: str) -> tuple[Path, Path]:
+              case = Path(tempfile.mkdtemp(prefix=f'reaper-provenance-{tag}-'))
+              config = case / 'reaper.ini'
+              config.write_text(
+                  '[REAPER]\n'
+                  'peakcachegenmode=3\n'
+                  'peakcachegenrs=300\n'
+                  'showpeaks=64\n',
+                  encoding='utf-8',
+              )
+              return case, config
 
           def process_tree(root_pid: int) -> list[int]:
               parents: dict[int, int] = {}
@@ -136,19 +151,15 @@ jobs:
                           changed = True
               return sorted(found)
 
-          def capture(tag: str, media: Path, expected_type: str) -> dict[str, object]:
+          def remove_peak(media: Path) -> Path:
               peak = Path(str(media) + '.reapeaks')
               if peak.exists():
                   peak.unlink()
-              case = Path(tempfile.mkdtemp(prefix=f'reaper-provenance-{tag}-'))
-              config = case / 'reaper.ini'
-              config.write_text(
-                  '[REAPER]\n'
-                  'peakcachegenmode=3\n'
-                  'peakcachegenrs=300\n'
-                  'showpeaks=64\n',
-                  encoding='utf-8',
-              )
+              return peak
+
+          def capture_loaded_modules(tag: str, media: Path, expected_type: str) -> dict[str, object]:
+              remove_peak(media)
+              case, config = make_config(tag)
               status_path = case / 'result.txt'
               ready_path = case / 'ready.txt'
               release_path = case / 'release.txt'
@@ -164,13 +175,8 @@ jobs:
               with log_path.open('wb') as log:
                   process = subprocess.Popen(
                       [
-                          str(reaper),
-                          '-newinst',
-                          '-cfgfile',
-                          str(config),
-                          '-new',
-                          '-nosplash',
-                          str(script),
+                          str(reaper), '-newinst', '-cfgfile', str(config),
+                          '-new', '-nosplash', str(hold_script),
                       ],
                       env=env,
                       stdout=log,
@@ -195,16 +201,12 @@ jobs:
                       (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
                       '',
                   )
-                  if source_type != expected_type:
+                  if source_type != expected_type or 'OK loops=' not in status:
                       release_path.touch()
                       process.wait(timeout=10)
                       raise SystemExit(
-                          f'{tag}: expected source type {expected_type!r}, got {source_type!r}'
+                          f'{tag}: expected completed {expected_type} source, status={status!r}'
                       )
-                  if 'OK loops=' not in status:
-                      release_path.touch()
-                      process.wait(timeout=10)
-                      raise SystemExit(f'{tag}: peak generation did not finish: {status!r}')
 
                   pids = process_tree(process.pid)
                   maps_sections: list[str] = []
@@ -239,6 +241,51 @@ jobs:
                   'modules': sorted(module_paths),
               }
 
+          def run_once(tag: str, media: Path) -> dict[str, object]:
+              peak = remove_peak(media)
+              case, config = make_config(tag)
+              status_path = case / 'result.txt'
+              log_path = results / f'{tag}.reaper.log'
+              env = os.environ.copy()
+              env.update(
+                  DISPLAY=display,
+                  REAPEAKS_MEDIA=str(media.resolve()),
+                  REAPEAKS_RESULT=str(status_path),
+              )
+              with log_path.open('wb') as log:
+                  try:
+                      completed = subprocess.run(
+                          [
+                              str(reaper), '-newinst', '-cfgfile', str(config),
+                              '-new', '-nosplash', str(build_script),
+                          ],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                      returncode: int | None = completed.returncode
+                  except subprocess.TimeoutExpired:
+                      returncode = None
+              status = status_path.read_text(errors='replace') if status_path.exists() else ''
+              (results / f'{tag}.status.txt').write_text(status, encoding='utf-8')
+              return {
+                  'returncode': returncode,
+                  'status': status,
+                  'peak_exists': peak.exists(),
+                  'source_type': next(
+                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                      '',
+                  ),
+                  'ok': 'OK loops=' in status and peak.exists(),
+              }
+
+          ffmpeg_names = (
+              'libavcodec', 'libavformat', 'libavutil', 'libavfilter',
+              'libavdevice', 'libswresample', 'libswscale', 'libpostproc',
+          )
+
           xvfb_log = (results / 'xvfb.log').open('wb')
           xvfb = subprocess.Popen(
               ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
@@ -247,8 +294,115 @@ jobs:
           )
           try:
               time.sleep(0.35)
-              native = capture('native-wave', media_root / 'step.wav', 'WAVE')
-              video = capture('video-alac', media_root / 'step.m4a', 'VIDEO')
+              native = capture_loaded_modules('baseline-native-wave', media_root / 'step.wav', 'WAVE')
+              video = capture_loaded_modules('baseline-video-alac', media_root / 'step.m4a', 'VIDEO')
+
+              video_lower = str(video['maps']).lower()
+              required = ('libavformat', 'libavcodec', 'libavutil')
+              missing = [name for name in required if name not in video_lower]
+              if missing:
+                  raise SystemExit(
+                      'baseline VIDEO source completed but FFmpeg modules were absent: '
+                      + ', '.join(missing)
+                  )
+              if 'libvlc' in video_lower or 'libvlccore' in video_lower:
+                  raise SystemExit('baseline VIDEO source loaded VLC')
+
+              video_ffmpeg_modules = [
+                  path for path in video['modules']
+                  if any(name in Path(path).name.lower() for name in ffmpeg_names)
+              ]
+              native_ffmpeg_modules = [
+                  path for path in native['modules']
+                  if any(name in Path(path).name.lower() for name in ffmpeg_names)
+              ]
+
+              # Loaded-module presence alone is deliberately not accepted as proof:
+              # REAPER may load the VIDEO backend eagerly even for a WAVE-only process.
+              # Remove the FFmpeg runtime suite and require WAVE to keep working while
+              # the ALAC/VIDEO source stops working.
+              library_dir = Path('/usr/lib/x86_64-linux-gnu')
+              hidden_root = root / 'hidden-ffmpeg-runtime'
+              hidden_root.mkdir(parents=True, exist_ok=True)
+              patterns = (
+                  'libavcodec.so*', 'libavformat.so*', 'libavutil.so*',
+                  'libavfilter.so*', 'libavdevice.so*', 'libswresample.so*',
+                  'libswscale.so*', 'libpostproc.so*',
+              )
+              candidates: list[Path] = []
+              for pattern in patterns:
+                  candidates.extend(library_dir.glob(pattern))
+              candidates = sorted(set(candidates), key=lambda path: (path.is_symlink(), path.name))
+              if not any(path.name.startswith('libavcodec.so') for path in candidates):
+                  raise SystemExit('could not locate the installed FFmpeg shared libraries')
+
+              moved: list[tuple[Path, Path]] = []
+              try:
+                  for original in candidates:
+                      destination = hidden_root / original.name
+                      subprocess.run(
+                          ['sudo', 'mv', '--', str(original), str(destination)],
+                          check=True,
+                      )
+                      moved.append((destination, original))
+                  (results / 'hidden-ffmpeg-libraries.txt').write_text(
+                      '\n'.join(str(original) for _, original in moved) + '\n',
+                      encoding='utf-8',
+                  )
+
+                  ablated_wave = run_once('ablated-native-wave', media_root / 'step.wav')
+                  ablated_alac = run_once('ablated-video-alac', media_root / 'step.m4a')
+              finally:
+                  restore_errors: list[str] = []
+                  for hidden, original in reversed(moved):
+                      if not hidden.exists() and not hidden.is_symlink():
+                          restore_errors.append(f'missing hidden library {hidden}')
+                          continue
+                      restored = subprocess.run(
+                          ['sudo', 'mv', '--', str(hidden), str(original)],
+                          text=True,
+                          capture_output=True,
+                          check=False,
+                      )
+                      if restored.returncode != 0:
+                          restore_errors.append(
+                              f'restore {hidden} -> {original}: {restored.stderr.strip()}'
+                          )
+                  if restore_errors:
+                      raise SystemExit('; '.join(restore_errors))
+
+              subprocess.run(['ffmpeg', '-version'], stdout=subprocess.DEVNULL, check=True)
+
+              if not ablated_wave['ok'] or ablated_wave['source_type'] != 'WAVE':
+                  raise SystemExit(
+                      'FFmpeg ablation also broke native WAVE decoding; '
+                      f'cannot attribute the dependency: {ablated_wave!r}'
+                  )
+              if ablated_alac['ok'] or ablated_alac['peak_exists']:
+                  raise SystemExit(
+                      'ALAC/VIDEO peak generation still succeeded without the FFmpeg runtime; '
+                      f'FFmpeg use was not proven: {ablated_alac!r}'
+                  )
+
+              report = [
+                  'REAPER_FFMPEG_CAUSAL_PROVENANCE=confirmed',
+                  f'baseline_native_source_type={native["type"]}',
+                  f'baseline_video_source_type={video["type"]}',
+                  f'baseline_native_pids={native["pids"]}',
+                  f'baseline_video_pids={video["pids"]}',
+                  'baseline_video_ffmpeg_modules:',
+                  *[f'  {path}' for path in video_ffmpeg_modules],
+                  'baseline_native_ffmpeg_modules:',
+                  *[f'  {path}' for path in native_ffmpeg_modules],
+                  'loaded_module_presence_is_path_specific=false',
+                  f'ablated_wave={ablated_wave!r}',
+                  f'ablated_alac={ablated_alac!r}',
+                  'causal_result=removing_ffmpeg_breaks_alac_video_but_not_wave',
+                  'vlc_runtime_present=false',
+              ]
+              text = '\n'.join(report) + '\n'
+              (results / 'runtime-provenance-report.txt').write_text(text, encoding='utf-8')
+              print(text, end='')
           finally:
               xvfb.terminate()
               try:
@@ -256,41 +410,6 @@ jobs:
               except subprocess.TimeoutExpired:
                   xvfb.kill()
               xvfb_log.close()
-
-          lower_maps = str(video['maps']).lower()
-          required = ('libavformat', 'libavcodec', 'libavutil')
-          missing = [name for name in required if name not in lower_maps]
-          if missing:
-              raise SystemExit(
-                  'VIDEO source completed decoding but required FFmpeg libraries were not mapped: '
-                  + ', '.join(missing)
-              )
-          if 'libvlc' in lower_maps or 'libvlccore' in lower_maps:
-              raise SystemExit('VIDEO source loaded VLC despite the FFmpeg-only runner environment')
-
-          ffmpeg_modules = [
-              path for path in video['modules']
-              if any(name in path.lower() for name in ('libavformat', 'libavcodec', 'libavutil', 'libswresample'))
-          ]
-          native_ffmpeg_modules = [
-              path for path in native['modules']
-              if any(name in path.lower() for name in ('libavformat', 'libavcodec', 'libavutil', 'libswresample'))
-          ]
-          report = [
-              'REAPER_FFMPEG_RUNTIME_PROVENANCE=confirmed',
-              f'native_source_type={native["type"]}',
-              f'video_source_type={video["type"]}',
-              f'native_pids={native["pids"]}',
-              f'video_pids={video["pids"]}',
-              'video_ffmpeg_modules:',
-              *[f'  {path}' for path in ffmpeg_modules],
-              'native_ffmpeg_modules:',
-              *[f'  {path}' for path in native_ffmpeg_modules],
-              'vlc_runtime_present=false',
-          ]
-          text = '\n'.join(report) + '\n'
-          (results / 'runtime-provenance-report.txt').write_text(text, encoding='utf-8')
-          print(text, end='')
           PY
           cat /tmp/reaper-ffmpeg-provenance/results/runtime-provenance-report.txt \
             >> "$GITHUB_STEP_SUMMARY"
