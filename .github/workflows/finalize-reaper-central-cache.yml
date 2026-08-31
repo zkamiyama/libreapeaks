@@ -1,0 +1,92 @@
+name: finalize-reaper-central-cache
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/finalize-reaper-central-cache.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-reaper-central-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Remove temporary workflows and make the integration gate permanent
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/reaper-central-cache-integration.yml')
+          text = workflow.read_text()
+          old = """on:\n  workflow_dispatch:\n  push:\n    branches: [hardening-reapeaks-cache-ffmpeg]\n    paths:\n      - 'examples/reaper_config.py'\n      - 'examples/player_reaper_integration.py'\n      - 'examples/player_common.py'\n      - 'tools/reaper_oracle/make_cache_map.py'\n      - '.github/workflows/reaper-central-cache-integration.yml'\n"""
+          new = """on:\n  workflow_dispatch:\n  push:\n    branches: [hardening-reapeaks-cache-ffmpeg, main]\n"""
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('unexpected reaper-central-cache-integration trigger block')
+          workflow.write_text(text)
+
+          temporary = [
+              '.github/workflows/central-cache-reverse-engineering.yml',
+              '.github/workflows/dev-snapshot.yml',
+              '.github/workflows/rust-hardening-materialize.yml',
+              '.github/workflows/rust-hardening-materialize-v2.yml',
+              '.github/workflows/rust-hardening-materialize-v3.yml',
+              '.github/workflows/reaper-division-probe.yml',
+              '.github/workflows/reaper-ffmpeg-oracle-probe.yml',
+              '.github/workflows/reaper-loudness-probe.yml',
+              '.github/workflows/materialize-reaper-config-integration.yml',
+              '.github/workflows/finalize-reaper-central-cache.yml',
+          ]
+          for name in temporary:
+              Path(name).unlink(missing_ok=True)
+          PY
+          cargo fmt --all -- --check
+      - name: Rust test gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets
+          cargo test --release --all-targets --features strict-wdl
+          cargo clippy --all-targets --features strict-wdl -- -D warnings
+      - name: Python test gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/libreapeaks-venv
+          . /tmp/libreapeaks-venv/bin/activate
+          python -m pip install --disable-pip-version-check maturin
+          maturin develop --release --features strict-wdl
+          python -m unittest discover -s tests/python -p 'test_*.py' -v
+          python -m py_compile \
+            examples/reaper_config.py \
+            examples/player_reaper_integration.py \
+            examples/pyside6_player.py \
+            examples/web_player/server.py \
+            tools/reaper_oracle/make_cache_map.py
+      - name: Commit validated final tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'Finalize REAPER central cache integration'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
