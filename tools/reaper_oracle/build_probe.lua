@@ -1,4 +1,4 @@
--- Build one media source peak cache, record REAPER's actual source type, and quit.
+-- Build one media source peak cache, record REAPER's actual source type/paths, and quit.
 -- Intended for compatibility/oracle automation. One REAPER process per source.
 local media = os.getenv("REAPEAKS_MEDIA")
 local result = os.getenv("REAPEAKS_RESULT")
@@ -15,6 +15,16 @@ if not media or media == "" then
   reaper.Main_OnCommand(40004, 0)
   return
 end
+
+local ok_read_path, read_path = pcall(function()
+  return reaper.GetPeakFileNameEx(media, "", false)
+end)
+if ok_read_path then append("PEAK_READ=" .. tostring(read_path or "")) end
+
+local ok_write_path, write_path = pcall(function()
+  return reaper.GetPeakFileNameEx(media, "", true)
+end)
+if ok_write_path then append("PEAK_WRITE=" .. tostring(write_path or "")) end
 
 local src = reaper.PCM_Source_CreateFromFile(media)
 if not src then
