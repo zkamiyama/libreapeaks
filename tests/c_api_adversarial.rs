@@ -33,10 +33,19 @@ fn c_default_divisions_matches_reaper_preference_matrix_and_rejects_bad_inputs()
     }
 
     let mut output = [0xdead_beefu32; 3];
-    assert_eq!(unsafe { rpk_default_divisions(0, 300, output.as_mut_ptr()) }, -1);
+    assert_eq!(
+        unsafe { rpk_default_divisions(0, 300, output.as_mut_ptr()) },
+        -1
+    );
     assert_eq!(output, [0xdead_beef; 3]);
-    assert_eq!(unsafe { rpk_default_divisions(48_000, 0, output.as_mut_ptr()) }, -1);
-    assert_eq!(unsafe { rpk_default_divisions(48_000, 300, ptr::null_mut()) }, -1);
+    assert_eq!(
+        unsafe { rpk_default_divisions(48_000, 0, output.as_mut_ptr()) },
+        -1
+    );
+    assert_eq!(
+        unsafe { rpk_default_divisions(48_000, 300, ptr::null_mut()) },
+        -1
+    );
 }
 
 #[test]

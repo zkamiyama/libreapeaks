@@ -80,6 +80,11 @@ int32_t rpk_render_rgba8_scaled(const RpkHandle *h, size_t width, size_t height,
                                 uint32_t waveform_rgba_le,
                                 RpkBuffer *out);
 
+/* Calculate REAPER-style three-level divisions for peakcachegenrs. */
+int32_t rpk_default_divisions(uint32_t sample_rate,
+                              uint32_t fine_peaks_per_second,
+                              uint32_t out_divisions[3]);
+
 /* RPKN generator for decoded PCM16. */
 int32_t rpk_generate_pcm16(const int16_t *pcm, size_t frames, size_t channels,
                            uint32_t sample_rate, const uint32_t *divisions,

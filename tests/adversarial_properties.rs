@@ -3,7 +3,12 @@ use reapeaks::{
     quantize_rpkl_f32, quantize_rpkn_f32, GenerateOptions, ReaPeaks, Version,
 };
 
-fn options(sample_rate: u32, channels: usize, divisions: Vec<u32>, spectral: bool) -> GenerateOptions {
+fn options(
+    sample_rate: u32,
+    channels: usize,
+    divisions: Vec<u32>,
+    spectral: bool,
+) -> GenerateOptions {
     GenerateOptions {
         sample_rate,
         channels,
@@ -17,12 +22,12 @@ fn options(sample_rate: u32, channels: usize, divisions: Vec<u32>, spectral: boo
 #[test]
 fn default_divisions_are_nested_across_dense_preference_grid() {
     let sample_rates = [
-        16u32, 17, 40, 41, 8_000, 11_025, 22_050, 22_051, 32_000, 44_100, 48_000,
-        88_200, 96_000, 176_400, 192_000, 384_000, 1_000_000,
+        16u32, 17, 40, 41, 8_000, 11_025, 22_050, 22_051, 32_000, 44_100, 48_000, 88_200, 96_000,
+        176_400, 192_000, 384_000, 1_000_000,
     ];
     let peak_rates = [
-        1u32, 2, 3, 7, 19, 20, 21, 40, 99, 100, 149, 150, 151, 199, 200, 201, 299, 300,
-        301, 499, 500, 501, 999, 1_000, 1_001, 9_999, 1_000_000,
+        1u32, 2, 3, 7, 19, 20, 21, 40, 99, 100, 149, 150, 151, 199, 200, 201, 299, 300, 301, 499,
+        500, 501, 999, 1_000, 1_001, 9_999, 1_000_000,
     ];
 
     for sample_rate in sample_rates {
@@ -102,8 +107,7 @@ fn generator_validation_rejects_hostile_option_combinations() {
 #[test]
 fn layer_count_boundary_is_checked_before_work() {
     let allowed = options(48_000, 1, vec![1; 127], true);
-    let generated =
-        generate_pcm16(&[], &allowed).expect("254 layers should fit u8 mipmap count");
+    let generated = generate_pcm16(&[], &allowed).expect("254 layers should fit u8 mipmap count");
     let parsed = ReaPeaks::parse(generated).expect("parse allowed layer-count boundary");
     assert_eq!(parsed.layer_headers.len(), 254);
 
@@ -191,12 +195,7 @@ fn generated_files_are_deterministic_and_metadata_exact() {
         pcm.push(((frame * 97) as i16).wrapping_add((frame >> 2) as i16));
         pcm.push((-(frame * 53) as i16).wrapping_sub((frame >> 3) as i16));
     }
-    let opt = options(
-        44_100,
-        2,
-        default_divisions(44_100, 500).to_vec(),
-        true,
-    );
+    let opt = options(44_100, 2, default_divisions(44_100, 500).to_vec(), true);
     let first = generate_pcm16_mode3(&pcm, &opt).expect("first generation");
     let second = generate_pcm16_mode3(&pcm, &opt).expect("second generation");
     assert_eq!(first, second);
@@ -343,12 +342,7 @@ fn f32_mode3_special_values_do_not_poison_structure() {
         -0.5,
     ];
     let pcm: Vec<f32> = (0..10_000).map(|i| values[i % values.len()]).collect();
-    let opt = options(
-        48_000,
-        1,
-        default_divisions(48_000, 300).to_vec(),
-        true,
-    );
+    let opt = options(48_000, 1, default_divisions(48_000, 300).to_vec(), true);
     for large_range in [false, true] {
         let result = std::panic::catch_unwind(|| generate_f32_mode3(&pcm, &opt, large_range));
         let blob = result
@@ -392,7 +386,6 @@ fn randomized_valid_pcm_generation_and_parse_is_total() {
         let blob = result
             .unwrap_or_else(|_| panic!("generator panicked case={case}"))
             .unwrap_or_else(|error| panic!("generator rejected valid case={case}: {error}"));
-        ReaPeaks::parse(blob)
-            .unwrap_or_else(|error| panic!("parse failed case={case}: {error}"));
+        ReaPeaks::parse(blob).unwrap_or_else(|error| panic!("parse failed case={case}: {error}"));
     }
 }

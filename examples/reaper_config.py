@@ -446,17 +446,22 @@ def query_reaper_peak_paths(
         except (OSError, json.JSONDecodeError) as exc:
             raise ReaperConfigError(f"invalid REAPER path-query result: {exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise ReaperConfigError("REAPER path-query result must be a JSON object")
     raw_write = payload.get("write")
     if not isinstance(raw_write, str) or not raw_write:
         raise ReaperConfigError("REAPER returned an empty peak-cache write path")
     raw_read = payload.get("read", "")
     if not isinstance(raw_read, str):
         raise ReaperConfigError("REAPER returned a non-string peak-cache read path")
+    source_type = payload.get("source_type", "")
+    if not isinstance(source_type, str):
+        raise ReaperConfigError("REAPER returned a non-string media source type")
     return ReaperPeakPaths(
         media=media_path,
         read=_resolved(raw_read) if raw_read else None,
         write=_resolved(raw_write),
-        source_type=str(payload.get("source_type", "")),
+        source_type=source_type,
         origin="GetPeakFileNameEx",
     )
 
@@ -532,6 +537,12 @@ def load_reaper_cache_map(path: str | Path) -> dict[str, ReaperPeakPaths]:
     if isinstance(payload, dict) and isinstance(payload.get("media"), str):
         raw_entries: Mapping[str, object] = {payload["media"]: payload}
     elif isinstance(payload, dict):
+        if "version" in payload:
+            version = payload["version"]
+            if type(version) is not int or version not in (1, CACHE_MAP_VERSION):
+                raise ReaperConfigError(
+                    f"unsupported cache-map version: {version!r}"
+                )
         raw = payload.get("entries", payload)
         if not isinstance(raw, dict):
             raise ReaperConfigError("cache-map entries must be a JSON object")
