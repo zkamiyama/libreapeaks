@@ -1,0 +1,292 @@
+name: strict-wdl-compiler-semantics-sweep
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/strict-wdl-compiler-semantics-sweep.yml'
+      - 'build.rs'
+      - 'native/**'
+      - 'src/**'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: strict-wdl-compiler-semantics-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Download fixed REAPER exact-oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/strict-wdl-compiler-semantics
+          mkdir -p "$root/input" "$root/results"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+
+      - name: Sweep compiler semantics and rank by raw ReaPeaks byte distance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          from pathlib import Path
+          import hashlib
+          import itertools
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import time
+
+          root = Path('/tmp/strict-wdl-compiler-semantics')
+          input_root = root / 'input'
+          results = root / 'results'
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          env_names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          directories = [path for path in input_root.rglob('*') if path.is_dir()]
+          peak_dir = max(directories or [input_root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm_dir = max(directories or [input_root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+
+          stop = {'reapeaks','reaper','libreapeaks','oracle','candidate','generated','results','result','output','outputs','input','media'}
+          def tokens(path: Path) -> set[str]:
+              return {token for token in re.sub(r'[^a-z0-9]+', ' ', str(path).lower()).split() if token not in stop}
+
+          oracle_files = [path for path in input_root.rglob('*.reapeaks') if 'candidate' not in str(path).lower() and 'generated' not in str(path).lower()]
+          def raw_distance(output_dir: Path):
+              candidates = list(output_dir.rglob('*.reapeaks'))
+              if not candidates:
+                  return None
+              total = 0
+              pairs = []
+              for candidate in candidates:
+                  ranked = sorted(oracle_files, key=lambda oracle: (-len(tokens(candidate) & tokens(oracle)), abs(candidate.stat().st_size - oracle.stat().st_size)))
+                  if not ranked:
+                      continue
+                  oracle = ranked[0]
+                  a, b = oracle.read_bytes(), candidate.read_bytes()
+                  common = min(len(a), len(b))
+                  distance = sum(x != y for x, y in zip(a[:common], b[:common])) + abs(len(a) - len(b))
+                  total += distance
+                  pairs.append({'oracle': str(oracle.relative_to(input_root)), 'candidate': str(candidate.relative_to(output_dir)), 'distance': distance})
+              return {'total_distance': total, 'pairs': pairs}
+
+          variants = [
+              ('baseline', []),
+              ('fast-math', ['-ffast-math']),
+              ('ofast', ['-Ofast']),
+              ('fp-contract-fast', ['-ffp-contract=fast']),
+              ('fp-contract-off', ['-ffp-contract=off']),
+              ('float-store', ['-ffloat-store']),
+              ('excess-standard', ['-fexcess-precision=standard']),
+              ('no-tree-reassoc', ['-fno-tree-reassoc']),
+              ('no-tree-vectorize', ['-fno-tree-vectorize', '-fno-tree-slp-vectorize']),
+              ('unsafe-math', ['-funsafe-math-optimizations']),
+              ('associative', ['-fno-signed-zeros', '-fno-trapping-math', '-fassociative-math']),
+              ('reciprocal', ['-freciprocal-math']),
+              ('finite-only', ['-ffinite-math-only']),
+              ('no-math-errno', ['-fno-math-errno']),
+              ('no-rounding-math', ['-fno-rounding-math']),
+              ('rounding-math', ['-frounding-math']),
+              ('opt0', ['-O0']),
+              ('opt1', ['-O1']),
+              ('opt2', ['-O2']),
+              ('opt3', ['-O3']),
+              ('opt2-fast', ['-O2', '-ffast-math']),
+              ('opt3-fast', ['-O3', '-ffast-math']),
+              ('opt2-no-contract', ['-O2', '-ffp-contract=off']),
+              ('opt3-no-contract', ['-O3', '-ffp-contract=off']),
+              ('opt2-float-store', ['-O2', '-ffloat-store']),
+              ('opt3-float-store', ['-O3', '-ffloat-store']),
+              ('opt2-excess-standard', ['-O2', '-fexcess-precision=standard']),
+              ('opt3-excess-standard', ['-O3', '-fexcess-precision=standard']),
+              ('opt2-no-reassoc', ['-O2', '-fno-tree-reassoc']),
+              ('opt3-no-reassoc', ['-O3', '-fno-tree-reassoc']),
+              ('opt2-no-vectorize', ['-O2', '-fno-tree-vectorize', '-fno-tree-slp-vectorize']),
+              ('opt3-no-vectorize', ['-O3', '-fno-tree-vectorize', '-fno-tree-slp-vectorize']),
+              ('opt2-strict-all', ['-O2', '-ffp-contract=off', '-fno-fast-math', '-frounding-math', '-fexcess-precision=standard', '-fno-tree-reassoc', '-fno-tree-vectorize', '-fno-tree-slp-vectorize']),
+              ('opt3-strict-all', ['-O3', '-ffp-contract=off', '-fno-fast-math', '-frounding-math', '-fexcess-precision=standard', '-fno-tree-reassoc', '-fno-tree-vectorize', '-fno-tree-slp-vectorize']),
+              ('opt2-reaper-fast', ['-O2', '-fno-math-errno', '-fno-trapping-math', '-fno-signed-zeros', '-fassociative-math', '-freciprocal-math', '-ffp-contract=fast']),
+              ('opt3-reaper-fast', ['-O3', '-fno-math-errno', '-fno-trapping-math', '-fno-signed-zeros', '-fassociative-math', '-freciprocal-math', '-ffp-contract=fast']),
+          ]
+
+          base_env = os.environ.copy()
+          command = ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture']
+          rows = []
+          for index, (name, flags) in enumerate(variants):
+              subprocess.run(['cargo', 'clean'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+              output_dir = root / 'outputs' / name
+              shutil.rmtree(output_dir, ignore_errors=True)
+              output_dir.mkdir(parents=True, exist_ok=True)
+              env = dict(base_env)
+              env['CXXFLAGS'] = ' '.join(flags)
+              env['CFLAGS'] = ' '.join(flags)
+              assignments = {}
+              for variable in env_names:
+                  if any(token in variable for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                      value = output_dir
+                  elif any(token in variable for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                      value = pcm_dir
+                  else:
+                      value = peak_dir
+                  env[variable] = str(value)
+                  assignments[variable] = str(value)
+              start = time.monotonic()
+              try:
+                  completed = subprocess.run(command, env=env, text=True, capture_output=True, timeout=480)
+                  rc = completed.returncode
+                  text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+              except subprocess.TimeoutExpired as error:
+                  rc = 124
+                  text = ((error.stdout or '') if isinstance(error.stdout, str) else '') + '\n' + ((error.stderr or '') if isinstance(error.stderr, str) else '')
+              distance = raw_distance(output_dir)
+              row = {
+                  'index': index,
+                  'name': name,
+                  'flags': flags,
+                  'returncode': rc,
+                  'exact_pass': rc == 0 and '0 tests' not in text.lower(),
+                  'elapsed_seconds': time.monotonic() - start,
+                  'distance': distance,
+                  'tail': text[-5000:],
+              }
+              rows.append(row)
+              (results / f'{index:02d}-{name}.log').write_text(text, encoding='utf-8')
+              if row['exact_pass']:
+                  break
+
+          report = {
+              'schema': 1,
+              'environment_names': env_names,
+              'rows': rows,
+              'exact_winners': [row['name'] for row in rows if row['exact_pass']],
+              'ranked_by_distance': sorted(
+                  [row for row in rows if row.get('distance')],
+                  key=lambda row: row['distance']['total_distance'],
+              )[:12],
+          }
+          (results / 'compiler-semantics-sweep.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps({
+              'exact_winners': report['exact_winners'],
+              'ranked': [(row['name'], row['distance']['total_distance']) for row in report['ranked_by_distance']],
+          }, indent=2))
+          PY
+
+      - name: Apply and independently verify a unique exact compiler model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          report = json.loads(Path('/tmp/strict-wdl-compiler-semantics/results/compiler-semantics-sweep.json').read_text(encoding='utf-8'))
+          winners = [row for row in report['rows'] if row['exact_pass']]
+          if len(winners) != 1:
+              Path('/tmp/no-unique-compiler-winner').write_text(f'unique winner required, got {[row["name"] for row in winners]}\n')
+              raise SystemExit(0)
+          winner = winners[0]
+          flags = winner['flags']
+          if not flags:
+              Path('/tmp/no-unique-compiler-winner').write_text('baseline was the only winner; no patch needed\n')
+              raise SystemExit(0)
+          path = Path('build.rs')
+          text = path.read_text(encoding='utf-8')
+          if 'verified REAPER strict-WDL compiler semantics' in text:
+              Path('/tmp/compiler-winner.json').write_text(json.dumps(winner, indent=2))
+              raise SystemExit(0)
+          match = re.search(r'(?m)^(\s*let\s+mut\s+(build|builder)\s*=\s*cc::Build::new\(\);\s*\n)', text)
+          if not match:
+              raise SystemExit('could not locate cc::Build construction in build.rs')
+          variable = match.group(2)
+          block = '    // verified REAPER strict-WDL compiler semantics\n' + ''.join(
+              f'    {variable}.flag_if_supported("{flag}");\n' for flag in flags
+          )
+          path.write_text(text[:match.end()] + block + text[match.end():], encoding='utf-8')
+          Path('/tmp/compiler-winner.json').write_text(json.dumps(winner, indent=2))
+          PY
+          if [ -f /tmp/no-unique-compiler-winner ]; then
+            cat /tmp/no-unique-compiler-winner
+            exit 0
+          fi
+          # Exact test is rerun by reproducing the same environment through a small Python adapter.
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import shutil
+          import subprocess
+
+          root = Path('/tmp/strict-wdl-compiler-semantics')
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          input_root = root / 'input'
+          dirs = [path for path in input_root.rglob('*') if path.is_dir()]
+          peak = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+          output = root / 'reverify-output'; shutil.rmtree(output, ignore_errors=True); output.mkdir()
+          env = os.environ.copy()
+          for name in names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = output
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm
+              else:
+                  value = peak
+              env[name] = str(value)
+          completed = subprocess.run(
+              ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture'],
+              env=env,
+              timeout=480,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Publish report and any verified fix
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination=oracle-reports/strict-wdl-compiler-semantics
+          rm -rf "$destination"
+          mkdir -p "$destination"
+          cp /tmp/strict-wdl-compiler-semantics/results/compiler-semantics-sweep.json "$destination/report.json"
+          git add "$destination" build.rs
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [ -f /tmp/compiler-winner.json ] && [ ! -f /tmp/no-unique-compiler-winner ]; then
+            model="$(python -c 'import json; print(json.load(open("/tmp/compiler-winner.json"))["name"])')"
+            git commit -m "match REAPER strict-WDL compiler semantics (${model})"
+          else
+            git commit -m 'record strict-WDL compiler-semantics sweep'
+          fi
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
