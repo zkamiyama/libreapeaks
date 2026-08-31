@@ -1,0 +1,103 @@
+name: reaper-peak-mode-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths: ['.github/workflows/reaper-peak-mode-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download REAPER 7.79
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Probe peakcachegenmode 0 through 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/reaper-peak-mode
+          mkdir -p /tmp/reaper-peak-mode/media /tmp/reaper-peak-mode/results
+          python3 - <<'PY'
+          import math, struct, wave
+          from pathlib import Path
+          p=Path('/tmp/reaper-peak-mode/media/tone.wav')
+          sr=48000
+          with wave.open(str(p),'wb') as w:
+              w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
+              values=[]
+              for i in range(sr*2):
+                  values.extend((round(18000*math.sin(2*math.pi*997*i/sr)), round(9000*math.sin(2*math.pi*3137*i/sr))))
+              w.writeframes(struct.pack('<'+'h'*len(values),*values))
+          PY
+          cat >/tmp/reaper-peak-mode/query.lua <<'LUA'
+          local media=os.getenv('REAPEAKS_MEDIA')
+          local result=os.getenv('REAPEAKS_RESULT')
+          local src=reaper.PCM_Source_CreateFromFile(media)
+          local f=assert(io.open(result,'w'))
+          if not src then f:write('ERR create\n'); f:close(); reaper.Main_OnCommand(40004,0); return end
+          local r=reaper.PCM_Source_BuildPeaks(src,0)
+          local loops=0
+          while r~=0 and loops<100000 do r=reaper.PCM_Source_BuildPeaks(src,1); loops=loops+1 end
+          if r==0 then reaper.PCM_Source_BuildPeaks(src,2); f:write('OK loops=',loops,'\n') else f:write('ERR build ',r,'\n') end
+          f:close(); reaper.PCM_Source_Destroy(src); reaper.Main_OnCommand(40004,0)
+          LUA
+          Xvfb :95 -screen 0 1280x720x24 -nolisten tcp >/tmp/reaper-peak-mode/xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          export DISPLAY=:95
+          for mode in $(seq 0 15); do
+            rm -f /tmp/reaper-peak-mode/media/tone.wav.reapeaks
+            mkdir -p "/tmp/reaper-peak-mode/cfg-$mode"
+            cat >"/tmp/reaper-peak-mode/cfg-$mode/reaper.ini" <<EOF
+          [REAPER]
+          peakcachegenmode=$mode
+          peakcachegenrs=300
+          showpeaks=64
+          altpeaks=2
+          EOF
+            REAPEAKS_MEDIA=/tmp/reaper-peak-mode/media/tone.wav \
+            REAPEAKS_RESULT="/tmp/reaper-peak-mode/results/status-$mode.txt" \
+            timeout 60s "$REAPER_BIN" -newinst -cfgfile "/tmp/reaper-peak-mode/cfg-$mode/reaper.ini" -new -nosplash /tmp/reaper-peak-mode/query.lua \
+              >"/tmp/reaper-peak-mode/results/reaper-$mode.log" 2>&1 || true
+            if test -f /tmp/reaper-peak-mode/media/tone.wav.reapeaks; then
+              cp /tmp/reaper-peak-mode/media/tone.wav.reapeaks "/tmp/reaper-peak-mode/results/mode-$mode.reapeaks"
+            fi
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, struct
+          root=Path('/tmp/reaper-peak-mode/results')
+          report=[]
+          for mode in range(16):
+              p=root/f'mode-{mode}.reapeaks'
+              status=(root/f'status-{mode}.txt').read_text(errors='replace') if (root/f'status-{mode}.txt').exists() else ''
+              row={'mode':mode,'status':status.strip(),'exists':p.exists()}
+              if p.exists():
+                  data=p.read_bytes(); n=data[5] if len(data)>=6 else 0
+                  row.update(size=len(data),sha256=hashlib.sha256(data).hexdigest(),magic=data[:4].decode('ascii','replace'),headers=[list(struct.unpack_from('<iI',data,18+8*i)) for i in range(n)])
+              report.append(row)
+          (root/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-peak-mode-probe-${{ github.sha }}
+          path: /tmp/reaper-peak-mode/results
+          if-no-files-found: error
+          retention-days: 7
