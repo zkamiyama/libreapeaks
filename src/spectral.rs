@@ -165,8 +165,8 @@ fn resample_to_analysis(
             output_capacity_frames: i64,
         ) -> i64;
     }
-    let cap_frames = ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize)
-        .saturating_add(4096);
+    let cap_frames =
+        ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize).saturating_add(4096);
     let mut out = vec![0.0f64; cap_frames.saturating_mul(channels)];
     let got = unsafe {
         rpk_wdl_resample_all(
@@ -286,8 +286,7 @@ fn analyze_channel(
         let phase_cur = cur.im.atan2(cur.re);
         let phase_prev = (prev.im as f64).atan2(prev.re as f64);
         let residual = wrap_phase(
-            (phase_cur - phase_prev) / PI
-                - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
+            (phase_cur - phase_prev) / PI - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
         );
         kmax as f64 + HALF_BINS as f64 / elapsed as f64 * residual
     };
@@ -579,12 +578,7 @@ fn assemble_spectral_layers(
         let peaks = if li == 0 {
             fine[..expected.min(fine_count) * channels].to_vec()
         } else {
-            aggregate_spectral_from_fine(
-                fine,
-                channels,
-                (div / fine_div) as usize,
-                expected,
-            )
+            aggregate_spectral_from_fine(fine, channels, (div / fine_div) as usize, expected)
         };
         let mut bytes = Vec::with_capacity(peaks.len() * 4);
         for p in &peaks {

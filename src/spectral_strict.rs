@@ -171,20 +171,14 @@ fn assemble_high_rate_layers(
             // in the low-rate quirk and is byte-exact for the independent
             // REAPER 7.79 spectral0/spectral1 golden fixtures at 44.1 kHz.
             let count = fine_count / ratio;
-            crate::spectral_base::aggregate_spectral_from_fine(
-                fine, channels, ratio, count,
-            )
+            crate::spectral_base::aggregate_spectral_from_fine(fine, channels, ratio, count)
         };
         out.push(encode_layer(&peaks, channels));
     }
     Ok(out)
 }
 
-fn zero_layers(
-    frames: usize,
-    channels: usize,
-    divisions: &[u32],
-) -> Result<Vec<GeneratedLayer>> {
+fn zero_layers(frames: usize, channels: usize, divisions: &[u32]) -> Result<Vec<GeneratedLayer>> {
     let fine_div = validate_divisions(divisions)?;
     let fine_count = low_rate_fine_count(frames, fine_div);
     let mut out = Vec::with_capacity(divisions.len());
@@ -258,13 +252,7 @@ pub fn build_spectral_layers(
     }
     validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        let fine = build_high_rate_i16(
-            pcm,
-            frames,
-            channels,
-            source_rate,
-            divisions[0],
-        )?;
+        let fine = build_high_rate_i16(pcm, frames, channels, source_rate, divisions[0])?;
         return assemble_high_rate_layers(&fine, channels, divisions);
     }
     zero_layers(frames, channels, divisions)
@@ -282,13 +270,7 @@ pub fn build_spectral_layers_f32(
     }
     validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        let fine = build_high_rate_f32(
-            pcm,
-            frames,
-            channels,
-            source_rate,
-            divisions[0],
-        )?;
+        let fine = build_high_rate_f32(pcm, frames, channels, source_rate, divisions[0])?;
         return assemble_high_rate_layers(&fine, channels, divisions);
     }
     zero_layers(frames, channels, divisions)
@@ -338,8 +320,7 @@ mod tests {
         let fine = build_fine_spectral(&pcm, 5000, 1, 22_051, 73).unwrap();
         assert_eq!(fine.len(), 61);
 
-        let layers = build_spectral_layers(&pcm, 5000, 1, 22_051, &[73, 1095, 21900])
-            .unwrap();
+        let layers = build_spectral_layers(&pcm, 5000, 1, 22_051, &[73, 1095, 21900]).unwrap();
         assert_eq!(layers[0].header.peak_count, 61);
         assert_eq!(layers[1].header.peak_count, 4);
         assert_eq!(layers[2].header.peak_count, 0);
@@ -358,8 +339,7 @@ mod tests {
         assert_eq!(fine.len(), 49);
         assert!(fine.iter().all(|p| p.code() == 0));
 
-        let layers = build_spectral_layers(&pcm, 4096, 1, 22_050, &[73, 1168, 22192])
-            .unwrap();
+        let layers = build_spectral_layers(&pcm, 4096, 1, 22_050, &[73, 1168, 22192]).unwrap();
         assert_eq!(layers[0].header.peak_count, 49);
         assert_eq!(layers[1].header.peak_count, 3);
         assert_eq!(layers[2].header.peak_count, 0);

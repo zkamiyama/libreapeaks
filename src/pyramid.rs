@@ -73,7 +73,7 @@ impl WavePyramid {
         let source_frames = file
             .wave_layers
             .first()
-            .map(|l| l.peak_count(channels) as u64 * l.division as u64)
+            .map(|l| (l.peak_count(channels) as u64).saturating_mul(l.division as u64))
             .unwrap_or(0);
         Self::from_native(
             channels,
@@ -93,6 +93,7 @@ impl WavePyramid {
     ) -> Self {
         let mut native_levels: Vec<NativeWaveLevel> = native
             .iter()
+            .filter(|x| x.division != 0)
             .map(|x| NativeWaveLevel {
                 division: x.division as u64,
                 peaks: x.peaks.clone(),
@@ -103,7 +104,11 @@ impl WavePyramid {
         let finest_native_index = 0usize;
         let mut desc: Vec<(WaveLevelMeta, LevelSource)> = Vec::new();
         for (i, n) in native_levels.iter().enumerate() {
-            let count = if channels == 0 { 0 } else { n.peaks.len() / channels };
+            let count = if channels == 0 {
+                0
+            } else {
+                n.peaks.len() / channels
+            };
             desc.push((
                 WaveLevelMeta {
                     division: n.division,
@@ -116,14 +121,18 @@ impl WavePyramid {
 
         if let Some(fine) = native_levels.first() {
             let ratio = display_ratio.max(2);
-            let fine_count = if channels == 0 { 0 } else { fine.peaks.len() / channels };
+            let fine_count = if channels == 0 {
+                0
+            } else {
+                fine.peaks.len() / channels
+            };
             let mut factor = ratio;
             loop {
                 let div = fine.division.saturating_mul(factor as u64);
                 let count = if fine_count == 0 {
                     0
                 } else {
-                    (fine_count + factor - 1) / factor
+                    fine_count.div_ceil(factor)
                 };
                 if !desc.iter().any(|(m, _)| m.division == div) {
                     desc.push((
@@ -138,7 +147,9 @@ impl WavePyramid {
                 if count <= 1 || div >= source_frames.max(1) {
                     break;
                 }
-                let Some(next) = factor.checked_mul(ratio) else { break };
+                let Some(next) = factor.checked_mul(ratio) else {
+                    break;
+                };
                 factor = next;
             }
         }
@@ -182,8 +193,9 @@ impl WavePyramid {
             }
         }
         let level = self.levels[best_i];
-        let first = (start_frame / level.division) as usize;
-        let last_exclusive = ((end_frame + level.division - 1) / level.division) as usize;
+        let first = usize::try_from(start_frame / level.division).unwrap_or(usize::MAX);
+        let last_exclusive =
+            usize::try_from(end_frame.div_ceil(level.division)).unwrap_or(usize::MAX);
         let a = first.min(level.peak_count);
         let b = last_exclusive.min(level.peak_count).max(a);
         Some(WaveViewPlan {
@@ -250,12 +262,18 @@ impl WavePyramid {
         if plan.peak_count == 0 {
             return Vec::new();
         }
+        let Ok(level_index) = u16::try_from(plan.level_index) else {
+            return Vec::new();
+        };
         let tile = self.tile_peaks.max(1);
         let a = plan.first_peak / tile;
-        let b = (plan.first_peak + plan.peak_count - 1) / tile;
+        let last = plan
+            .first_peak
+            .saturating_add(plan.peak_count.saturating_sub(1));
+        let b = last / tile;
         (a..=b)
             .map(|t| WaveTileKey {
-                level_index: plan.level_index as u16,
+                level_index,
                 tile_index: t as u64,
             })
             .collect()
@@ -263,7 +281,8 @@ impl WavePyramid {
 
     pub fn tile(&self, key: WaveTileKey) -> Option<WaveTile> {
         let meta = *self.levels.get(key.level_index as usize)?;
-        let first = (key.tile_index as usize).saturating_mul(self.tile_peaks);
+        let tile_index = usize::try_from(key.tile_index).ok()?;
+        let first = tile_index.checked_mul(self.tile_peaks)?;
         if first >= meta.peak_count {
             return None;
         }
@@ -280,7 +299,7 @@ impl WavePyramid {
     pub fn tile_count(&self, level_index: usize) -> Option<usize> {
         let meta = *self.levels.get(level_index)?;
         let t = self.tile_peaks.max(1);
-        Some((meta.peak_count + t - 1) / t)
+        Some(meta.peak_count.div_ceil(t))
     }
 }
 

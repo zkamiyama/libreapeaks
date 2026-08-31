@@ -93,8 +93,16 @@ fn pcm_i16(channels: usize, frames: usize, spec: &[&str]) -> Vec<i16> {
             for i in 0..frames {
                 for channel in 0..channels {
                     let phase = i + channel * channel_offset;
-                    let one = if phase % period1 < (period1 / 2).max(1) { amp1 } else { -amp1 };
-                    let two = if phase % period2 < (period2 / 2).max(1) { amp2 } else { -amp2 };
+                    let one = if phase % period1 < (period1 / 2).max(1) {
+                        amp1
+                    } else {
+                        -amp1
+                    };
+                    let two = if phase % period2 < (period2 / 2).max(1) {
+                        amp2
+                    } else {
+                        -amp2
+                    };
                     out.push(clamp16(one + two));
                 }
             }
@@ -259,8 +267,7 @@ fn reaper779_broad_fresh_process_spectral_stress_is_exact() {
 
         for (level_index, layer) in parsed.spectral_layers.iter().enumerate() {
             assert_eq!(
-                layer.mirrored_division,
-                divisions[level_index],
+                layer.mirrored_division, divisions[level_index],
                 "spectral division mismatch for {name} level {level_index}"
             );
             let expected_code_count = expected_counts[level_index] * channels;

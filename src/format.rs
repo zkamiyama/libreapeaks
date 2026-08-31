@@ -71,7 +71,11 @@ pub struct WaveLayer {
 
 impl WaveLayer {
     pub fn peak_count(&self, channels: usize) -> usize {
-        if channels == 0 { 0 } else { self.peaks.len() / channels }
+        if channels == 0 {
+            0
+        } else {
+            self.peaks.len() / channels
+        }
     }
 }
 
@@ -90,8 +94,7 @@ impl SpectralPeak {
     }
 
     pub fn code(self) -> u32 {
-        (self.frequency_hz.min(0x7fff) as u32)
-            | ((self.density.min(0x3fff) as u32) << 15)
+        (self.frequency_hz.min(0x7fff) as u32) | ((self.density.min(0x3fff) as u32) << 15)
     }
 }
 
@@ -111,10 +114,24 @@ pub struct ReaPeaks {
 }
 
 fn get<const N: usize>(b: &[u8], o: usize) -> Result<[u8; N]> {
-    b.get(o..o + N)
+    let end = o.checked_add(N).ok_or(ReaPeaksError::Truncated)?;
+    b.get(o..end)
         .ok_or(ReaPeaksError::Truncated)?
         .try_into()
         .map_err(|_| ReaPeaksError::Truncated)
+}
+
+fn is_known_layer_division(division: i32) -> bool {
+    division > 0
+        || matches!(
+            division,
+            TOKEN_SPECTRAL | TOKEN_SPECTROGRAM | TOKEN_LOUDNESS | TOKEN_LOUDNESS_OLD
+        )
+}
+
+fn checked_end(off: usize, size: usize) -> Result<usize> {
+    off.checked_add(size)
+        .ok_or(ReaPeaksError::InvalidHeader("layer offset overflow"))
 }
 
 fn layer_payload_size(version: Version, h: LayerHeader, channels: usize) -> Option<usize> {
@@ -139,7 +156,9 @@ impl ReaPeaks {
     }
 
     pub fn parse(raw: Vec<u8>) -> Result<Self> {
-        if raw.len() < 18 { return Err(ReaPeaksError::Truncated); }
+        if raw.len() < 18 {
+            return Err(ReaPeaksError::Truncated);
+        }
         let magic = get::<4>(&raw, 0)?;
         let version = match &magic {
             b"RPKM" => Version::Rpkm,
@@ -149,12 +168,18 @@ impl ReaPeaks {
         };
         let channels = raw[4];
         let mipmap_count = raw[5];
-        if channels == 0 { return Err(ReaPeaksError::InvalidHeader("channels=0")); }
+        if channels == 0 {
+            return Err(ReaPeaksError::InvalidHeader("channels=0"));
+        }
+        let sample_rate = u32::from_le_bytes(get::<4>(&raw, 6)?);
+        if sample_rate == 0 {
+            return Err(ReaPeaksError::InvalidHeader("sample_rate=0"));
+        }
         let header = Header {
             version,
             channels,
             mipmap_count,
-            sample_rate: u32::from_le_bytes(get::<4>(&raw, 6)?),
+            sample_rate,
             source_mtime_low32: u32::from_le_bytes(get::<4>(&raw, 10)?),
             source_size_low32: u32::from_le_bytes(get::<4>(&raw, 14)?),
         };
@@ -162,83 +187,134 @@ impl ReaPeaks {
         let mut hs = Vec::with_capacity(mipmap_count as usize);
         for _ in 0..mipmap_count {
             let division = i32::from_le_bytes(get::<4>(&raw, off)?);
-            let peak_count = u32::from_le_bytes(get::<4>(&raw, off + 4)?);
-            off += 8;
-            hs.push(LayerHeader { division, peak_count });
+            let peak_count = u32::from_le_bytes(get::<4>(&raw, checked_end(off, 4)?)?);
+            off = checked_end(off, 8)?;
+            hs.push(LayerHeader {
+                division,
+                peak_count,
+            });
         }
 
         let channels_usize = channels as usize;
-        let positive_divs: Vec<u32> = hs.iter().filter_map(|h| (h.division > 0).then_some(h.division as u32)).collect();
+        let positive_divs: Vec<u32> = hs
+            .iter()
+            .filter_map(|h| (h.division > 0).then_some(h.division as u32))
+            .collect();
         let mut spectral_index = 0usize;
         let mut wave_layers = Vec::new();
         let mut spectral_layers = Vec::new();
 
         for (idx, h) in hs.iter().copied().enumerate() {
+            if !is_known_layer_division(h.division) {
+                return Err(ReaPeaksError::Unsupported("unknown layer token"));
+            }
             match h.kind() {
                 LayerKind::Wave => {
                     let n = h.peak_count as usize;
+                    let sample_count = n
+                        .checked_mul(channels_usize)
+                        .ok_or(ReaPeaksError::InvalidHeader("layer size overflow"))?;
                     match version {
                         Version::Rpkm => {
-                            // v1.0 has one signed magnitude per peak/channel, not a max/min pair.
-                            let size = n.checked_mul(channels_usize).and_then(|x| x.checked_mul(2))
+                            let size = sample_count
+                                .checked_mul(2)
                                 .ok_or(ReaPeaksError::InvalidHeader("layer size overflow"))?;
-                            if off + size > raw.len() { return Err(ReaPeaksError::Truncated); }
-                            off += size;
+                            let end = checked_end(off, size)?;
+                            if end > raw.len() {
+                                return Err(ReaPeaksError::Truncated);
+                            }
+                            off = end;
                         }
                         Version::Rpkn | Version::Rpkl => {
-                            let size = n.checked_mul(channels_usize).and_then(|x| x.checked_mul(4))
+                            let size = sample_count
+                                .checked_mul(4)
                                 .ok_or(ReaPeaksError::InvalidHeader("layer size overflow"))?;
-                            if off + size > raw.len() { return Err(ReaPeaksError::Truncated); }
-                            let mut peaks = Vec::with_capacity(n * channels_usize);
-                            for i in 0..n * channels_usize {
+                            let end = checked_end(off, size)?;
+                            if end > raw.len() {
+                                return Err(ReaPeaksError::Truncated);
+                            }
+                            let mut peaks = Vec::with_capacity(sample_count);
+                            for i in 0..sample_count {
                                 let p = off + i * 4;
                                 peaks.push(PeakPair {
                                     max: i16::from_le_bytes(get::<2>(&raw, p)?),
                                     min: i16::from_le_bytes(get::<2>(&raw, p + 2)?),
                                 });
                             }
-                            off += size;
-                            wave_layers.push(WaveLayer { division: h.division as u32, peaks });
+                            off = end;
+                            wave_layers.push(WaveLayer {
+                                division: h.division as u32,
+                                peaks,
+                            });
                         }
                     }
                 }
                 LayerKind::Spectral => {
                     let n = h.peak_count as usize;
-                    let size = n.checked_mul(channels_usize).and_then(|x| x.checked_mul(4))
+                    let sample_count = n
+                        .checked_mul(channels_usize)
                         .ok_or(ReaPeaksError::InvalidHeader("spectral size overflow"))?;
-                    if off + size > raw.len() { return Err(ReaPeaksError::Truncated); }
-                    let mirrored_division = positive_divs.get(spectral_index).copied().unwrap_or(0);
-                    let mut peaks = Vec::with_capacity(n * channels_usize);
-                    for i in 0..n * channels_usize {
+                    let size = sample_count
+                        .checked_mul(4)
+                        .ok_or(ReaPeaksError::InvalidHeader("spectral size overflow"))?;
+                    let end = checked_end(off, size)?;
+                    if end > raw.len() {
+                        return Err(ReaPeaksError::Truncated);
+                    }
+                    let mirrored_division = positive_divs.get(spectral_index).copied().ok_or(
+                        ReaPeaksError::InvalidHeader(
+                            "spectral layer without matching waveform layer",
+                        ),
+                    )?;
+                    let mut peaks = Vec::with_capacity(sample_count);
+                    for i in 0..sample_count {
                         let code = u32::from_le_bytes(get::<4>(&raw, off + i * 4)?);
                         peaks.push(SpectralPeak::from_code(code));
                     }
-                    off += size;
-                    spectral_layers.push(SpectralLayer { mirrored_division, peaks });
+                    off = end;
+                    spectral_layers.push(SpectralLayer {
+                        mirrored_division,
+                        peaks,
+                    });
                     spectral_index += 1;
                 }
                 LayerKind::Spectrogram => {
                     let size = layer_payload_size(version, h, channels_usize)
                         .ok_or(ReaPeaksError::Unsupported("spectrogram layout"))?;
-                    if off + size > raw.len() { return Err(ReaPeaksError::Truncated); }
-                    off += size;
+                    let end = checked_end(off, size)?;
+                    if end > raw.len() {
+                        return Err(ReaPeaksError::Truncated);
+                    }
+                    off = end;
                 }
                 LayerKind::Loudness | LayerKind::LoudnessOld => {
-                    // Loudness layers are not decoded by this release. If this is the
-                    // final layer, leaving the bytes opaque is enough for wave/spectral.
-                    if idx + 1 == hs.len() {
-                        off = raw.len();
-                    } else {
-                        // Live REAPER 7.79 files observed here use 4 bytes/ch/sample.
-                        let size = h.peak_count as usize * channels_usize * 4;
-                        if off + size > raw.len() { return Err(ReaPeaksError::Truncated); }
-                        off += size;
+                    // REAPER 7.79 fixtures use at least 4 bytes/channel/sample.
+                    // A final loudness layer may contain a larger opaque payload,
+                    // but it may not be shorter than the observed minimum.
+                    let size = (h.peak_count as usize)
+                        .checked_mul(channels_usize)
+                        .and_then(|x| x.checked_mul(4))
+                        .ok_or(ReaPeaksError::InvalidHeader("loudness size overflow"))?;
+                    let end = checked_end(off, size)?;
+                    if end > raw.len() {
+                        return Err(ReaPeaksError::Truncated);
                     }
+                    off = if idx + 1 == hs.len() { raw.len() } else { end };
                 }
             }
         }
 
-        Ok(Self { header, layer_headers: hs, wave_layers, spectral_layers, raw })
+        if off != raw.len() {
+            return Err(ReaPeaksError::InvalidHeader("trailing bytes after layers"));
+        }
+
+        Ok(Self {
+            header,
+            layer_headers: hs,
+            wave_layers,
+            spectral_layers,
+            raw,
+        })
     }
 }
 
@@ -256,24 +332,55 @@ pub fn encode(
     source_size_low32: u32,
     layers: &[GeneratedLayer],
 ) -> Result<Vec<u8>> {
-    if channels == 0 { return Err(ReaPeaksError::InvalidArgument("channels=0")); }
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if sample_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("sample_rate=0"));
+    }
     if version == Version::Rpkm {
         return Err(ReaPeaksError::Unsupported("RPKM writer"));
     }
-    if layers.len() > u8::MAX as usize { return Err(ReaPeaksError::InvalidArgument("too many layers")); }
-    let total_payload: usize = layers.iter().map(|x| x.bytes.len()).sum();
-    let mut out = Vec::with_capacity(18 + layers.len() * 8 + total_payload);
+    if layers.len() > u8::MAX as usize {
+        return Err(ReaPeaksError::InvalidArgument("too many layers"));
+    }
+    for layer in layers {
+        if !is_known_layer_division(layer.header.division) {
+            return Err(ReaPeaksError::InvalidArgument("unknown layer token"));
+        }
+        if let Some(expected) = layer_payload_size(version, layer.header, channels as usize) {
+            if expected != layer.bytes.len() {
+                return Err(ReaPeaksError::InvalidArgument(
+                    "layer payload length mismatch",
+                ));
+            }
+        }
+    }
+    let total_payload = layers
+        .iter()
+        .try_fold(0usize, |total, layer| total.checked_add(layer.bytes.len()))
+        .ok_or(ReaPeaksError::InvalidArgument("encoded size overflow"))?;
+    let capacity = layers
+        .len()
+        .checked_mul(8)
+        .and_then(|x| x.checked_add(18))
+        .and_then(|x| x.checked_add(total_payload))
+        .filter(|&x| x <= isize::MAX as usize)
+        .ok_or(ReaPeaksError::InvalidArgument("encoded file too large"))?;
+    let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(&version.magic());
     out.push(channels);
     out.push(layers.len() as u8);
     out.extend_from_slice(&sample_rate.to_le_bytes());
     out.extend_from_slice(&source_mtime_low32.to_le_bytes());
     out.extend_from_slice(&source_size_low32.to_le_bytes());
-    for l in layers {
-        out.extend_from_slice(&l.header.division.to_le_bytes());
-        out.extend_from_slice(&l.header.peak_count.to_le_bytes());
+    for layer in layers {
+        out.extend_from_slice(&layer.header.division.to_le_bytes());
+        out.extend_from_slice(&layer.header.peak_count.to_le_bytes());
     }
-    for l in layers { out.extend_from_slice(&l.bytes); }
+    for layer in layers {
+        out.extend_from_slice(&layer.bytes);
+    }
     Ok(out)
 }
 
@@ -284,5 +391,12 @@ pub fn encode_rpkn(
     source_size_low32: u32,
     layers: &[GeneratedLayer],
 ) -> Result<Vec<u8>> {
-    encode(Version::Rpkn, channels, sample_rate, source_mtime_low32, source_size_low32, layers)
+    encode(
+        Version::Rpkn,
+        channels,
+        sample_rate,
+        source_mtime_low32,
+        source_size_low32,
+        layers,
+    )
 }
