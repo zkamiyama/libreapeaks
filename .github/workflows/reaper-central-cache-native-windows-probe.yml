@@ -28,14 +28,16 @@ jobs:
           if (-not $exe) { throw 'reaper.exe not found after extraction' }
           Copy-Item -Recurse -Force (Join-Path $exe.DirectoryName '*') $portable
           "REAPER_EXE=$(Join-Path $portable 'reaper.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Query GetPeakFileNameEx
+          "REAPER_PORTABLE=$portable" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Query GetPeakFileNameEx from portable startup script
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'central-probe'
           $cache = Join-Path $root 'cache'
           $media = Join-Path $root 'Media'
-          New-Item -ItemType Directory -Force -Path $root,$cache,$media | Out-Null
+          $scripts = Join-Path $env:REAPER_PORTABLE 'Scripts'
+          New-Item -ItemType Directory -Force -Path $root,$cache,$media,$scripts | Out-Null
           $paths = @(
             (Join-Path $media 'UPPER.WAV'),
             (Join-Path $media 'upper.wav'),
@@ -51,14 +53,44 @@ jobs:
           )
           $manifest = Join-Path $root 'paths.txt'
           $result = Join-Path $root 'results.json'
-          $ini = Join-Path $root 'reaper.ini'
-          $script = (Resolve-Path 'tools/reaper_oracle/query_peak_paths.lua').Path
+          $ini = Join-Path $env:REAPER_PORTABLE 'reaper.ini'
+          $startup = Join-Path $scripts '__startup.lua'
           [IO.File]::WriteAllLines($manifest, $paths, [Text.UTF8Encoding]::new($false))
           $iniText = "[REAPER]`naltpeaks=1`naltpeakspath=$cache`npeakcachegenrs=300`n"
           [IO.File]::WriteAllText($ini, $iniText, [Text.UTF8Encoding]::new($false))
+          $startupText = @'
+          local manifest = os.getenv("REAPEAKS_MANIFEST")
+          local result = os.getenv("REAPEAKS_RESULT")
+          local function esc(value)
+            value = tostring(value or "")
+            value = value:gsub("\\", "\\\\"):gsub('"', '\\"')
+            value = value:gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+            return '"' .. value .. '"'
+          end
+          local rows = {}
+          if manifest and result then
+            for source in io.lines(manifest) do
+              rows[#rows + 1] = {
+                source = source,
+                read = reaper.GetPeakFileNameEx(source, "", false),
+                write = reaper.GetPeakFileNameEx(source, "", true),
+              }
+            end
+            local out = assert(io.open(result, "w"))
+            out:write('{"version":1,"resource_path":', esc(reaper.GetResourcePath()), ',"entries":{')
+            for index, row in ipairs(rows) do
+              if index > 1 then out:write(',') end
+              out:write(esc(row.source), ':{"read":', esc(row.read), ',"write":', esc(row.write), '}')
+            end
+            out:write('}}\n')
+            out:close()
+          end
+          reaper.defer(function() reaper.Main_OnCommand(40004, 0) end)
+          '@
+          [IO.File]::WriteAllText($startup, $startupText, [Text.UTF8Encoding]::new($false))
           $env:REAPEAKS_MANIFEST = $manifest
           $env:REAPEAKS_RESULT = $result
-          $process = Start-Process -FilePath $env:REAPER_EXE -ArgumentList @('-newinst','-cfgfile',$ini,'-new','-nosplash',$script) -PassThru
+          $process = Start-Process -FilePath $env:REAPER_EXE -ArgumentList @('-new','-nosplash') -PassThru
           if (-not $process.WaitForExit(90000)) {
             Stop-Process -Id $process.Id -Force
             throw 'REAPER timed out'
@@ -71,6 +103,8 @@ jobs:
           name: reaper-central-cache-native-windows-${{ github.sha }}
           path: |
             ${{ runner.temp }}/central-probe
+            ${{ runner.temp }}/REAPER-portable/reaper.ini
+            ${{ runner.temp }}/REAPER-portable/Scripts/__startup.lua
             ${{ runner.temp }}/reaper-7z.log
           if-no-files-found: warn
           retention-days: 7
