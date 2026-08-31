@@ -11,55 +11,66 @@ permissions:
   contents: read
 
 jobs:
-  probe-windows:
-    runs-on: windows-latest
+  probe-windows-api-under-wine:
+    runs-on: ubuntu-latest
+    env:
+      WINEPREFIX: /tmp/libreapeaks-wine
+      WINEDEBUG: -all
+      WINEDLLOVERRIDES: mscoree,mshtml=
     steps:
       - uses: actions/checkout@v4
+      - name: Install Wine and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wine64 xvfb
       - name: Install portable REAPER 7.79 x64
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $installer = Join-Path $env:RUNNER_TEMP 'reaper779_x64-install.exe'
-          $portable = Join-Path $env:RUNNER_TEMP 'REAPER-portable'
-          Invoke-WebRequest 'https://www.reaper.fm/files/7.x/reaper779_x64-install.exe' -OutFile $installer
-          New-Item -ItemType Directory -Force -Path $portable | Out-Null
-          $arguments = @('/S', '/PORTABLE', "/D=$portable")
-          $process = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -Wait
-          if ($process.ExitCode -ne 0) { throw "REAPER installer failed: $($process.ExitCode)" }
-          $reaper = Join-Path $portable 'reaper.exe'
-          if (-not (Test-Path $reaper)) { throw "portable reaper.exe not found: $reaper" }
-          "REAPER_BIN=$reaper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Query central-cache paths
-        shell: pwsh
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_x64-install.exe -o /tmp/reaper-install.exe
+          rm -rf "$WINEPREFIX" /tmp/REAPER-portable
+          mkdir -p "$WINEPREFIX" /tmp/REAPER-portable
+          Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          export DISPLAY=:96
+          wineboot -u
+          wine /tmp/reaper-install.exe /S /PORTABLE '/D=Z:\tmp\REAPER-portable'
+          test -f /tmp/REAPER-portable/reaper.exe
+      - name: Query Windows central-cache paths
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'reaper-central-win'
-          $cache = Join-Path $root 'cache'
-          $media = Join-Path $root 'Media'
-          New-Item -ItemType Directory -Force -Path $cache,$media | Out-Null
-          $paths = @(
-            (Join-Path $media 'UPPER.WAV'),
-            (Join-Path $media 'upper.wav'),
-            (Join-Path $media 'ÄÖÜ.WAV'),
-            (Join-Path $media 'äöü.wav'),
-            (Join-Path $media 'I.WAV'),
-            (Join-Path $media 'i.wav'),
-            ((Join-Path $media 'UPPER.WAV') -replace '\\','/'),
-            'relative\Path\Take.WAV',
-            'C:\Users\Example\Audio\Take.WAV',
-            '\\server\share\Folder\Take.WAV'
+          set -euo pipefail
+          rm -rf /tmp/reaper-central-win
+          mkdir -p /tmp/reaper-central-win/cache /tmp/reaper-central-win/Media
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('/tmp/reaper-central-win')
+          paths = [
+              r'Z:\tmp\reaper-central-win\Media\UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\upper.wav',
+              r'Z:\tmp\reaper-central-win\Media\ÄÖÜ.WAV',
+              r'Z:\tmp\reaper-central-win\Media\äöü.wav',
+              r'Z:\tmp\reaper-central-win\Media\I.WAV',
+              r'Z:\tmp\reaper-central-win\Media\i.wav',
+              r'Z:/tmp/reaper-central-win/Media/UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\.\UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\sub\..\UPPER.WAV',
+              r'relative\Path\Take.WAV',
+              r'C:\Users\Example\Audio\Take.WAV',
+              r'\\server\share\Folder\Take.WAV',
+          ]
+          (root / 'paths.txt').write_text('\n'.join(paths) + '\n', encoding='utf-8')
+          (root / 'reaper.ini').write_text(
+              '[REAPER]\n'
+              'altpeaks=1\n'
+              'altpeakspath=Z:\\tmp\\reaper-central-win\\cache\n'
+              'peakcachegenmode=3\n'
+              'peakcachegenrs=300\n'
+              'showpeaks=64\n',
+              encoding='utf-8',
           )
-          [IO.File]::WriteAllLines((Join-Path $root 'paths.txt'), $paths, [Text.UTF8Encoding]::new($false))
-          @"
-          [REAPER]
-          altpeaks=1
-          altpeakspath=$cache
-          peakcachegenmode=3
-          peakcachegenrs=300
-          showpeaks=64
-          "@ | Set-Content -LiteralPath (Join-Path $root 'reaper.ini') -Encoding utf8NoBOM
-          @'
-          local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
+          (root / 'query.lua').write_text(r'''local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
           local result = assert(os.getenv("REAPEAKS_RESULT"))
           local out = assert(io.open(result, "w"))
           out:write("source\tread\twrite\tresource\n")
@@ -69,40 +80,38 @@ jobs:
             out:write(fn, "\t", read, "\t", write, "\t", reaper.GetResourcePath(), "\n")
           end
           out:close()
-          '@ | Set-Content -LiteralPath (Join-Path $root 'query.lua') -Encoding utf8NoBOM
-          $result = Join-Path $root 'results.tsv'
-          $env:REAPEAKS_MANIFEST = Join-Path $root 'paths.txt'
-          $env:REAPEAKS_RESULT = $result
-          $process = Start-Process -FilePath $env:REAPER_BIN -ArgumentList @(
-            '-newinst', '-cfgfile', (Join-Path $root 'reaper.ini'), '-new', '-nosplash', (Join-Path $root 'query.lua')
-          ) -PassThru
-          try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(90)
-            while (-not (Test-Path $result)) {
-              if ($process.HasExited) { throw "REAPER exited before producing the probe: $($process.ExitCode)" }
-              if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for REAPER probe output' }
-              Start-Sleep -Milliseconds 250
-              $process.Refresh()
-            }
-            $deadline = [DateTime]::UtcNow.AddSeconds(10)
-            do {
-              $length1 = (Get-Item $result).Length
-              Start-Sleep -Milliseconds 250
-              $length2 = (Get-Item $result).Length
-            } while ($length1 -ne $length2 -and [DateTime]::UtcNow -lt $deadline)
-          } finally {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          reaper.Main_OnCommand(40004, 0)
+          ''', encoding='utf-8')
+          PY
+          Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          export DISPLAY=:96
+          export REAPEAKS_MANIFEST='Z:\tmp\reaper-central-win\paths.txt'
+          export REAPEAKS_RESULT='Z:\tmp\reaper-central-win\results.tsv'
+          set +e
+          timeout 90s wine /tmp/REAPER-portable/reaper.exe \
+            -newinst \
+            -cfgfile 'Z:\tmp\reaper-central-win\reaper.ini' \
+            -new -nosplash \
+            'Z:\tmp\reaper-central-win\query.lua' \
+            >/tmp/reaper-central-win/reaper.log 2>&1
+          rc=$?
+          set -e
+          test -s /tmp/reaper-central-win/results.tsv || {
+            cat /tmp/reaper-central-win/reaper.log
+            exit "$rc"
           }
-          if (-not (Test-Path $result) -or (Get-Item $result).Length -eq 0) {
-            throw 'REAPER produced no central-cache probe output'
-          }
-          Get-Content -LiteralPath $result
+          cat /tmp/reaper-central-win/results.tsv
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: reaper-central-cache-windows-probe-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/reaper-central-win/results.tsv
-            ${{ runner.temp }}/reaper-central-win/reaper.ini
-            ${{ runner.temp }}/reaper-central-win/paths.txt
-          if-no-files-found: error
+            /tmp/reaper-central-win/results.tsv
+            /tmp/reaper-central-win/reaper.ini
+            /tmp/reaper-central-win/paths.txt
+            /tmp/reaper-central-win/reaper.log
+            /tmp/xvfb-win.log
+          if-no-files-found: warn
           retention-days: 7
