@@ -1,0 +1,136 @@
+name: central-cache-reverse-engineering
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/central-cache-reverse-engineering.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install probe dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Probe path policy and central-cache names
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/query_peak_path.lua <<'LUA'
+          local media = os.getenv('REAPEAKS_MEDIA')
+          local result = os.getenv('REAPEAKS_RESULT')
+          local function esc(s)
+            s=tostring(s or '')
+            return s:gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n'):gsub('\r','\\r')
+          end
+          local source = reaper.PCM_Source_CreateFromFile(media)
+          local read_path = ''
+          local write_path = ''
+          local type_name = ''
+          if source then
+            type_name = reaper.GetMediaSourceType(source, '') or ''
+            local ok_r, r1, r2 = pcall(reaper.GetPeakFileNameEx, source, '', false)
+            local ok_w, w1, w2 = pcall(reaper.GetPeakFileNameEx, source, '', true)
+            if ok_r then
+              if type(r2) == 'string' and r2 ~= '' then read_path=r2 elseif type(r1) == 'string' then read_path=r1 end
+            end
+            if ok_w then
+              if type(w2) == 'string' and w2 ~= '' then write_path=w2 elseif type(w1) == 'string' then write_path=w1 end
+            end
+            reaper.PCM_Source_Destroy(source)
+          end
+          local f=assert(io.open(result,'wb'))
+          f:write('{"media":"'..esc(media)..'","type":"'..esc(type_name)..'","read":"'..esc(read_path)..'","write":"'..esc(write_path)..'"}\n')
+          f:close()
+          reaper.Main_OnCommand(40004,0)
+          LUA
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json, math, os, pathlib, shutil, struct, subprocess, tempfile, time, wave
+
+          root=pathlib.Path('/tmp/central-probe')
+          shutil.rmtree(root, ignore_errors=True)
+          media_root=root/'media'
+          central=root/'central cache'
+          media_root.mkdir(parents=True)
+          central.mkdir(parents=True)
+          cases=[
+              media_root/'a'/'tone.wav',
+              media_root/'b'/'tone.wav',
+              media_root/'a'/'other.wav',
+              media_root/'space dir'/'space name.wav',
+              media_root/'unicode_é_日本'/'音声.wav',
+              media_root/'Case'/'Tone.WAV',
+              media_root/'case'/'tone.wav',
+          ]
+          for path in cases:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              sr=48000
+              with wave.open(str(path),'wb') as out:
+                  out.setnchannels(1); out.setsampwidth(2); out.setframerate(sr)
+                  data=bytearray()
+                  for i in range(4096):
+                      v=round(20000*math.sin(2*math.pi*997*i/sr))
+                      data += struct.pack('<h',v)
+                  out.writeframes(data)
+
+          display=':97'
+          xvfb=subprocess.Popen(['Xvfb',display,'-screen','0','1280x720x24','-nolisten','tcp'])
+          records=[]
+          try:
+              time.sleep(.4)
+              for altpeaks in range(0,16):
+                  for index,media in enumerate(cases):
+                      case=root/f'cfg-{altpeaks}-{index}'
+                      case.mkdir()
+                      ini=case/'reaper.ini'
+                      ini.write_text(
+                          '[REAPER]\n'
+                          'peakcachegenmode=3\n'
+                          'peakcachegenrs=300\n'
+                          f'altpeaks={altpeaks}\n'
+                          f'altpeakspath={central}\n',
+                          encoding='utf-8',
+                      )
+                      result=case/'result.json'
+                      env=os.environ.copy()
+                      env.update(DISPLAY=display,REAPEAKS_MEDIA=str(media.resolve()),REAPEAKS_RESULT=str(result))
+                      cp=subprocess.run(
+                          [os.environ['REAPER_BIN'],'-newinst','-cfgfile',str(ini),'-new','-nosplash','/tmp/query_peak_path.lua'],
+                          env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60,check=False,
+                      )
+                      if cp.returncode != 0 or not result.is_file():
+                          raise SystemExit(f'query failed altpeaks={altpeaks} media={media}: rc={cp.returncode} log={cp.stdout[-4000:]!r}')
+                      row=json.loads(result.read_text(encoding='utf-8-sig'))
+                      row['altpeaks']=altpeaks
+                      row['central']=str(central)
+                      records.append(row)
+          finally:
+              xvfb.terminate()
+              try: xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired: xvfb.kill()
+          pathlib.Path('central-cache-probe.json').write_text(json.dumps(records,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: central-cache-probe-${{ github.sha }}
+          path: central-cache-probe.json
+          if-no-files-found: error
+          retention-days: 7
