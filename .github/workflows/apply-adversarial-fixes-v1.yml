@@ -22,12 +22,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply confirmed fixes
+      - name: Apply oracle-derived fixes
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== stale EOF unit test before patch ==='
-          grep -n -B 8 -A 35 'wave_layers_use_ceiling_bucket_counts_and_partial_final_bucket' src/wave.rs || true
           python tools/apply_adversarial_fixes_v1.py
           cargo fmt --all
           cargo fmt --all -- --check
@@ -40,5 +38,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/format.rs src/wave.rs src/loudness.rs tests/reaper_adversarial_oracle.rs
-          git commit -m 'fix adversarial REAPER EOF and loudness structure rules'
+          git commit -m 'fix REAPER adversarial EOF and loudness scheduling'
           git push origin HEAD:adversarial-reaper-oracle
