@@ -12,9 +12,6 @@ permissions:
 
 env:
   TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-  CXXFLAGS: -fsanitize=thread -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS
-  RUSTFLAGS: -C link-arg=-fsanitize=thread
-  RUST_TEST_THREADS: 16
 
 jobs:
   strict-wdl-cxx-threads:
@@ -24,10 +21,29 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build strict-WDL C ABI harness with ThreadSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/strict-wdl-thread-sanitizer
+          g++ \
+            -std=c++17 -O1 -g \
+            -fsanitize=thread \
+            -fno-omit-frame-pointer \
+            -D_GLIBCXX_ASSERTIONS \
+            -DWDL_FFT_REALSIZE=8 \
+            -DWDL_DENORMAL_WANTS_SCOPED_FTZ \
+            -Wno-register \
+            -Ithird_party/WDL/WDL \
+            tests/strict_wdl_sanitizer_harness.cpp \
+            src/strict_wdl.cpp \
+            third_party/WDL/WDL/fft.c \
+            third_party/WDL/WDL/resample.cpp \
+            -pthread \
+            -o /tmp/strict-wdl-thread-sanitizer/strict-wdl-tsan
 
-      - name: Run parallel strict-WDL release suite with ThreadSanitizer
-        run: cargo test --release --all-targets --features strict-wdl
+      - name: Stress concurrent first-use and repeated C ABI calls
+        run: /tmp/strict-wdl-thread-sanitizer/strict-wdl-tsan --threads
 
       - name: Assert thread-sanitizer build left sources untouched
         shell: bash

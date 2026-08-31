@@ -13,8 +13,6 @@ permissions:
 env:
   ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
   UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-  CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS
-  RUSTFLAGS: -C link-arg=-fsanitize=address -C link-arg=-fsanitize=undefined
 
 jobs:
   strict-wdl-cxx:
@@ -24,10 +22,29 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build strict-WDL C ABI harness with ASan and UBSan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/strict-wdl-sanitizers
+          g++ \
+            -std=c++17 -O1 -g \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -D_GLIBCXX_ASSERTIONS \
+            -DWDL_FFT_REALSIZE=8 \
+            -DWDL_DENORMAL_WANTS_SCOPED_FTZ \
+            -Wno-register \
+            -Ithird_party/WDL/WDL \
+            tests/strict_wdl_sanitizer_harness.cpp \
+            src/strict_wdl.cpp \
+            third_party/WDL/WDL/fft.c \
+            third_party/WDL/WDL/resample.cpp \
+            -pthread \
+            -o /tmp/strict-wdl-sanitizers/strict-wdl-asan-ubsan
 
-      - name: Run strict-WDL release suite with C++ sanitizers
-        run: cargo test --release --all-targets --features strict-wdl
+      - name: Exercise valid, adversarial, and concurrent C ABI calls
+        run: /tmp/strict-wdl-sanitizers/strict-wdl-asan-ubsan --threads
 
       - name: Assert sanitizer build left sources untouched
         shell: bash

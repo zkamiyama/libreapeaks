@@ -89,6 +89,18 @@ jobs:
               'impulse': lambda frame: (
                   (32_767 if frame in (0, 1_200, 38_400, 96_000) else 0),
               ) * 2,
+              'dc_tail': lambda frame: (8_192 if frame < sample_rate else 0,) * 2,
+              'low_level': lambda frame: (
+                  (1 if frame % 4 == 0 else -1 if frame % 4 == 2 else 0),
+                  (-1 if frame % 4 == 0 else 1 if frame % 4 == 2 else 0),
+              ),
+              'block_edge_impulse': lambda frame: (
+                  (32_767 if frame in (1_199, 1_200, 2_399, 2_400, 19_199, 19_200, frames - 1) else 0),
+              ) * 2,
+              'alternating': lambda frame: (
+                  (32_767 if frame % 2 == 0 else -32_768),
+                  (-32_768 if frame % 2 == 0 else 32_767),
+              ),
           }
 
           for name, sample in cases.items():
@@ -209,7 +221,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in silence sine_997 step impulse; do
+          for name in silence sine_997 step impulse dc_tail low_level block_edge_impulse alternating; do
             REAPEAKS_PCM16="/tmp/reaper-oracle/media/$name.decoded.s16le" \
             REAPEAKS_SOURCE="/tmp/reaper-oracle/media/$name.m4a" \
             REAPEAKS_ORACLE="/tmp/reaper-oracle/results/$name.reaper.reapeaks" \
