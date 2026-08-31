@@ -518,7 +518,7 @@ def read_wav_cache_input(
         # KSDATAFORMAT_SUBTYPE_* has Data1 equal to the original format tag and
         # a fixed GUID tail. Looking only at the first two bytes would accept
         # unrelated or malformed GUIDs as PCM/float audio.
-        guid_tail = bytes.fromhex("00001000800000aa00389b71")
+        guid_tail = bytes.fromhex("000000001000800000aa00389b71")
         if fmt[26:40] != guid_tail:
             raise UnsupportedWavError("unsupported WAVE_FORMAT_EXTENSIBLE subformat GUID")
         format_tag = struct.unpack_from("<H", fmt, 24)[0]
