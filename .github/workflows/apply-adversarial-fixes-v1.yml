@@ -22,7 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply oracle-derived fixes
+      - name: Apply oracle-derived fixes v2
         shell: bash
         run: |
           set -euo pipefail
