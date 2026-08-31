@@ -1,0 +1,1 @@
+This file deliberately contains no test code. Its user-authenticated push triggers the ordinary and REAPER validation workflows against the latest branch head after automated research commits.
