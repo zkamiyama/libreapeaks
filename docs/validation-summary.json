@@ -1,10 +1,49 @@
 {
   "oracle": "REAPER 7.79 x86_64 Linux",
-  "date": "2026-08-30",
+  "updated": "2026-09-01",
   "oracle_process_policy": "one fresh REAPER process per media file",
-  "reaper_preferences": {
-    "peakcachegenmode": 3,
-    "peakcachegenrs": 300
+  "primary_compatibility_backend": "strict-wdl",
+  "whole_file_mode3": {
+    "ffmpeg_alac": {
+      "cases": 8,
+      "exact_files": 8,
+      "sample_rate": 48000,
+      "channels": 2,
+      "peakcachegenmode": 3,
+      "peakcachegenrs": 300,
+      "source_container": "M4A",
+      "source_codec": "ALAC",
+      "reaper_source_type": "VIDEO",
+      "signals": [
+        "silence",
+        "sine_997",
+        "step",
+        "impulse",
+        "dc_tail",
+        "low_level",
+        "block_edge_impulse",
+        "alternating"
+      ],
+      "comparison": "complete file byte identity"
+    },
+    "adversarial": {
+      "cases": 16,
+      "exact_files": 16,
+      "peakcachegenmode": 3,
+      "sample_rates_hz": [22050, 32000, 44100, 48000, 88200, 96000],
+      "peakcachegenrs_values": [150, 300, 500],
+      "channel_counts": [1, 2, 6],
+      "boundary_scope": [
+        "3-second EOF - 1 sample",
+        "exact 3-second EOF",
+        "3-second EOF + 1 sample",
+        "400 ms window - 1 sample",
+        "exact 400 ms window",
+        "400 ms window + 1 sample"
+      ],
+      "signal_classes": ["step", "impulse", "deterministic multichannel noise"],
+      "comparison": "complete file byte identity"
+    }
   },
   "wave": {
     "pcm16_exhaustive_input_values": 65536,
@@ -13,14 +52,23 @@
     "rpkn_pcm24_constant_buckets": 50000,
     "rpkn_pcm24_exact": 50000,
     "rpkl_float_constant_buckets": 43857,
-    "rpkl_float_exact": 43857
+    "rpkl_float_exact": 43857,
+    "rpkn_normalized_rule": {
+      "nonnegative": "round_half_up(x * 32767)",
+      "negative": "-round_half_up(-x * 32768)"
+    },
+    "rpkl_bucket_initialization": {
+      "max": -1.0,
+      "min": 1.0
+    }
   },
-  "spectral_pre_wdl": {
+  "spectral_pre_wdl_historical": {
     "files": 131,
     "fine_points": 34127,
     "frequency_exact": 34040,
     "density_exact": 31848,
-    "full_code_exact": 31776
+    "full_code_exact": 31776,
+    "note": "historical handwritten model; not the current strict compatibility result"
   },
   "spectral_strict_wdl": {
     "fresh_process_primary_cases": 188,
@@ -47,31 +95,95 @@
       "4-channel",
       "RPKN PCM16",
       "RPKL float32"
-    ]
+    ],
+    "aggregate_tested_points": 3219,
+    "aggregate_exact_points": 3219
   },
-  "spectral_aggregate": {
-    "tested_points": 3219,
-    "exact_points": 3219
+  "loudness_mode3": {
+    "token": -114,
+    "record_values": ["momentary_energy_f32", "short_term_energy_f32"],
+    "header_peak_count_semantics": "number of f32 values per channel; twice the time-record count",
+    "filter": "libebur128-style convolved fourth-order Direct Form II K-weighting",
+    "energy_block_frames": "max(1, floor(sample_rate / 40))",
+    "momentary_blocks": 16,
+    "short_term_blocks": 120,
+    "normalization": {
+      "samples_100ms": "round(sample_rate / 10), implemented as (sample_rate + 5) / 10",
+      "momentary_frames": "samples_100ms * 4",
+      "short_term_frames": "samples_100ms * 30"
+    },
+    "ring_update_order": "sum = (sum + new_energy) - old_energy",
+    "partial_final_25ms_block": "not flushed",
+    "base_record_division": "second positive waveform division",
+    "coarse_policy": "average complete groups of base loudness records",
+    "validated_by": ["8-case FFmpeg/ALAC whole-file gate", "16-case adversarial whole-file gate"]
+  },
+  "division_rule": {
+    "fine": "max(1, floor(sample_rate / peakcachegenrs))",
+    "mid": "fine * max(1, ceil(sample_rate / (fine * 20)))",
+    "coarse": "mid * max(1, ceil(sample_rate / mid))",
+    "live_probe_peakcachegenrs": [100, 150, 200, 300, 500, 1000],
+    "live_probe_sample_rates_hz": [22051, 44100, 48000]
+  },
+  "decoder_provenance": {
+    "scope": "REAPER 7.79 Linux ALAC/M4A diagnostic",
+    "m4a_source_type": "VIDEO",
+    "observed_ffmpeg_functions": [
+      "avio_alloc_context",
+      "avformat_open_input",
+      "av_read_frame",
+      "avcodec_send_packet",
+      "avcodec_receive_frame"
+    ],
+    "observed_libraries": ["libavformat.so.60", "libavcodec.so.60"],
+    "wave_control_observed_calls_to_monitored_functions": 0,
+    "note": "TYPE=VIDEO alone is not treated as proof of FFmpeg use"
   },
   "strict_compatibility_quirks": {
     "source_rate_le_22050": "spectral layers are present but payload codes are zero",
     "wdl_resampler_feed_samples": 2048,
     "wdl_resampler_feed_frames": "max(1, 2048 / channels)",
-    "wdl_fft_init": "wrapped in std::call_once because upstream WDL_fft_init uses an unsynchronized static initialization flag"
+    "wdl_fft_init": "wrapped in std::call_once because concurrent first use of upstream WDL initialization is unsafe"
   },
-  "format_probe": {
-    "integer_payload_equivalence": [
+  "application_path_policy": {
+    "canonical_oracle": "REAPER GetPeakFileNameEx",
+    "cache_map_version": 2,
+    "legacy_cache_map_v1_readable": true,
+    "unknown_declared_cache_map_versions_rejected": true,
+    "live_query_non_object_json_rejected": true,
+    "live_query_non_string_source_type_rejected": true,
+    "note": "current runnable demo CLI uses --cache-mode reaper + --reaper-cache-map for exact mapped paths; its --cache-mode central is the older private SHA namespace"
+  },
+  "public_writer_surface": {
+    "rust_complete_mode3": ["generate_pcm16_mode3", "generate_f32_mode3"],
+    "rust_legacy_wave_spectral": ["generate_pcm16", "generate_f32"],
+    "python_wave_spectral_only": ["generate_pcm16", "generate_f32"],
+    "c_wave_spectral_only": ["rpk_generate_pcm16", "rpk_generate_f32"],
+    "c_division_helper": "rpk_default_divisions"
+  },
+  "format_observations": {
+    "integer_payload_equivalence_historical": [
       "WAV PCM16",
       "WAV PCM24",
       "WAV PCM32",
       "FLAC16",
       "FLAC24"
     ],
-    "rpkl_sources_observed": [
+    "rpkl_sources_observed_historical": [
       "WAV float32",
       "MP3",
       "Vorbis",
       "Opus"
     ]
-  }
+  },
+  "not_in_current_byte_exact_claim": [
+    "REAPER versions other than 7.79 unless separately tested",
+    "Windows/macOS or non-x86_64 behavior unless separately tested",
+    "every lossy codec/decoder build",
+    "spectrogram (-g) generation",
+    "legacy loudness (-l) payload layout",
+    "RPKM compact waveform materialization",
+    "exact REAPER NaN/Inf/subnormal float-media policy",
+    "complete mode-3 generation through current C/Python writer APIs"
+  ]
 }
