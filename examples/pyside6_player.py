@@ -1,12 +1,10 @@
 """PySide6 reference audio player for libreapeaks.
 
-Run:
+Examples:
     python examples/pyside6_player.py /path/to/audio.wav
-    python examples/pyside6_player.py /path/to/audio.wav --peaks /path/to/file.reapeaks
-    python examples/pyside6_player.py /path/to/audio.wav --rebuild-cache
-
-The canvas uses plan_view -> tiles_for_view -> tile_texture and the matching
-spectral tile API. Tile IDs and LRU statistics are shown on screen.
+    python examples/pyside6_player.py song.mp3 --cache-decoder ffmpeg
+    python examples/pyside6_player.py song.opus --cache-decoder ffmpeg \
+        --playback-decoder ffmpeg --cache-mode central --cache-dir ~/.cache/libreapeaks
 """
 from __future__ import annotations
 
@@ -18,32 +16,76 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel, QMainWindow,
-    QPushButton, QSlider, QVBoxLayout, QWidget,
+    QApplication,
+    QCheckBox,
+    QDoubleSpinBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
 )
 
 import reapeaks
-from player_common import ensure_reapeaks, exact_audio_frames, format_time
+from player_common import (
+    DEFAULT_DECODE_TIMEOUT,
+    DEFAULT_MAX_DECODE_BYTES,
+    PlayerCacheError,
+    available_spectral_levels,
+    ensure_reapeaks,
+    exact_audio_frames,
+    format_time,
+    prepare_playback_audio,
+)
 from pyside6_views import OverviewWidget, PeaksCanvas
 
+
 class PlayerWindow(QMainWindow):
-    def __init__(self, audio_path: Path, peaks_path: Path, generated: bool):
+    def __init__(
+        self,
+        audio_path: Path,
+        playback_path: Path,
+        peaks_path: Path,
+        generated: bool,
+        *,
+        cache_decoder: str,
+        playback_decoder: str,
+    ):
         super().__init__()
         self.audio_path = audio_path
+        self.playback_path = playback_path
         self.peaks_path = peaks_path
         self.rp = reapeaks.ReaPeaks.open(str(peaks_path))
         levels = self.rp.levels()
+        if not levels:
+            raise PlayerCacheError(
+                f"cache has no decodable RPKN/RPKL waveform layers: {peaks_path}"
+            )
         estimated_frames = max(1, levels[0][0] * levels[0][1])
-        self.total_frames = exact_audio_frames(audio_path, self.rp.sample_rate) or estimated_frames
+        self.total_frames = (
+            exact_audio_frames(playback_path, self.rp.sample_rate)
+            or exact_audio_frames(audio_path, self.rp.sample_rate)
+            or estimated_frames
+        )
         self.follow = True
 
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.8)
-        self.player.setSource(QUrl.fromLocalFile(str(audio_path)))
+        self.player.setSource(QUrl.fromLocalFile(str(playback_path)))
 
         self.canvas = PeaksCanvas(self.rp, self.total_frames)
+        # pyside6_views predates an explicit spectral-layer count. Replace its
+        # optimistic native-wave list with layers that are actually readable.
+        self.canvas.native_levels = [
+            (level_index, division, peak_count)
+            for _layer, level_index, division, peak_count in available_spectral_levels(
+                self.rp, levels
+            )
+        ]
         self.canvas.seekRequested.connect(self.seek_frame)
         self.canvas.viewChanged.connect(self._view_changed)
 
@@ -74,7 +116,9 @@ class PlayerWindow(QMainWindow):
         self.tiles_checkbox.toggled.connect(self.canvas.set_tile_debug)
         self.follow_checkbox = QCheckBox("Follow playhead")
         self.follow_checkbox.setChecked(True)
-        self.follow_checkbox.toggled.connect(lambda value: setattr(self, "follow", value))
+        self.follow_checkbox.toggled.connect(
+            lambda value: setattr(self, "follow", value)
+        )
         self.vertical_scale = QDoubleSpinBox()
         self.vertical_scale.setRange(0.1, 32.0)
         self.vertical_scale.setDecimals(2)
@@ -122,20 +166,24 @@ class PlayerWindow(QMainWindow):
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
-        self.player.errorOccurred.connect(lambda _err, text: self.statusBar().showMessage(text))
+        self.player.errorOccurred.connect(
+            lambda _error, text: self.statusBar().showMessage(text)
+        )
 
-        # Exercise the complete-level data texture API only on the coarsest
-        # level so this remains bounded even for long recordings.
+        # Exercise the complete-level texture API only at the coarsest level;
+        # all interactive long-media access remains tiled.
         coarsest = len(levels) - 1
         env_w, env_h, env_raw = self.rp.envelope_texture(coarsest)
         defaults = reapeaks.default_divisions(self.rp.sample_rate)
-        native_count = sum(1 for _d, _n, native in levels if native)
+        native_count = sum(1 for _division, _count, native in levels if native)
         derived_count = len(levels) - native_count
         self.api_label.setText(
-            f"cache={peaks_path.name}{' (generated by libreapeaks)' if generated else ''} | "
-            f"encoding={self.rp.wave_encoding} channels={self.rp.channels} sr={self.rp.sample_rate} | "
-            f"tile_peaks={self.rp.tile_peaks} | levels={len(levels)} "
-            f"(native={native_count}, lazy-derived={derived_count}) | "
+            f"cache={peaks_path.name}"
+            f"{' (generated by libreapeaks)' if generated else ' (reused)'} | "
+            f"cache_decoder={cache_decoder} playback_decoder={playback_decoder} | "
+            f"encoding={self.rp.wave_encoding} channels={self.rp.channels} "
+            f"sr={self.rp.sample_rate} | tile_peaks={self.rp.tile_peaks} | "
+            f"levels={len(levels)} (native={native_count}, lazy-derived={derived_count}) | "
             f"default_divisions={defaults} | coarsest envelope_texture={env_w}×{env_h} "
             f"({len(bytes(env_raw))} RGBA8 bytes)"
         )
@@ -146,88 +194,171 @@ class PlayerWindow(QMainWindow):
         self._view_changed(self.canvas.view_start, self.canvas.view_end)
         self._position_changed(0)
 
-    def toggle_play(self):
+    def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
 
-    def stop(self):
+    def stop(self) -> None:
         self.player.stop()
         self.seek_frame(0)
 
-    def seek_frame(self, frame: int):
+    def seek_frame(self, frame: int) -> None:
         ms = int(frame * 1000 / max(1, self.rp.sample_rate))
         self.player.setPosition(ms)
 
-    def _slider_seek(self, value: int):
+    def _slider_seek(self, value: int) -> None:
         self.seek_frame(int(value / 100_000 * self.total_frames))
 
-    def _playback_state_changed(self, state):
+    def _playback_state_changed(self, state) -> None:
         self.play_button.setText(
-            "Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play"
+            "Pause"
+            if state == QMediaPlayer.PlaybackState.PlayingState
+            else "Play"
         )
 
-    def _duration_changed(self, duration_ms: int):
+    def _duration_changed(self, duration_ms: int) -> None:
         if duration_ms <= 0:
             return
         duration_frames = int(duration_ms * self.rp.sample_rate / 1000)
-        exact = exact_audio_frames(self.audio_path, self.rp.sample_rate)
+        exact = exact_audio_frames(self.playback_path, self.rp.sample_rate)
         self.total_frames = exact or max(1, duration_frames)
         self.canvas.set_total_frames(self.total_frames)
         self.overview.total_frames = self.total_frames
 
-    def _position_changed(self, position_ms: int):
+    def _position_changed(self, position_ms: int) -> None:
         frame = int(position_ms * self.rp.sample_rate / 1000)
         self.canvas.set_playhead(frame)
-        if self.follow and not (self.canvas.view_start <= frame <= self.canvas.view_end):
+        if self.follow and not (
+            self.canvas.view_start <= frame <= self.canvas.view_end
+        ):
             span = self.canvas.view_end - self.canvas.view_start
             self.canvas.set_view(frame - span // 4, frame + 3 * span // 4)
         self.position_slider.blockSignals(True)
-        self.position_slider.setValue(int(min(1.0, frame / max(1, self.total_frames)) * 100_000))
+        self.position_slider.setValue(
+            int(min(1.0, frame / max(1, self.total_frames)) * 100_000)
+        )
         self.position_slider.blockSignals(False)
         self.time_label.setText(
             f"{format_time(position_ms / 1000)} / "
             f"{format_time(self.total_frames / self.rp.sample_rate)}"
         )
         self.overview.set_state(
-            self.canvas.view_start, self.canvas.view_end, frame, self.total_frames
+            self.canvas.view_start,
+            self.canvas.view_end,
+            frame,
+            self.total_frames,
         )
 
-    def _view_changed(self, start: int, end: int):
+    def _view_changed(self, start: int, end: int) -> None:
         self.overview.set_state(start, end, self.canvas.playhead, self.total_frames)
 
-    def _refresh_status(self):
-        span_s = (self.canvas.view_end - self.canvas.view_start) / self.rp.sample_rate
+    def _refresh_status(self) -> None:
+        span_seconds = (
+            self.canvas.view_end - self.canvas.view_start
+        ) / self.rp.sample_rate
         self.status_label.setText(
             f"viewport={format_time(self.canvas.view_start / self.rp.sample_rate)}…"
-            f"{format_time(self.canvas.view_end / self.rp.sample_rate)} ({span_s:.3f}s) | "
-            + self.canvas.diagnostics
+            f"{format_time(self.canvas.view_end / self.rp.sample_rate)} "
+            f"({span_seconds:.3f}s) | {self.canvas.diagnostics}"
         )
 
 
-def parse_args(argv: list[str]):
+def parse_divisions(value: str) -> list[int]:
+    try:
+        values = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("divisions must be comma-separated integers") from exc
+    if not values or any(item <= 0 for item in values):
+        raise argparse.ArgumentTypeError("divisions must contain positive integers")
+    return values
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", type=Path)
     parser.add_argument("--peaks", type=Path, help="existing or target .reapeaks path")
+    parser.add_argument("--rebuild-cache", action="store_true")
     parser.add_argument(
-        "--rebuild-cache",
-        action="store_true",
-        help="rebuild PCM16/float32 WAV cache with libreapeaks before opening",
+        "--cache-decoder", choices=("auto", "wav", "ffmpeg"), default="auto"
     )
+    parser.add_argument(
+        "--playback-decoder", choices=("native", "ffmpeg"), default="native"
+    )
+    parser.add_argument(
+        "--cache-mode",
+        choices=("auto", "sidecar", "subdir", "central", "reaper"),
+        default="auto",
+    )
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--reaper-cache-map", type=Path)
+    parser.add_argument("--allow-stale-cache", action="store_true")
+    parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--ffprobe", default="ffprobe")
+    parser.add_argument("--decode-timeout", type=float, default=DEFAULT_DECODE_TIMEOUT)
+    parser.add_argument(
+        "--max-decode-bytes", type=int, default=DEFAULT_MAX_DECODE_BYTES
+    )
+    parser.add_argument(
+        "--wave-encoding", choices=("auto", "rpkn", "rpkl"), default="auto"
+    )
+    parser.add_argument("--divisions", type=parse_divisions)
+    parser.add_argument("--fine-peaks-per-second", type=int, default=300)
+    parser.add_argument("--no-spectral", action="store_true")
+    parser.add_argument("--lock-timeout", type=float, default=30.0)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    audio = args.audio.resolve()
-    peaks, generated = ensure_reapeaks(
-        audio, args.peaks, rebuild=args.rebuild_cache, spectral=True
-    )
-    app = QApplication(sys.argv)
-    window = PlayerWindow(audio, peaks, generated)
-    window.show()
-    return app.exec()
+    audio = args.audio.expanduser().resolve(strict=False)
+    prepared = None
+    try:
+        peaks, generated = ensure_reapeaks(
+            audio,
+            args.peaks,
+            rebuild=args.rebuild_cache,
+            spectral=not args.no_spectral,
+            decoder=args.cache_decoder,
+            cache_mode=args.cache_mode,
+            cache_directory=args.cache_dir,
+            reaper_cache_map=args.reaper_cache_map,
+            allow_stale_cache=args.allow_stale_cache,
+            ffmpeg=args.ffmpeg,
+            ffprobe=args.ffprobe,
+            decode_timeout=args.decode_timeout,
+            max_decode_bytes=args.max_decode_bytes,
+            wave_encoding=args.wave_encoding,
+            divisions=args.divisions,
+            fine_peaks_per_second=args.fine_peaks_per_second,
+            lock_timeout=args.lock_timeout,
+        )
+        prepared = prepare_playback_audio(
+            audio,
+            decoder=args.playback_decoder,
+            ffmpeg=args.ffmpeg,
+            ffprobe=args.ffprobe,
+            timeout=args.decode_timeout,
+            max_decode_bytes=args.max_decode_bytes,
+        )
+        app = QApplication([sys.argv[0]])
+        window = PlayerWindow(
+            audio,
+            prepared.path,
+            peaks,
+            generated,
+            cache_decoder=args.cache_decoder,
+            playback_decoder=args.playback_decoder,
+        )
+        window.show()
+        return app.exec()
+    except PlayerCacheError as exc:
+        print(f"pyside6_player: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if prepared is not None:
+            prepared.close()
 
 
 if __name__ == "__main__":
