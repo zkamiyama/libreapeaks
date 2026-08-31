@@ -1,0 +1,66 @@
+name: reaper-division-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-division-probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          find /tmp/reaper -type f -name reaper -perm -111 -print
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate sample-rate probe media
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rates
+          python - <<'PY'
+          import math, struct, wave
+          from pathlib import Path
+          rates = [8000, 11025, 12000, 16000, 22050, 22051, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000]
+          root = Path('/tmp/rates')
+          for sr in rates:
+              frames = sr * 2
+              with wave.open(str(root / f'rate_{sr}.wav'), 'wb') as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(sr)
+                  chunk = bytearray()
+                  for i in range(frames):
+                      x = 0.55*math.sin(2*math.pi*997*i/sr) + 0.15*math.sin(2*math.pi*3137*i/sr)
+                      v = max(-32768, min(32767, round(x*32767)))
+                      chunk += struct.pack('<h', v)
+                      if len(chunk) >= 1<<16:
+                          w.writeframesraw(chunk); chunk.clear()
+                  if chunk:
+                      w.writeframesraw(chunk)
+          PY
+      - name: Probe REAPER divisions with fresh process per rate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/reaper_oracle/run_fresh.py \
+            --reaper "$REAPER_BIN" \
+            --media-dir /tmp/rates \
+            --peak-rate 300 \
+            --display :99 \
+            --log-dir /tmp/reaper-rate-logs | tee /tmp/divisions.tsv
+          echo '--- divisions ---'
+          cat /tmp/divisions.tsv
