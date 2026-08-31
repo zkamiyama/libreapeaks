@@ -1,0 +1,157 @@
+name: apply-adversarial-fixes-v1
+
+on:
+  push:
+    branches:
+      - adversarial-reaper-oracle
+    paths:
+      - '.github/workflows/apply-adversarial-fixes-v1.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: adversarial-reaper-oracle
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply only oracle-confirmed fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1) Real REAPER files do not require -'r' value counts to equal the
+          # corresponding waveform count. Keep only even-count and payload-size
+          # validation; the mirrored division remains order-derived.
+          p = Path('src/format.rs')
+          s = p.read_text()
+          old = '''                    let expected_value_count =
+                        mirrored
+                            .peak_count
+                            .checked_mul(2)
+                            .ok_or(ReaPeaksError::InvalidHeader(
+                                "loudness value count overflow",
+                            ))?;
+                    if h.peak_count != expected_value_count {
+                        return Err(ReaPeaksError::InvalidHeader(
+                            "loudness count does not match waveform layer",
+                        ));
+                    }
+
+'''
+          if old not in s:
+              raise SystemExit('format.rs loudness-count validation block not found')
+          s = s.replace(old, '''                    // REAPER's raw -'r' cadence is independent from the
+                    // mirrored waveform bucket count at EOF and for some peak
+                    // rates. The count therefore cannot be validated by
+                    // equality with the waveform header. Evenness, checked
+                    // payload sizing, and truncation checks below are the
+                    // structural invariants observed in real files.
+
+''', 1)
+          p.write_text(s)
+
+          # 2) REAPER builds nested waveform mipmaps as a stream. If EOF lands
+          # exactly on a finest-level bucket boundary, incomplete upper-level
+          # buckets are not flushed. If the finest bucket itself is partial,
+          # the upper partial buckets are flushed with it.
+          p = Path('src/wave.rs')
+          s = p.read_text()
+          anchor = '''pub fn build_wave_layers(
+'''
+          helper = '''fn reaper_wave_bucket_count(
+    frames: usize,
+    division: usize,
+    fine_division: usize,
+    is_finest: bool,
+) -> usize {
+    if is_finest || division % fine_division != 0 || frames % fine_division != 0 {
+        frames.div_ceil(division)
+    } else {
+        frames / division
+    }
+}
+
+'''
+          if helper not in s:
+              if anchor not in s:
+                  raise SystemExit('wave.rs build_wave_layers anchor not found')
+              s = s.replace(anchor, helper + anchor, 1)
+          old_loop = '''    let mut layers = Vec::with_capacity(divisions.len());
+    for &div in divisions {
+'''
+          new_loop = '''    let mut layers = Vec::with_capacity(divisions.len());
+    let fine_division = divisions.first().copied().unwrap_or(1) as usize;
+    for (division_index, &div) in divisions.iter().enumerate() {
+'''
+          if s.count(old_loop) != 2:
+              raise SystemExit(f'expected two wave loops, found {s.count(old_loop)}')
+          s = s.replace(old_loop, new_loop, 2)
+          old_count = '''        let d = div as usize;
+        let count = frames.div_ceil(d);
+'''
+          new_count = '''        let d = div as usize;
+        let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
+'''
+          if s.count(old_count) != 2:
+              raise SystemExit(f'expected two wave count sites, found {s.count(old_count)}')
+          s = s.replace(old_count, new_count, 2)
+          p.write_text(s)
+
+          # 3) Coarse -'r' layers contain only complete groups of base loudness
+          # records; REAPER does not emit/average a final partial group.
+          p = Path('src/loudness.rs')
+          s = p.read_text()
+          old = '''        let division_usize = usize::try_from(division)
+            .map_err(|_| ReaPeaksError::InvalidArgument("division is too large"))?;
+        let record_count = frames.div_ceil(division_usize);
+'''
+          new = '''        let record_count = base_record_count / group;
+'''
+          if old not in s:
+              raise SystemExit('loudness coarse record-count block not found')
+          s = s.replace(old, new, 1)
+          old = '''            let end = start.saturating_add(group).min(base_record_count);
+            if start >= end {
+                return Err(ReaPeaksError::InvalidArgument(
+                    "empty loudness aggregation group",
+                ));
+            }
+            let divisor = (end - start) as f64;
+'''
+          new = '''            let end = start
+                .checked_add(group)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "loudness group end overflow",
+                ))?;
+            debug_assert!(end <= base_record_count);
+            let divisor = group as f64;
+'''
+          if old not in s:
+              raise SystemExit('loudness partial-group block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          git diff --check
+          git diff -- src/format.rs src/wave.rs src/loudness.rs tests/reaper_adversarial_oracle.rs
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' src/format.rs src/loudness.rs src/wave.rs tests/reaper_adversarial_oracle.rs | sort)"
+          test "$changed" = "$expected"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/format.rs src/wave.rs src/loudness.rs tests/reaper_adversarial_oracle.rs
+          git commit -m 'fix adversarial REAPER EOF and loudness structure rules'
+          git push origin HEAD:adversarial-reaper-oracle
