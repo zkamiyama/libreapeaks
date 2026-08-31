@@ -2,8 +2,14 @@ use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
 use std::f64::consts::PI;
 
-const MOMENTARY_BLOCKS_100MS: usize = 4;
-const SHORT_TERM_BLOCKS_100MS: usize = 30;
+const MOMENTARY_BLOCKS_25MS: usize = 16;
+const SHORT_TERM_BLOCKS_25MS: usize = 120;
+
+#[derive(Debug, Clone, Copy)]
+struct FilterCoefficients {
+    b: [f64; 5],
+    a: [f64; 5],
+}
 
 #[derive(Debug, Clone, Copy)]
 struct BiquadCoefficients {
@@ -15,57 +21,42 @@ struct BiquadCoefficients {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Biquad {
-    coefficients: BiquadCoefficients,
-    x1: f64,
-    x2: f64,
-    y1: f64,
-    y2: f64,
-}
-
-impl Biquad {
-    fn new(coefficients: BiquadCoefficients) -> Self {
-        Self {
-            coefficients,
-            x1: 0.0,
-            x2: 0.0,
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-
-    #[inline]
-    fn process(&mut self, input: f64) -> f64 {
-        let c = self.coefficients;
-        let output =
-            c.b0 * input + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = input;
-        self.y2 = self.y1;
-        self.y1 = output;
-        output
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 struct KWeightingFilter {
-    pre_filter: Biquad,
-    rlb_filter: Biquad,
+    coefficients: FilterCoefficients,
+    state: [f64; 5],
 }
 
 impl KWeightingFilter {
     fn new(sample_rate: u32) -> Result<Self> {
-        let (pre_filter, rlb_filter) = k_weighting_coefficients(sample_rate)?;
         Ok(Self {
-            pre_filter: Biquad::new(pre_filter),
-            rlb_filter: Biquad::new(rlb_filter),
+            coefficients: k_weighting_coefficients(sample_rate)?,
+            state: [0.0; 5],
         })
     }
 
     #[inline]
     fn process(&mut self, input: f64) -> f64 {
-        let pre_filtered = self.pre_filter.process(input);
-        self.rlb_filter.process(pre_filtered)
+        // REAPER 7.79's mode-3 raw loudness payload matches libebur128's
+        // convolved fourth-order Direct Form II filter, not two separately
+        // rounded Direct Form I biquads. Keep the operation order explicit:
+        // differences below one ulp survive the long DC tail and are visible
+        // in the raw f32 momentary-energy records.
+        let c = self.coefficients;
+        let v0 = input
+            - c.a[1] * self.state[1]
+            - c.a[2] * self.state[2]
+            - c.a[3] * self.state[3]
+            - c.a[4] * self.state[4];
+        let output = c.b[0] * v0
+            + c.b[1] * self.state[1]
+            + c.b[2] * self.state[2]
+            + c.b[3] * self.state[3]
+            + c.b[4] * self.state[4];
+        self.state[4] = self.state[3];
+        self.state[3] = self.state[2];
+        self.state[2] = self.state[1];
+        self.state[1] = v0;
+        output
     }
 }
 
@@ -124,33 +115,61 @@ impl SlidingEnergy {
     }
 }
 
-fn k_weighting_coefficients(sample_rate: u32) -> Result<(BiquadCoefficients, BiquadCoefficients)> {
+#[derive(Debug, Clone)]
+struct BlockEnergyRing {
+    values: Vec<f64>,
+    next: usize,
+    sum: f64,
+}
+
+impl BlockEnergyRing {
+    fn new(blocks: usize) -> Result<Self> {
+        if blocks == 0 {
+            return Err(ReaPeaksError::InvalidArgument(
+                "loudness block ring has zero blocks",
+            ));
+        }
+        let bytes = blocks
+            .checked_mul(std::mem::size_of::<f64>())
+            .filter(|&size| size <= isize::MAX as usize)
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "loudness block ring is too large",
+            ))?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(bytes / std::mem::size_of::<f64>())
+            .map_err(|_| ReaPeaksError::InvalidArgument("loudness block allocation failed"))?;
+        values.resize(blocks, 0.0);
+        Ok(Self {
+            values,
+            next: 0,
+            sum: 0.0,
+        })
+    }
+
+    #[inline]
+    fn push(&mut self, energy: f64) {
+        let old = self.values[self.next];
+        // The ordering is intentional. REAPER's raw -'r' payload differs in
+        // the subnormal DC tail if this is written as (sum - old) + energy.
+        self.sum = (self.sum + energy) - old;
+        self.values[self.next] = energy;
+        self.next += 1;
+        if self.next == self.values.len() {
+            self.next = 0;
+        }
+    }
+
+    #[inline]
+    fn normalized(&self, block_frames: usize) -> f64 {
+        self.sum / (self.values.len() * block_frames) as f64
+    }
+}
+
+fn k_weighting_sections(sample_rate: u32) -> Result<(BiquadCoefficients, BiquadCoefficients)> {
     if sample_rate < 16 {
         return Err(ReaPeaksError::InvalidArgument(
             "sample rate is too low for loudness filtering",
-        ));
-    }
-
-    // Preserve the exact BS.1770 coefficients used by the REAPER 7.79
-    // 48 kHz oracle. The formula below produces the same coefficients within
-    // floating-point rounding, but spelling these constants explicitly keeps
-    // the byte-exact path independent of platform libm details.
-    if sample_rate == 48_000 {
-        return Ok((
-            BiquadCoefficients {
-                b0: 1.535_124_859_586_97,
-                b1: -2.691_696_189_406_38,
-                b2: 1.198_392_810_852_85,
-                a1: -1.690_659_293_182_41,
-                a2: 0.732_480_774_215_85,
-            },
-            BiquadCoefficients {
-                b0: 1.0,
-                b1: -2.0,
-                b2: 1.0,
-                a1: -1.990_047_454_833_98,
-                a2: 0.990_072_250_366_21,
-            },
         ));
     }
 
@@ -186,16 +205,39 @@ fn k_weighting_coefficients(sample_rate: u32) -> Result<(BiquadCoefficients, Biq
     Ok((pre_filter, rlb_filter))
 }
 
+fn k_weighting_coefficients(sample_rate: u32) -> Result<FilterCoefficients> {
+    let (first, second) = k_weighting_sections(sample_rate)?;
+    // Spell out libebur128's two quadratic convolutions rather than running
+    // two independent biquads. The exact expression tree is part of the
+    // REAPER-compatible result at tiny residual energies.
+    Ok(FilterCoefficients {
+        b: [
+            first.b0 * second.b0,
+            first.b0 * second.b1 + first.b1 * second.b0,
+            first.b0 * second.b2 + first.b1 * second.b1 + first.b2 * second.b0,
+            first.b1 * second.b2 + first.b2 * second.b1,
+            first.b2 * second.b2,
+        ],
+        a: [
+            1.0,
+            first.a1 + second.a1,
+            first.a2 + first.a1 * second.a1 + second.a2,
+            first.a1 * second.a2 + first.a2 * second.a1,
+            first.a2 * second.a2,
+        ],
+    })
+}
+
 fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
     let momentary = samples_in_100ms
-        .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+        .checked_mul(4)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(ReaPeaksError::InvalidArgument(
             "momentary loudness window is too large",
         ))?;
     let short_term = samples_in_100ms
-        .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+        .checked_mul(30)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(ReaPeaksError::InvalidArgument(
             "short-term loudness window is too large",
@@ -206,6 +248,12 @@ fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
         ));
     }
     Ok((momentary, short_term))
+}
+
+fn loudness_block_frames(sample_rate: u32) -> Result<usize> {
+    let frames = (u64::from(sample_rate) + 20) / 40;
+    usize::try_from(frames.max(1))
+        .map_err(|_| ReaPeaksError::InvalidArgument("loudness block is too large"))
 }
 
 fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
@@ -281,27 +329,68 @@ where
                 "loudness record count overflow",
             ))?;
     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
-    let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+    let block_frames = loudness_block_frames(sample_rate)?;
+    let block_aligned = base_division % block_frames == 0 && frames % block_frames == 0;
+    let fallback_windows = (!block_aligned)
+        .then(|| loudness_windows(sample_rate))
+        .transpose()?;
 
     for channel in 0..channels {
         let mut filter = KWeightingFilter::new(sample_rate)?;
-        let mut momentary = SlidingEnergy::new(momentary_window)?;
-        let mut short_term = SlidingEnergy::new(short_term_window)?;
         let mut record_index = 0usize;
 
-        for frame in 0..frames {
-            let filtered = filter.process(sample(frame * channels + channel));
-            let energy = filtered * filtered;
-            momentary.push(energy);
-            short_term.push(energy);
+        if block_aligned {
+            let mut momentary = BlockEnergyRing::new(MOMENTARY_BLOCKS_25MS)?;
+            let mut short_term = BlockEnergyRing::new(SHORT_TERM_BLOCKS_25MS)?;
+            let mut block_energy = 0.0f64;
+            let mut block_fill = 0usize;
 
-            let completed_frame = frame + 1;
-            if completed_frame % base_division == 0 || completed_frame == frames {
-                base_records[record_index * channels + channel] = LoudnessPeak {
-                    momentary_energy: momentary.normalized() as f32,
-                    short_term_energy: short_term.normalized() as f32,
-                };
-                record_index += 1;
+            for frame in 0..frames {
+                let filtered = filter.process(sample(frame * channels + channel));
+                block_energy += filtered * filtered;
+                block_fill += 1;
+
+                let completed_frame = frame + 1;
+                if block_fill == block_frames {
+                    momentary.push(block_energy);
+                    short_term.push(block_energy);
+                    block_energy = 0.0;
+                    block_fill = 0;
+                }
+
+                if completed_frame % base_division == 0 || completed_frame == frames {
+                    debug_assert_eq!(block_fill, 0);
+                    base_records[record_index * channels + channel] = LoudnessPeak {
+                        momentary_energy: momentary.normalized(block_frames) as f32,
+                        short_term_energy: short_term.normalized(block_frames) as f32,
+                    };
+                    record_index += 1;
+                }
+            }
+        } else {
+            // The exact 25 ms block-update oracle is currently established for
+            // block-aligned output cadences (including REAPER 7.79 at 48 kHz,
+            // peakcachegenrs=300). Preserve a sample-granular moving-window
+            // fallback for non-aligned rates rather than pretending an
+            // unverified block-boundary rule is byte-exact there.
+            let (momentary_window, short_term_window) = fallback_windows.expect("fallback windows");
+            let mut momentary = SlidingEnergy::new(momentary_window)?;
+            let mut short_term = SlidingEnergy::new(short_term_window)?;
+
+            for frame in 0..frames {
+                let filtered = filter.process(sample(frame * channels + channel));
+                let energy = filtered * filtered;
+                momentary.push(energy);
+                short_term.push(energy);
+
+                let completed_frame = frame + 1;
+                if completed_frame % base_division == 0 || completed_frame == frames {
+                    base_records[record_index * channels + channel] = LoudnessPeak {
+                        momentary_energy: momentary.normalized() as f32,
+                        short_term_energy: short_term.normalized() as f32,
+                    };
+                    record_index += 1;
+                }
             }
         }
 
@@ -421,6 +510,23 @@ mod tests {
         hash
     }
 
+    fn assert_reaper779_loudness_hashes(
+        pcm: &[i16],
+        base_hash: u64,
+        coarse_hash: u64,
+    ) {
+        let frames = pcm.len() / 2;
+        let layers = build_loudness_layers_pcm16(pcm, frames, 2, 48_000, &[160, 2_400, 48_000])
+            .expect("loudness generation");
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].header.peak_count, (frames / 2_400 * 2) as u32);
+        assert_eq!(layers[0].bytes.len(), frames / 2_400 * 2 * 8);
+        assert_eq!(fnv64(&layers[0].bytes), base_hash);
+        assert_eq!(layers[1].header.peak_count, (frames / 48_000 * 2) as u32);
+        assert_eq!(layers[1].bytes.len(), frames / 48_000 * 2 * 8);
+        assert_eq!(fnv64(&layers[1].bytes), coarse_hash);
+    }
+
     #[test]
     fn reaper779_sine997_loudness_payload_is_byte_exact() {
         let sample_rate = 48_000usize;
@@ -431,16 +537,49 @@ mod tests {
             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
         }
+        assert_reaper779_loudness_hashes(
+            &pcm,
+            0x0db3_2799_c4f9_f411,
+            0xbd0f_e30e_9f89_cef0,
+        );
+    }
 
-        let layers = build_loudness_layers_pcm16(&pcm, frames, 2, 48_000, &[160, 2_400, 48_000])
-            .expect("loudness generation");
-        assert_eq!(layers.len(), 2);
-        assert_eq!(layers[0].header.peak_count, 120);
-        assert_eq!(layers[0].bytes.len(), 960);
-        assert_eq!(fnv64(&layers[0].bytes), 0x0db3_2799_c4f9_f411);
-        assert_eq!(layers[1].header.peak_count, 6);
-        assert_eq!(layers[1].bytes.len(), 48);
-        assert_eq!(fnv64(&layers[1].bytes), 0xbd0f_e30e_9f89_cef0);
+    #[test]
+    fn reaper779_step_loudness_payload_is_byte_exact() {
+        let sample_rate = 48_000usize;
+        let frames = sample_rate * 3;
+        let mut pcm = Vec::with_capacity(frames * 2);
+        for frame in 0..frames {
+            let value = if frame < sample_rate {
+                0
+            } else if frame < sample_rate * 2 {
+                8_192
+            } else {
+                16_384
+            };
+            pcm.extend_from_slice(&[value, value]);
+        }
+        assert_reaper779_loudness_hashes(
+            &pcm,
+            0xc4a9_8514_c210_05f9,
+            0xbc65_0b74_acfe_bb49,
+        );
+    }
+
+    #[test]
+    fn reaper779_impulse_loudness_payload_is_byte_exact() {
+        let sample_rate = 48_000usize;
+        let frames = sample_rate * 3;
+        let mut pcm = vec![0i16; frames * 2];
+        for frame in [0usize, 1_200, 38_400, 96_000] {
+            pcm[frame * 2] = 32_767;
+            pcm[frame * 2 + 1] = 32_767;
+        }
+        assert_reaper779_loudness_hashes(
+            &pcm,
+            0x34a7_949b_1e62_c755,
+            0x2b54_3cf0_b767_c4e9,
+        );
     }
 
     #[test]
