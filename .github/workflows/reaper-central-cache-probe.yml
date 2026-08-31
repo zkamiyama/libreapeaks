@@ -1,0 +1,133 @@
+name: reaper-central-cache-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-central-cache-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg binutils
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create central-cache path corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-central
+          mkdir -p "$root/cache" "$root/media/A" "$root/media/B" "$root/media/sp ace" "$root/media/unicode-音声" "$root/media/dots/a/b"
+          python - <<'PY'
+          from pathlib import Path
+          import os, struct, wave
+          root = Path('/tmp/reaper-central')
+          paths = [
+              root/'media/A/same.wav',
+              root/'media/B/same.wav',
+              root/'media/A/other.wav',
+              root/'media/sp ace/name with spaces.wav',
+              root/'media/unicode-音声/曲.wav',
+              root/'media/.hidden.wav',
+              root/'media/dots/a/b/dotted.name.v1.wav',
+              root/'media/UPPER.WAV',
+              root/'media/lower.wav',
+              root/'media/no-extension',
+              root/'media/A/a.wav',
+              root/'media/A/aa.wav',
+              root/'media/A/ab.wav',
+              root/'media/A/b.wav',
+          ]
+          for i, path in enumerate(paths):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with wave.open(str(path), 'wb') as out:
+                  out.setnchannels(1); out.setsampwidth(2); out.setframerate(48000)
+                  out.writeframes(struct.pack('<hhhh', i, -i, 1000+i, -1000-i))
+          symlink = root/'media/symlink-same.wav'
+          try:
+              symlink.symlink_to(root/'media/A/same.wav')
+              paths.append(symlink)
+          except OSError:
+              pass
+          aliases = [
+              str(root/'media/A/../A/same.wav'),
+              str(root/'media/A/./same.wav'),
+              str(root/'media/A/SAME.wav'),
+              str(root/'media/A/nonexistent.wav'),
+              'relative/path.wav',
+          ]
+          manifest = root/'paths.txt'
+          manifest.write_text('\n'.join(map(str, paths)) + '\n' + '\n'.join(aliases) + '\n', encoding='utf-8')
+          print(manifest.read_text())
+          PY
+      - name: Query GetPeakFileName variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-central
+          cat > "$root/query.lua" <<'LUA'
+          local manifest = os.getenv('REAPEAKS_MANIFEST')
+          local result = os.getenv('REAPEAKS_RESULT')
+          local function q(fn, for_write)
+            local ok, value = pcall(function() return reaper.GetPeakFileNameEx(fn, '', for_write) end)
+            if ok then return tostring(value or '') end
+            return 'ERROR:' .. tostring(value)
+          end
+          local function q2(fn, for_write, ext)
+            local ok, value = pcall(function() return reaper.GetPeakFileNameEx2(fn, '', for_write, ext) end)
+            if ok then return tostring(value or '') end
+            return 'ERROR:' .. tostring(value)
+          end
+          local out = assert(io.open(result, 'w'))
+          out:write('source\tread\twrite\tex2_write\tcustom_write\n')
+          for fn in io.lines(manifest) do
+            out:write(fn, '\t', q(fn, false), '\t', q(fn, true), '\t', q2(fn, true, '.reapeaks'), '\t', q2(fn, true, '.custompeaks'), '\n')
+          end
+          out:close()
+          reaper.Main_OnCommand(40004, 0)
+          LUA
+          cat > "$root/reaper.ini" <<EOF
+          [REAPER]
+          altpeaks=1
+          altpeakspath=$root/cache
+          peakcachegenmode=3
+          peakcachegenrs=300
+          showpeaks=64
+          EOF
+          Xvfb :97 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep .4
+          DISPLAY=:97 REAPEAKS_MANIFEST="$root/paths.txt" REAPEAKS_RESULT="$root/results.tsv" \
+            "$REAPER_BIN" -newinst -cfgfile "$root/reaper.ini" -new -nosplash "$root/query.lua" \
+            >/tmp/reaper-central.log 2>&1
+          test -s "$root/results.tsv"
+          cat "$root/results.tsv"
+          strings -a "$REAPER_BIN" | grep -i -E 'reapeaks|altpeaks|peakfile' > "$root/reaper-peak-strings.txt" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaper-central-cache-probe-${{ github.sha }}
+          path: |
+            /tmp/reaper-central/results.tsv
+            /tmp/reaper-central/paths.txt
+            /tmp/reaper-central/reaper.ini
+            /tmp/reaper-central/reaper-peak-strings.txt
+            /tmp/reaper-central.log
+            /tmp/xvfb.log
+          if-no-files-found: error
+          retention-days: 7
