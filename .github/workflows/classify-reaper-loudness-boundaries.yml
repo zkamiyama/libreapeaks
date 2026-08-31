@@ -1,0 +1,150 @@
+name: classify-reaper-loudness-boundaries
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - 'oracle-reports/reaper-loudness-boundaries/boundary-report.json'
+      - '.github/workflows/classify-reaper-loudness-boundaries.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+
+      - name: Infer exact record-count formulae from zero-length probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import math
+
+          path = Path('oracle-reports/reaper-loudness-boundaries/boundary-report.json')
+          if not path.exists():
+              raise SystemExit('boundary report is not available')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          rows = [row for row in report['rows'] if row['case'].startswith('zero_len_')]
+          rows.sort(key=lambda row: row['frames'])
+
+          # Group actual negative-layer token occurrences by token and ordinal.
+          groups = {}
+          for row in rows:
+              by_token = {}
+              for item in sorted(row['raw_negative_tokens'], key=lambda item: item['offset']):
+                  by_token.setdefault(item['token'], []).append(item)
+              for token, items in by_token.items():
+                  for ordinal, item in enumerate(items):
+                      groups.setdefault((token, ordinal), []).append((row['frames'], item))
+
+          known_hops = sorted(set([
+              1,
+              report['constants']['h25'],
+              report['constants']['h100'],
+              report['constants']['h500'],
+              report['constants']['w400'],
+              report['constants']['w3s'],
+          ]))
+
+          def model_values(frames_values, hop, mode, constant):
+              output = []
+              for frames in frames_values:
+                  if mode == 'floor':
+                      value = frames // hop
+                  elif mode == 'ceil':
+                      value = (frames + hop - 1) // hop if frames else 0
+                  elif mode == 'floor-plus-one':
+                      value = frames // hop + (1 if frames else 0)
+                  else:
+                      raise AssertionError(mode)
+                  output.append(max(0, value + constant))
+              return output
+
+          candidates = []
+          for (token, ordinal), samples in groups.items():
+              if len(samples) < max(5, len(rows) // 2):
+                  continue
+              frames_values = [frames for frames, _ in samples]
+              max_words = min(len(item['u32_words']) for _, item in samples)
+              for word_index in range(1, min(max_words, 12)):
+                  actual = [item['u32_words'][word_index] for _, item in samples]
+                  if max(actual, default=0) > 10_000_000:
+                      continue
+                  for hop in known_hops:
+                      for mode in ('floor', 'ceil', 'floor-plus-one'):
+                          for constant in range(-2, 3):
+                              predicted = model_values(frames_values, hop, mode, constant)
+                              error = sum(abs(int(a) - int(b)) for a, b in zip(actual, predicted))
+                              exact = actual == predicted
+                              candidates.append({
+                                  'token': token,
+                                  'ordinal': ordinal,
+                                  'word_index_after_token': word_index,
+                                  'hop_samples': hop,
+                                  'mode': mode,
+                                  'constant': constant,
+                                  'error': error,
+                                  'exact': exact,
+                                  'actual': actual,
+                                  'predicted': predicted,
+                                  'frames': frames_values,
+                              })
+          candidates.sort(key=lambda row: (not row['exact'], row['error'], row['token'], row['ordinal'], row['word_index_after_token']))
+
+          best_by_layer = {}
+          for candidate in candidates:
+              key = f"{candidate['token']}:{candidate['ordinal']}"
+              best_by_layer.setdefault(key, candidate)
+
+          exact_loudness = {
+              key: value for key, value in best_by_layer.items()
+              if key.startswith('-114:') and value['exact']
+          }
+          conclusion = {
+              'schema': 1,
+              'rows_used': len(rows),
+              'known_hops': known_hops,
+              'best_by_layer': best_by_layer,
+              'exact_loudness_count_models': exact_loudness,
+              'fine_25ms_cadence_confirmed': any(
+                  value['hop_samples'] == report['constants']['h25'] and value['exact']
+                  for value in exact_loudness.values()
+              ),
+              'coarse_500ms_cadence_confirmed': any(
+                  value['hop_samples'] == report['constants']['h500'] and value['exact']
+                  for value in exact_loudness.values()
+              ),
+              'eof_pairs': report.get('eof_pairs', []),
+              'fail_closed': len(exact_loudness) < 2,
+          }
+          destination = path.parent / 'conclusion.json'
+          destination.write_text(json.dumps(conclusion, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(conclusion, indent=2))
+          if conclusion['fail_closed']:
+              raise SystemExit('failed to infer both loudness record-count layers exactly')
+          PY
+
+      - name: Commit the inferred model
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=oracle-reports/reaper-loudness-boundaries/conclusion.json
+          test -f "$file"
+          git add "$file"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'infer REAPER loudness layer cadence'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
