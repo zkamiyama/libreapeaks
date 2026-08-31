@@ -43,6 +43,7 @@ jobs:
           AVCODEC="$(ldconfig -p | awk '/libavcodec\.so\.60/{print $NF; exit}')"
           test -n "$AVFORMAT"
           test -n "$AVCODEC"
+          nm -D "$AVFORMAT" | grep -E ' avio_alloc_context(@@|$)'
           nm -D "$AVFORMAT" | grep -E ' avformat_open_input(@@|$)'
           nm -D "$AVFORMAT" | grep -E ' av_read_frame(@@|$)'
           nm -D "$AVCODEC" | grep -E ' avcodec_send_packet(@@|$)'
@@ -134,16 +135,33 @@ jobs:
           handle SIGPIPE nostop noprint pass
           handle SIGUSR1 nostop noprint pass
           handle SIGUSR2 nostop noprint pass
+          set $avio_hits = 0
           set $open_hits = 0
           set $read_hits = 0
           set $send_hits = 0
           set $receive_hits = 0
 
+          break avio_alloc_context
+          commands
+            silent
+            set $avio_hits = $avio_hits + 1
+            if $avio_hits == 1
+              printf "FFTRACE_AVIO first-hit read_callback=%p\n", $r8
+              bt 8
+            end
+            continue
+          end
+
           break avformat_open_input
           commands
             silent
             set $open_hits = $open_hits + 1
-            printf "FFTRACE_OPEN hit=%d url=%s\n", $open_hits, (char *)$rsi
+            printf "FFTRACE_OPEN hit=%d url_ptr=%p\n", $open_hits, $rsi
+            if $rsi != 0
+              printf "FFTRACE_URL %s\n", (char *)$rsi
+            else
+              printf "FFTRACE_URL <null-custom-avio>\n"
+            end
             if $open_hits == 1
               info sharedlibrary libavformat
               bt 8
@@ -186,7 +204,7 @@ jobs:
           end
 
           run
-          printf "FFTRACE_SUMMARY open=%d read=%d send=%d receive=%d\n", $open_hits, $read_hits, $send_hits, $receive_hits
+          printf "FFTRACE_SUMMARY avio=%d open=%d read=%d send=%d receive=%d\n", $avio_hits, $open_hits, $read_hits, $send_hits, $receive_hits
           quit
           '''
 
@@ -230,7 +248,7 @@ jobs:
               status = status_path.read_text(errors='replace') if status_path.exists() else ''
               (results / f'{tag}.status.txt').write_text(status, encoding='utf-8')
               summary_match = re.search(
-                  r'FFTRACE_SUMMARY open=(\d+) read=(\d+) send=(\d+) receive=(\d+)',
+                  r'FFTRACE_SUMMARY avio=(\d+) open=(\d+) read=(\d+) send=(\d+) receive=(\d+)',
                   trace,
               )
               if not summary_match:
@@ -238,7 +256,7 @@ jobs:
                       f'{tag}: missing GDB trace summary, rc={completed.returncode}; tail={trace[-4000:]}'
                   )
               counts = tuple(int(value) for value in summary_match.groups())
-              urls = re.findall(r'^FFTRACE_OPEN hit=\d+ url=(.*)$', trace, re.MULTILINE)
+              urls = re.findall(r'^FFTRACE_URL (.*)$', trace, re.MULTILINE)
               source_type = next(
                   (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
                   '',
@@ -252,6 +270,7 @@ jobs:
                   'length': length,
                   'counts': counts,
                   'urls': urls,
+                  'trace': trace,
                   'trace_path': str(trace_path),
               }
 
@@ -280,37 +299,48 @@ jobs:
           if 'OK loops=' not in wave['status'] or 'OK loops=' not in alac['status']:
               raise SystemExit(f'peak generation did not complete: wave={wave!r}, alac={alac!r}')
 
-          wave_open, wave_read, wave_send, wave_receive = wave['counts']
-          alac_open, alac_read, alac_send, alac_receive = alac['counts']
-          target = str((media_root / 'step.m4a').resolve())
-          if not any(url == target or url.endswith('/step.m4a') for url in alac['urls']):
-              raise SystemExit(f'avformat_open_input never received the ALAC path: {alac!r}')
-          if not (alac_open > 0 and alac_read > 0 and alac_send > 0 and alac_receive > 0):
-              raise SystemExit(f'ALAC did not execute the full FFmpeg demux/decode chain: {alac!r}')
-          if any(url.endswith('/step.wav') for url in wave['urls']):
-              raise SystemExit(f'native WAVE control was opened through libavformat: {wave!r}')
-          if wave_open or wave_read or wave_send or wave_receive:
+          wave_avio, wave_open, wave_read, wave_send, wave_receive = wave['counts']
+          alac_avio, alac_open, alac_read, alac_send, alac_receive = alac['counts']
+          if any(wave['counts']):
               raise SystemExit(
-                  'fresh WAVE-only control unexpectedly executed FFmpeg demux/decode calls: '
+                  'fresh WAVE-only control unexpectedly executed FFmpeg I/O/demux/decode calls: '
                   f'{wave!r}'
+              )
+          if not all(value > 0 for value in alac['counts']):
+              raise SystemExit(
+                  'ALAC did not execute the full custom-AVIO FFmpeg demux/decode chain: '
+                  f'{alac!r}'
+              )
+          if 'reaper_video.so' not in alac['trace']:
+              raise SystemExit('FFmpeg calls did not originate from REAPER reaper_video.so')
+          if 'libavformat.so.60' not in alac['trace'] or 'libavcodec.so.60' not in alac['trace']:
+              raise SystemExit('trace did not identify the expected FFmpeg shared libraries')
+          if '<null-custom-avio>' not in alac['urls']:
+              raise SystemExit(
+                  'expected REAPER to pair avformat_open_input with its custom AVIO context: '
+                  f'{alac!r}'
               )
 
           report = [
               'REAPER_FFMPEG_FUNCTION_CALL_PROVENANCE=confirmed',
+              f'native_media={(media_root / "step.wav").resolve()}',
               f'native_source_type={wave["source_type"]}',
               f'native_length={wave["length"]}',
-              f'native_ffmpeg_counts={wave["counts"]}',
-              f'native_avformat_urls={wave["urls"]}',
+              f'native_ffmpeg_counts_avio_open_read_send_receive={wave["counts"]}',
+              f'video_media={(media_root / "step.m4a").resolve()}',
               f'video_source_type={alac["source_type"]}',
               f'video_length={alac["length"]}',
-              f'video_ffmpeg_counts={alac["counts"]}',
+              f'video_ffmpeg_counts_avio_open_read_send_receive={alac["counts"]}',
               f'video_avformat_urls={alac["urls"]}',
               f'system_avformat={os.environ["AVFORMAT"]}',
               f'system_avcodec={os.environ["AVCODEC"]}',
+              'call_origin=reaper_video.so',
+              'io_mode=REAPER custom AVIO context with null avformat URL',
               'vlc_runtime_present=false',
-              'proof=GDB breakpoints observed REAPER opening the exact M4A path through '
-              'avformat_open_input and executing av_read_frame, avcodec_send_packet, '
-              'and avcodec_receive_frame; the matched WAVE control executed none of them',
+              'proof=an isolated REAPER process given only the ALAC/M4A source executed '
+              'avio_alloc_context, avformat_open_input, av_read_frame, '
+              'avcodec_send_packet, and avcodec_receive_frame through reaper_video.so; '
+              'the matched isolated WAVE process executed none of those FFmpeg functions',
           ]
           text = '\n'.join(report) + '\n'
           (results / 'runtime-provenance-report.txt').write_text(text, encoding='utf-8')
