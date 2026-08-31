@@ -1,0 +1,42 @@
+name: strict-wdl-thread-sanitizer
+
+on:
+  push:
+    branches:
+      - main
+      - hardening-reapeaks-cache-ffmpeg
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+  CXXFLAGS: -fsanitize=thread -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS
+  RUSTFLAGS: -C link-arg=-fsanitize=thread
+  RUST_TEST_THREADS: 16
+
+jobs:
+  strict-wdl-cxx-threads:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run parallel strict-WDL release suite with ThreadSanitizer
+        run: cargo test --release --all-targets --features strict-wdl
+
+      - name: Assert thread-sanitizer build left sources untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" >&2
+            echo "thread-sanitizer build mutated the source tree" >&2
+            exit 1
+          fi
