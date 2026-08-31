@@ -1,0 +1,140 @@
+name: materialize-reaper-mode3
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/materialize-reaper-mode3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-reaper-mode3-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply staged mode-3 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/patches/reaper-mode3.patch.gz.b64 | gzip -dc > /tmp/reaper-mode3.patch
+          echo '1d7fd2d6b7908c6605438a85e80b9bf3f752cede597ccd6c8745aec39a10c675  /tmp/reaper-mode3.patch' | sha256sum -c -
+          git apply --check /tmp/reaper-mode3.patch
+          git apply /tmp/reaper-mode3.patch
+          cargo fmt --all
+          git diff --check
+      - name: REAPER loudness payload oracle
+        run: cargo test --lib loudness::tests::reaper779_sine997_loudness_payload_is_byte_exact -- --exact
+      - name: Pure Rust regression suite
+        run: cargo test --all-targets
+      - name: Strict WDL release regression suite
+        run: cargo test --release --all-targets --features strict-wdl
+      - name: Clippy hard gate
+        run: cargo clippy --all-targets --features strict-wdl -- -D warnings
+      - name: Create validated Git commit object
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -f .github/patches/reaper-mode3.patch.gz.b64
+          rm -f .github/workflows/materialize-reaper-mode3.yml
+          git diff --stat | tee /tmp/validated-diffstat.txt
+          git status --short | tee /tmp/validated-status.txt
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          parent = os.environ['GITHUB_SHA']
+          api_root = f'https://api.github.com/repos/{repository}'
+
+          def api(method, path, payload):
+              request = urllib.request.Request(
+                  api_root + path,
+                  data=json.dumps(payload).encode(),
+                  method=method,
+                  headers={
+                      'Accept': 'application/vnd.github+json',
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  body = error.read().decode(errors='replace')
+                  raise SystemExit(f'GitHub API {method} {path} failed: {error.code}: {body}')
+
+          def lines(*args):
+              output = subprocess.check_output(['git', *args], text=True)
+              return [line for line in output.splitlines() if line]
+
+          changed = lines('diff', '--name-only', '--diff-filter=ACMRTUXB')
+          untracked = lines('ls-files', '--others', '--exclude-standard')
+          deleted = lines('diff', '--name-only', '--diff-filter=D')
+          files = sorted(set(changed + untracked) - set(deleted))
+          entries = []
+
+          for name in files:
+              data = Path(name).read_bytes()
+              blob = api('POST', '/git/blobs', {
+                  'content': base64.b64encode(data).decode(),
+                  'encoding': 'base64',
+              })
+              staged = subprocess.run(
+                  ['git', 'ls-files', '-s', '--', name],
+                  check=True,
+                  text=True,
+                  capture_output=True,
+              ).stdout.strip()
+              mode = staged.split()[0] if staged else '100644'
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': blob['sha']})
+
+          for name in sorted(set(deleted)):
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': None})
+
+          base_tree = subprocess.check_output(
+              ['git', 'rev-parse', f'{parent}^{{tree}}'], text=True
+          ).strip()
+          tree = api('POST', '/git/trees', {'base_tree': base_tree, 'tree': entries})
+          commit = api('POST', '/git/commits', {
+              'message': 'Implement REAPER mode-3 loudness and exact divisions',
+              'tree': tree['sha'],
+              'parents': [parent],
+          })
+          Path('/tmp/validated-commit-sha.txt').write_text(commit['sha'] + '\n')
+          print(f"VALIDATED_COMMIT={commit['sha']}")
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Validated mode-3 commit: `{commit['sha']}`\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-reaper-mode3-${{ github.sha }}
+          path: |
+            /tmp/validated-commit-sha.txt
+            /tmp/validated-diffstat.txt
+            /tmp/validated-status.txt
+          if-no-files-found: error
+          retention-days: 7
