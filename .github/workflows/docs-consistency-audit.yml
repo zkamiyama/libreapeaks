@@ -75,8 +75,9 @@ jobs:
               for expected in ('auto', 'sidecar', 'subdir', 'central', 'reaper'):
                   if f'"{expected}"' not in cli:
                       failures.append(f'{cli_name} CLI no longer exposes cache mode {expected}')
-          for required in ('current runnable demo CLI wiring', '--cache-mode reaper', 'private SHA-256'):
-              if required not in central_doc:
+          central_lower = central_doc.lower()
+          for required in ('current runnable demo cli wiring', '--cache-mode reaper', 'private sha-256'):
+              if required not in central_lower:
                   failures.append(f'central-cache docs lost required clarification: {required}')
 
           adversarial = Path('.github/workflows/reaper-adversarial-oracle.yml').read_text(encoding='utf-8')
