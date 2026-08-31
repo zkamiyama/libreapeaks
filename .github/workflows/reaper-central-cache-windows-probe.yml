@@ -35,17 +35,12 @@ jobs:
           test -n "$reaper_exe"
           cp -a "$(dirname "$reaper_exe")/." /tmp/REAPER-portable/
           test -f /tmp/REAPER-portable/reaper.exe
-          Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
-          xvfb_pid=$!
-          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
-          export DISPLAY=:96
-          wineboot -u || true
       - name: Query Windows central-cache paths
         shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/reaper-central-win
-          mkdir -p /tmp/reaper-central-win/cache /tmp/reaper-central-win/Media
+          mkdir -p /tmp/reaper-central-win/cache /tmp/reaper-central-win/Media /tmp/REAPER-portable/Scripts
           python3 - <<'PY'
           from pathlib import Path
           root = Path('/tmp/reaper-central-win')
@@ -64,14 +59,16 @@ jobs:
               r'\\server\share\Folder\Take.WAV',
           ]
           (root / 'paths.txt').write_text('\n'.join(paths) + '\n', encoding='utf-8')
-          (root / 'reaper.ini').write_text(
+          (Path('/tmp/REAPER-portable') / 'reaper.ini').write_text(
               '[REAPER]\naltpeaks=1\n'
               'altpeakspath=Z:\\tmp\\reaper-central-win\\cache\n'
               'peakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n',
               encoding='utf-8',
           )
-          (root / 'query.lua').write_text(r'''local manifest = assert(os.getenv("REAPEAKS_MANIFEST"))
-          local result = assert(os.getenv("REAPEAKS_RESULT"))
+          (Path('/tmp/REAPER-portable/Scripts') / '__startup.lua').write_text(r'''local started = io.open("Z:\\tmp\\reaper-central-win\\started.txt", "w")
+          if started then started:write("started\n"); started:close() end
+          local manifest = "Z:\\tmp\\reaper-central-win\\paths.txt"
+          local result = "Z:\\tmp\\reaper-central-win\\results.tsv"
           local out = assert(io.open(result, "w"))
           out:write("source\tread\twrite\tresource\n")
           for fn in io.lines(manifest) do
@@ -80,22 +77,19 @@ jobs:
             out:write(fn, "\t", read, "\t", write, "\t", reaper.GetResourcePath(), "\n")
           end
           out:close()
-          reaper.Main_OnCommand(40004, 0)
+          reaper.defer(function() reaper.Main_OnCommand(40004, 0) end)
           ''', encoding='utf-8')
           PY
           Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
           xvfb_pid=$!
           trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
           export DISPLAY=:96
-          export REAPEAKS_MANIFEST='Z:\tmp\reaper-central-win\paths.txt'
-          export REAPEAKS_RESULT='Z:\tmp\reaper-central-win\results.tsv'
           set +e
-          timeout 90s wine /tmp/REAPER-portable/reaper.exe \
-            -newinst -cfgfile 'Z:\tmp\reaper-central-win\reaper.ini' \
-            -new -nosplash 'Z:\tmp\reaper-central-win\query.lua' \
+          timeout 90s wine /tmp/REAPER-portable/reaper.exe -new -nosplash \
             >/tmp/reaper-central-win/reaper.log 2>&1
           rc=$?
           set -e
+          ls -l /tmp/reaper-central-win || true
           test -s /tmp/reaper-central-win/results.tsv || {
             cat /tmp/reaper-central-win/reaper.log
             exit "$rc"
@@ -107,9 +101,11 @@ jobs:
           name: reaper-central-cache-windows-probe-${{ github.sha }}
           path: |
             /tmp/reaper-central-win/results.tsv
-            /tmp/reaper-central-win/reaper.ini
+            /tmp/reaper-central-win/started.txt
             /tmp/reaper-central-win/paths.txt
             /tmp/reaper-central-win/reaper.log
+            /tmp/REAPER-portable/reaper.ini
+            /tmp/REAPER-portable/Scripts/__startup.lua
             /tmp/reaper-7z.log
             /tmp/xvfb-win.log
           if-no-files-found: warn
