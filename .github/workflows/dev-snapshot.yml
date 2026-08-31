@@ -18,14 +18,20 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Materialize generated Rust demo helper
+        run: cargo test --all-targets
       - name: Package full source tree
         shell: bash
         run: |
           set -euo pipefail
-          # Snapshot the exact branch head used for central-cache reverse engineering.
           git rev-parse HEAD > /tmp/snapshot-commit.txt
+          find examples -maxdepth 2 -type f -print | sort > /tmp/example-files.txt
           tar \
             --exclude='./.git' \
+            --exclude='./target' \
             -czf /tmp/repo-snapshot.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
@@ -33,5 +39,6 @@ jobs:
           path: |
             /tmp/repo-snapshot.tar.gz
             /tmp/snapshot-commit.txt
+            /tmp/example-files.txt
           if-no-files-found: error
           retention-days: 3
