@@ -61,61 +61,6 @@ impl KWeightingFilter {
 }
 
 #[derive(Debug, Clone)]
-struct SlidingEnergy {
-    values: Vec<f64>,
-    next: usize,
-    filled: usize,
-    sum: f64,
-}
-
-impl SlidingEnergy {
-    fn new(window_frames: usize) -> Result<Self> {
-        if window_frames == 0 {
-            return Err(ReaPeaksError::InvalidArgument(
-                "loudness window has zero frames",
-            ));
-        }
-        let bytes = window_frames
-            .checked_mul(std::mem::size_of::<f64>())
-            .filter(|&size| size <= isize::MAX as usize)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "loudness window is too large",
-            ))?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(bytes / std::mem::size_of::<f64>())
-            .map_err(|_| ReaPeaksError::InvalidArgument("loudness window allocation failed"))?;
-        values.resize(window_frames, 0.0);
-        Ok(Self {
-            values,
-            next: 0,
-            filled: 0,
-            sum: 0.0,
-        })
-    }
-
-    #[inline]
-    fn push(&mut self, energy: f64) {
-        if self.filled == self.values.len() {
-            self.sum -= self.values[self.next];
-        } else {
-            self.filled += 1;
-        }
-        self.values[self.next] = energy;
-        self.next += 1;
-        if self.next == self.values.len() {
-            self.next = 0;
-        }
-        self.sum += energy;
-    }
-
-    #[inline]
-    fn normalized(&self) -> f64 {
-        self.sum / self.values.len() as f64
-    }
-}
-
-#[derive(Debug, Clone)]
 struct BlockEnergyRing {
     values: Vec<f64>,
     next: usize,
@@ -161,8 +106,8 @@ impl BlockEnergyRing {
     }
 
     #[inline]
-    fn normalized(&self, block_frames: usize) -> f64 {
-        self.sum / (self.values.len() * block_frames) as f64
+    fn normalized(&self, normalization_frames: usize) -> f64 {
+        self.sum / normalization_frames as f64
     }
 }
 
@@ -220,8 +165,8 @@ fn k_weighting_coefficients(sample_rate: u32) -> Result<FilterCoefficients> {
         ],
         a: [
             1.0,
-            first.a1 + second.a1,
-            first.a2 + first.a1 * second.a1 + second.a2,
+            second.a1 + first.a1,
+            second.a2 + first.a1 * second.a1 + first.a2,
             first.a1 * second.a2 + first.a2 * second.a1,
             first.a2 * second.a2,
         ],
@@ -251,7 +196,7 @@ fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
 }
 
 fn loudness_block_frames(sample_rate: u32) -> Result<usize> {
-    let frames = (u64::from(sample_rate) + 20) / 40;
+    let frames = u64::from(sample_rate) / 40;
     usize::try_from(frames.max(1))
         .map_err(|_| ReaPeaksError::InvalidArgument("loudness block is too large"))
 }
@@ -330,67 +275,36 @@ where
             ))?;
     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
     let block_frames = loudness_block_frames(sample_rate)?;
-    let block_aligned = base_division % block_frames == 0 && frames % block_frames == 0;
-    let fallback_windows = (!block_aligned)
-        .then(|| loudness_windows(sample_rate))
-        .transpose()?;
+    let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
 
     for channel in 0..channels {
         let mut filter = KWeightingFilter::new(sample_rate)?;
         let mut record_index = 0usize;
 
-        if block_aligned {
-            let mut momentary = BlockEnergyRing::new(MOMENTARY_BLOCKS_25MS)?;
-            let mut short_term = BlockEnergyRing::new(SHORT_TERM_BLOCKS_25MS)?;
-            let mut block_energy = 0.0f64;
-            let mut block_fill = 0usize;
+        let mut momentary = BlockEnergyRing::new(MOMENTARY_BLOCKS_25MS)?;
+        let mut short_term = BlockEnergyRing::new(SHORT_TERM_BLOCKS_25MS)?;
+        let mut block_energy = 0.0f64;
+        let mut block_fill = 0usize;
 
-            for frame in 0..frames {
-                let filtered = filter.process(sample(frame * channels + channel));
-                block_energy += filtered * filtered;
-                block_fill += 1;
+        for frame in 0..frames {
+            let filtered = filter.process(sample(frame * channels + channel));
+            block_energy += filtered * filtered;
+            block_fill += 1;
 
-                let completed_frame = frame + 1;
-                if block_fill == block_frames {
-                    momentary.push(block_energy);
-                    short_term.push(block_energy);
-                    block_energy = 0.0;
-                    block_fill = 0;
-                }
-
-                if completed_frame % base_division == 0 || completed_frame == frames {
-                    debug_assert_eq!(block_fill, 0);
-                    base_records[record_index * channels + channel] = LoudnessPeak {
-                        momentary_energy: momentary.normalized(block_frames) as f32,
-                        short_term_energy: short_term.normalized(block_frames) as f32,
-                    };
-                    record_index += 1;
-                }
+            let completed_frame = frame + 1;
+            if block_fill == block_frames {
+                momentary.push(block_energy);
+                short_term.push(block_energy);
+                block_energy = 0.0;
+                block_fill = 0;
             }
-        } else {
-            // The exact 25 ms block-update oracle is currently established for
-            // block-aligned output cadences (including REAPER 7.79 at 48 kHz,
-            // peakcachegenrs=300). Preserve a sample-granular moving-window
-            // fallback for non-aligned rates rather than pretending an
-            // unverified block-boundary rule is byte-exact there.
-            let (momentary_window, short_term_window) = fallback_windows.expect("fallback windows");
-            let mut momentary = SlidingEnergy::new(momentary_window)?;
-            let mut short_term = SlidingEnergy::new(short_term_window)?;
 
-            for frame in 0..frames {
-                let filtered = filter.process(sample(frame * channels + channel));
-                let energy = filtered * filtered;
-                momentary.push(energy);
-                short_term.push(energy);
-
-                let completed_frame = frame + 1;
-                if completed_frame % base_division == 0 || completed_frame == frames {
-                    base_records[record_index * channels + channel] = LoudnessPeak {
-                        momentary_energy: momentary.normalized() as f32,
-                        short_term_energy: short_term.normalized() as f32,
-                    };
-                    record_index += 1;
-                }
+            if completed_frame % base_division == 0 || completed_frame == frames {
+                base_records[record_index * channels + channel] = LoudnessPeak {
+                    momentary_energy: momentary.normalized(momentary_window) as f32,
+                    short_term_energy: short_term.normalized(short_term_window) as f32,
+                };
+                record_index += 1;
             }
         }
 
@@ -412,9 +326,7 @@ where
                 "loudness divisions must be nested multiples",
             ));
         }
-        let division_usize = usize::try_from(division)
-            .map_err(|_| ReaPeaksError::InvalidArgument("division is too large"))?;
-        let record_count = frames.div_ceil(division_usize);
+        let record_count = base_record_count / group;
         let value_count =
             record_count
                 .checked_mul(channels)
@@ -429,13 +341,13 @@ where
                 .ok_or(ReaPeaksError::InvalidArgument(
                     "loudness group offset overflow",
                 ))?;
-            let end = start.saturating_add(group).min(base_record_count);
-            if start >= end {
-                return Err(ReaPeaksError::InvalidArgument(
-                    "empty loudness aggregation group",
-                ));
-            }
-            let divisor = (end - start) as f64;
+            let end = start
+                .checked_add(group)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "loudness group end overflow",
+                ))?;
+            debug_assert!(end <= base_record_count);
+            let divisor = group as f64;
             for channel in 0..channels {
                 let mut momentary_sum = 0.0f64;
                 let mut short_term_sum = 0.0f64;

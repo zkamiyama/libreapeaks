@@ -167,6 +167,19 @@ pub fn default_divisions(sample_rate: u32, fine_peaks_per_second: u32) -> [u32; 
     ]
 }
 
+fn reaper_wave_bucket_count(
+    frames: usize,
+    division: usize,
+    fine_division: usize,
+    is_finest: bool,
+) -> usize {
+    if is_finest || division % fine_division != 0 || frames % fine_division != 0 {
+        frames.div_ceil(division)
+    } else {
+        frames / division
+    }
+}
+
 pub fn build_wave_layers(
     pcm: &[i16],
     frames: usize,
@@ -185,7 +198,8 @@ pub fn build_wave_layers(
         ));
     }
     let mut layers = Vec::with_capacity(divisions.len());
-    for &div in divisions {
+    let fine_division = divisions.first().copied().unwrap_or(1) as usize;
+    for (division_index, &div) in divisions.iter().enumerate() {
         if div == 0 {
             return Err(ReaPeaksError::InvalidArgument("division=0"));
         }
@@ -195,7 +209,7 @@ pub fn build_wave_layers(
             ));
         }
         let d = div as usize;
-        let count = frames.div_ceil(d);
+        let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
         let peak_count = u32::try_from(count)
             .map_err(|_| ReaPeaksError::InvalidArgument("wave peak count exceeds u32"))?;
         let capacity = count
@@ -259,7 +273,8 @@ pub fn build_wave_layers_f32(
         ));
     }
     let mut layers = Vec::with_capacity(divisions.len());
-    for &div in divisions {
+    let fine_division = divisions.first().copied().unwrap_or(1) as usize;
+    for (division_index, &div) in divisions.iter().enumerate() {
         if div == 0 {
             return Err(ReaPeaksError::InvalidArgument("division=0"));
         }
@@ -269,7 +284,7 @@ pub fn build_wave_layers_f32(
             ));
         }
         let d = div as usize;
-        let count = frames.div_ceil(d);
+        let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
         let peak_count = u32::try_from(count)
             .map_err(|_| ReaPeaksError::InvalidArgument("wave peak count exceeds u32"))?;
         let capacity = count
