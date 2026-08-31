@@ -1,0 +1,59 @@
+name: strict-wdl-sanitizers
+
+on:
+  push:
+    branches:
+      - main
+      - hardening-reapeaks-cache-ffmpeg
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+jobs:
+  strict-wdl-cxx:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build strict-WDL C ABI harness with ASan and UBSan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/strict-wdl-sanitizers
+          g++ \
+            -std=c++17 -O1 -g \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -D_GLIBCXX_ASSERTIONS \
+            -DWDL_FFT_REALSIZE=8 \
+            -DWDL_DENORMAL_WANTS_SCOPED_FTZ \
+            -Wno-register \
+            -Ithird_party/WDL/WDL \
+            tests/strict_wdl_sanitizer_harness.cpp \
+            src/strict_wdl.cpp \
+            third_party/WDL/WDL/fft.c \
+            third_party/WDL/WDL/resample.cpp \
+            -pthread \
+            -o /tmp/strict-wdl-sanitizers/strict-wdl-asan-ubsan
+
+      - name: Exercise valid, adversarial, and concurrent C ABI calls
+        run: /tmp/strict-wdl-sanitizers/strict-wdl-asan-ubsan --threads
+
+      - name: Assert sanitizer build left sources untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" >&2
+            echo "sanitizer build mutated the source tree" >&2
+            exit 1
+          fi

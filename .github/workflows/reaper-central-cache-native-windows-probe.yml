@@ -1,0 +1,110 @@
+name: reaper-central-cache-native-windows-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths: ['.github/workflows/reaper-central-cache-native-windows-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install portable REAPER 7.79 x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'reaper-install.exe'
+          $portable = Join-Path $env:RUNNER_TEMP 'REAPER-portable'
+          Invoke-WebRequest -Uri 'https://www.reaper.fm/files/7.x/reaper779_x64-install.exe' -OutFile $installer
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $portable
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          $arguments = @('/S','/PORTABLE',"/D=$portable")
+          $install = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "REAPER installer failed: $($install.ExitCode)" }
+          $exe = Join-Path $portable 'reaper.exe'
+          if (-not (Test-Path $exe)) { throw "portable reaper.exe not found at $exe" }
+          "REAPER_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "REAPER_PORTABLE=$portable" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Query GetPeakFileNameEx from portable startup script
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'central-probe'
+          $cache = Join-Path $root 'cache'
+          $media = Join-Path $root 'Media'
+          $scripts = Join-Path $env:REAPER_PORTABLE 'Scripts'
+          New-Item -ItemType Directory -Force -Path $root,$cache,$media,$scripts | Out-Null
+          $paths = @(
+            (Join-Path $media 'UPPER.WAV'),
+            (Join-Path $media 'upper.wav'),
+            (Join-Path $media 'ÄÖÜ.WAV'),
+            (Join-Path $media 'äöü.wav'),
+            (Join-Path $media 'I.WAV'),
+            (Join-Path $media 'i.wav'),
+            ($media + '\.\UPPER.WAV'),
+            ($media + '\sub\..\UPPER.WAV'),
+            'relative\Path\Take.WAV',
+            'C:\Users\Example\Audio\Take.WAV',
+            '\\server\share\Folder\Take.WAV'
+          )
+          $manifest = Join-Path $root 'paths.txt'
+          $result = Join-Path $root 'results.json'
+          $ini = Join-Path $env:REAPER_PORTABLE 'reaper.ini'
+          $startup = Join-Path $scripts '__startup.lua'
+          [IO.File]::WriteAllLines($manifest, $paths, [Text.UTF8Encoding]::new($false))
+          $iniText = "[REAPER]`naltpeaks=1`naltpeakspath=$cache`npeakcachegenrs=300`n"
+          [IO.File]::WriteAllText($ini, $iniText, [Text.UTF8Encoding]::new($false))
+          $startupText = @'
+          local manifest = os.getenv("REAPEAKS_MANIFEST")
+          local result = os.getenv("REAPEAKS_RESULT")
+          local function esc(value)
+            value = tostring(value or "")
+            value = value:gsub("\\", "\\\\"):gsub('"', '\\"')
+            value = value:gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+            return '"' .. value .. '"'
+          end
+          local rows = {}
+          if manifest and result then
+            for source in io.lines(manifest) do
+              rows[#rows + 1] = {
+                source = source,
+                read = reaper.GetPeakFileNameEx(source, "", false),
+                write = reaper.GetPeakFileNameEx(source, "", true),
+              }
+            end
+            local out = assert(io.open(result, "w"))
+            out:write('{"version":1,"resource_path":', esc(reaper.GetResourcePath()), ',"entries":{')
+            for index, row in ipairs(rows) do
+              if index > 1 then out:write(',') end
+              out:write(esc(row.source), ':{"read":', esc(row.read), ',"write":', esc(row.write), '}')
+            end
+            out:write('}}\n')
+            out:close()
+          end
+          reaper.defer(function() reaper.Main_OnCommand(40004, 0) end)
+          '@
+          [IO.File]::WriteAllText($startup, $startupText, [Text.UTF8Encoding]::new($false))
+          $env:REAPEAKS_MANIFEST = $manifest
+          $env:REAPEAKS_RESULT = $result
+          $process = Start-Process -FilePath $env:REAPER_EXE -ArgumentList @('-new','-nosplash') -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'REAPER timed out'
+          }
+          if (-not (Test-Path $result)) { throw "result not created; exit=$($process.ExitCode)" }
+          Get-Content $result
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-central-cache-native-windows-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/central-probe
+            ${{ runner.temp }}/REAPER-portable/reaper.ini
+            ${{ runner.temp }}/REAPER-portable/Scripts/__startup.lua
+          if-no-files-found: warn
+          retention-days: 7

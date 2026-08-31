@@ -1,0 +1,13 @@
+diff --git a/src/pyramid.rs b/src/pyramid.rs
+index 90e785c..75de9c2 100644
+--- a/src/pyramid.rs
++++ b/src/pyramid.rs
+@@ -181,7 +181,7 @@ impl WavePyramid {
+         let frames_per_pixel = span as f64 / pixel_width as f64;
+         // Around 1.5 source extrema per pixel is a useful balance: enough data
+         // for antialiased/filled drawing without oversampling large zoom-outs.
+-        let target_div = (frames_per_pixel / 1.5).max(1.0);
++        let target_div = (frames_per_pixel / 1.5).max(48000.0);
+ 
+         let mut best_i = 0usize;
+         let mut best_score = f64::INFINITY;

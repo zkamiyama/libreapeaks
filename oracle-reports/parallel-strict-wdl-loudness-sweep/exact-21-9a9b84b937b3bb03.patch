@@ -1,0 +1,13 @@
+diff --git a/src/strict_wdl.cpp b/src/strict_wdl.cpp
+index 7e1f11e..22fff12 100644
+--- a/src/strict_wdl.cpp
++++ b/src/strict_wdl.cpp
+@@ -33,7 +33,7 @@ void rpk_wdl_fft_init_once() {
+ }
+ 
+ bool valid_interleaved_span(long long frames, int channels) noexcept {
+-    if (frames < 0 || channels <= 0 || channels > kMaxReaPeaksChannels) {
++    if (frames <= 0 || channels <= 0 || channels > kMaxReaPeaksChannels) {
+         return false;
+     }
+ 

@@ -1,0 +1,13 @@
+diff --git a/src/loudness.rs b/src/loudness.rs
+index a42397e..27c5476 100644
+--- a/src/loudness.rs
++++ b/src/loudness.rs
+@@ -428,7 +428,7 @@ mod tests {
+         let mut pcm = Vec::with_capacity(frames * 2);
+         for frame in 0..frames {
+             let phase = 2.0 * PI * 997.0 * frame as f64 / sample_rate as f64;
+-            pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
++            pcm.push((0.5 * 32_767.0 * phase.sin()).ceil() as i16);
+             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
+         }
+ 

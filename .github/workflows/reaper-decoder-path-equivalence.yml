@@ -1,0 +1,349 @@
+name: reaper-decoder-path-equivalence
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-decoder-path-equivalence.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-decoder-path-equivalence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime dependencies and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-decoder-oracle
+          mkdir -p "$root/results" "$root/reaper"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          sha256sum "$root/reaper779_linux_x86_64.tar.xz" \
+            | tee "$root/results/reaper-tarball.sha256"
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" \
+            -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create byte-identical PCM16 WAVE and ALAC sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-decoder-oracle
+          mkdir -p "$root/media"
+          python - <<'PY'
+          from pathlib import Path
+          import math
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-decoder-oracle/media')
+          sample_rate = 48_000
+          frames = sample_rate * 3
+
+          def clamp(value):
+              return max(-32_768, min(32_767, int(value)))
+
+          cases = {
+              'silence': lambda frame: (0, 0),
+              'sine_997': lambda frame: (
+                  clamp(round(0.5 * 32_767 * math.sin(2 * math.pi * 997 * frame / sample_rate))),
+                  clamp(round(0.25 * 32_767 * math.sin(2 * math.pi * 997 * frame / sample_rate))),
+              ),
+              'step': lambda frame: (
+                  (0 if frame < sample_rate else 8_192 if frame < 2 * sample_rate else 16_384),
+              ) * 2,
+              'impulse': lambda frame: (
+                  (32_767 if frame in (0, 1_200, 38_400, 96_000) else 0),
+              ) * 2,
+          }
+
+          for name, sample in cases.items():
+              payload = bytearray()
+              for frame in range(frames):
+                  left, right = sample(frame)
+                  payload += struct.pack('<hh', left, right)
+              (root / f'{name}.s16le').write_bytes(payload)
+              with wave.open(str(root / f'{name}.wav'), 'wb') as output:
+                  output.setnchannels(2)
+                  output.setsampwidth(2)
+                  output.setframerate(sample_rate)
+                  output.writeframes(payload)
+          PY
+          {
+            ffmpeg -version | head -1
+            for wav in "$root"/media/*.wav; do
+              base="${wav%.wav}"
+              ffmpeg -hide_banner -loglevel error -y \
+                -i "$wav" -map_metadata -1 -c:a alac "$base.m4a"
+              ffmpeg -hide_banner -loglevel error -y \
+                -i "$base.m4a" -f s16le -acodec pcm_s16le "$base.decoded.s16le"
+              cmp "$base.s16le" "$base.decoded.s16le"
+              sha256sum "$base.s16le" "$base.decoded.s16le"
+              ffprobe -v error -select_streams a:0 \
+                -show_entries stream=codec_name,sample_rate,channels,duration \
+                -of default=noprint_wrappers=1 "$base.m4a"
+            done
+          } | tee "$root/results/source-equivalence.txt"
+      - name: Build fresh REAPER mode-3 caches through both decoder paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          root = Path('/tmp/reaper-decoder-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+          cases = ('silence', 'sine_997', 'step', 'impulse')
+          sources = (('wav', 'native'), ('m4a', 'ffmpeg'))
+
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.35)
+              sequence = 0
+              for name in cases:
+                  for extension, route in sources:
+                      sequence += 1
+                      media = media_root / f'{name}.{extension}'
+                      peak_name = media.name + '.reapeaks'
+                      for old in media_root.rglob(peak_name):
+                          old.unlink()
+
+                      case = Path(tempfile.mkdtemp(prefix=f'reaper-decoder-{sequence:02d}-'))
+                      config = case / 'reaper.ini'
+                      config.write_text(
+                          '[REAPER]\n'
+                          'peakcachegenmode=3\n'
+                          'peakcachegenrs=300\n'
+                          'showpeaks=64\n',
+                          encoding='utf-8',
+                      )
+                      status_path = case / 'result.txt'
+                      log_path = results / f'{name}.{extension}.reaper.log'
+                      env = os.environ.copy()
+                      env.update(
+                          DISPLAY=display,
+                          REAPEAKS_MEDIA=str(media.resolve()),
+                          REAPEAKS_RESULT=str(status_path),
+                      )
+                      with log_path.open('wb') as log:
+                          completed = subprocess.run(
+                              [
+                                  str(reaper),
+                                  '-newinst',
+                                  '-cfgfile',
+                                  str(config),
+                                  '-new',
+                                  '-nosplash',
+                                  str(script),
+                              ],
+                              env=env,
+                              stdout=log,
+                              stderr=subprocess.STDOUT,
+                              timeout=90,
+                              check=False,
+                          )
+                      status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                      (results / f'{name}.{extension}.status.txt').write_text(status, encoding='utf-8')
+                      source_type = next(
+                          (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                          '',
+                      )
+                      if completed.returncode != 0 or 'OK loops=' not in status:
+                          raise SystemExit(
+                              f'{media.name}: REAPER failed rc={completed.returncode}, status={status!r}'
+                          )
+                      if extension == 'm4a' and source_type != 'VIDEO':
+                          raise SystemExit(
+                              f'{media.name}: expected VIDEO/FFmpeg source, got {source_type!r}'
+                          )
+                      if extension == 'wav' and source_type == 'VIDEO':
+                          raise SystemExit(
+                              f'{media.name}: WAVE unexpectedly used VIDEO/FFmpeg source'
+                          )
+                      peaks = list(media_root.rglob(peak_name))
+                      if len(peaks) != 1:
+                          raise SystemExit(f'{media.name}: expected one peak file, found {peaks}')
+                      shutil.copy2(peaks[0], results / f'{name}.reaper-{route}.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+          cat /tmp/reaper-decoder-oracle/results/*.status.txt
+      - name: Compare REAPER native-WAVE and VIDEO-FFmpeg cache payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/reaper-decoder-oracle/results/decoder-path-report.txt
+          from pathlib import Path
+          import hashlib
+          import struct
+
+          root = Path('/tmp/reaper-decoder-oracle/results')
+          cases = ('silence', 'sine_997', 'step', 'impulse')
+
+          def first_difference(left, right):
+              for index, (a, b) in enumerate(zip(left, right)):
+                  if a != b:
+                      return index
+              if len(left) != len(right):
+                  return min(len(left), len(right))
+              return None
+
+          def parse(path):
+              data = path.read_bytes()
+              if len(data) < 18:
+                  raise ValueError(f'truncated {path}')
+              if data[:4] != b'RPKN':
+                  raise ValueError(f'unexpected magic in {path}: {data[:4]!r}')
+              channels = data[4]
+              layer_count = data[5]
+              sample_rate = struct.unpack_from('<I', data, 6)[0]
+              source_mtime = struct.unpack_from('<I', data, 10)[0]
+              source_size = struct.unpack_from('<I', data, 14)[0]
+              headers = [
+                  struct.unpack_from('<iI', data, 18 + 8 * index)
+                  for index in range(layer_count)
+              ]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for index, (division, count) in enumerate(headers):
+                  if division > 0 or division in (-115, -114):
+                      size = count * channels * 4
+                  elif division == -103:
+                      size = count * channels * 192
+                  else:
+                      raise ValueError(f'unsupported token {division} in {path}')
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise ValueError(f'truncated payload in {path}')
+                  layers.append({
+                      'index': index,
+                      'division': division,
+                      'count': count,
+                      'start': offset,
+                      'payload': payload,
+                      'sha256': hashlib.sha256(payload).hexdigest(),
+                  })
+                  offset += size
+              if offset != len(data):
+                  raise ValueError(f'layout mismatch {offset} != {len(data)} for {path}')
+              normalized = data[:10] + (b'\0' * 8) + data[18:]
+              return {
+                  'data': data,
+                  'normalized': normalized,
+                  'channels': channels,
+                  'sample_rate': sample_rate,
+                  'source_mtime': source_mtime,
+                  'source_size': source_size,
+                  'headers': headers,
+                  'layers': layers,
+              }
+
+          mismatched = False
+          for name in cases:
+              native_path = root / f'{name}.reaper-native.reapeaks'
+              ffmpeg_path = root / f'{name}.reaper-ffmpeg.reapeaks'
+              native = parse(native_path)
+              ffmpeg = parse(ffmpeg_path)
+              native_type = next(
+                  line[5:]
+                  for line in (root / f'{name}.wav.status.txt').read_text().splitlines()
+                  if line.startswith('TYPE=')
+              )
+              ffmpeg_type = next(
+                  line[5:]
+                  for line in (root / f'{name}.m4a.status.txt').read_text().splitlines()
+                  if line.startswith('TYPE=')
+              )
+
+              print(
+                  f'{name}: native_type={native_type} ffmpeg_type={ffmpeg_type} '
+                  f'native_source_size={native["source_size"]} '
+                  f'ffmpeg_source_size={ffmpeg["source_size"]}'
+              )
+              if native['channels'] != ffmpeg['channels']:
+                  raise SystemExit(f'{name}: channel count differs')
+              if native['sample_rate'] != ffmpeg['sample_rate']:
+                  raise SystemExit(f'{name}: sample rate differs')
+              if native['headers'] != ffmpeg['headers']:
+                  mismatched = True
+                  print(
+                      f'  LAYOUT_MISMATCH native={native["headers"]} '
+                      f'ffmpeg={ffmpeg["headers"]}'
+                  )
+
+              if native['normalized'] == ffmpeg['normalized']:
+                  digest = hashlib.sha256(native['normalized']).hexdigest()
+                  print(
+                      f'  DECODER_PATH_EQUIVALENT bytes={len(native["data"])} '
+                      f'normalized_sha256={digest} headers={native["headers"]}'
+                  )
+              else:
+                  mismatched = True
+                  offset = first_difference(native['normalized'], ffmpeg['normalized'])
+                  print(
+                      f'  DECODER_PATH_MISMATCH normalized_offset={offset} '
+                      f'native_sha256={hashlib.sha256(native["normalized"]).hexdigest()} '
+                      f'ffmpeg_sha256={hashlib.sha256(ffmpeg["normalized"]).hexdigest()}'
+                  )
+                  for left, right in zip(native['layers'], ffmpeg['layers']):
+                      if left['payload'] == right['payload']:
+                          continue
+                      relative = first_difference(left['payload'], right['payload'])
+                      print(
+                          f'  layer={left["index"]} division={left["division"]} '
+                          f'count={left["count"]} first_payload_difference={relative} '
+                          f'native_layer_sha256={left["sha256"]} '
+                          f'ffmpeg_layer_sha256={right["sha256"]}'
+                      )
+
+          if mismatched:
+              raise SystemExit('REAPER decoder paths produced different normalized cache content')
+          PY
+          cat /tmp/reaper-decoder-oracle/results/decoder-path-report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload decoder-path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-decoder-path-equivalence-${{ github.sha }}
+          path: |
+            /tmp/reaper-decoder-oracle/results
+            /tmp/reaper-decoder-oracle/media/*.wav
+            /tmp/reaper-decoder-oracle/media/*.m4a
+            /tmp/reaper-decoder-oracle/media/*.s16le
+          if-no-files-found: error
+          retention-days: 14

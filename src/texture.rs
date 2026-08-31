@@ -18,7 +18,11 @@ pub struct RgbaImage {
 ///
 /// This can be uploaded directly as RGBA8 to Qt QRhi/OpenGL, WebGL2 or WebGPU.
 pub fn encode_envelope_rgba8(peaks: &[PeakPair], channels: usize) -> RgbaImage {
-    let width = if channels == 0 { 0 } else { peaks.len() / channels };
+    let width = if channels == 0 {
+        0
+    } else {
+        peaks.len() / channels
+    };
     let height = channels;
     let mut data = vec![0u8; width.saturating_mul(height).saturating_mul(4)];
     for x in 0..width {
@@ -33,7 +37,12 @@ pub fn encode_envelope_rgba8(peaks: &[PeakPair], channels: usize) -> RgbaImage {
             data[o + 3] = mn[1];
         }
     }
-    RgbaImage { width, height, stride: width * 4, data }
+    RgbaImage {
+        width,
+        height,
+        stride: width * 4,
+        data,
+    }
 }
 
 pub fn encode_wave_tile_rgba8(tile: &WaveTile, channels: usize) -> RgbaImage {
@@ -44,7 +53,11 @@ pub fn encode_wave_tile_rgba8(tile: &WaveTile, channels: usize) -> RgbaImage {
 /// One RGBA8 texel is exactly the little-endian 32-bit REAPER spectral code:
 /// low 15 bits frequency in Hz, next 14 bits density/tonality.
 pub fn encode_spectral_rgba8(peaks: &[SpectralPeak], channels: usize) -> RgbaImage {
-    let width = if channels == 0 { 0 } else { peaks.len() / channels };
+    let width = if channels == 0 {
+        0
+    } else {
+        peaks.len() / channels
+    };
     let height = channels;
     let mut data = vec![0u8; width.saturating_mul(height).saturating_mul(4)];
     for x in 0..width {
@@ -54,7 +67,12 @@ pub fn encode_spectral_rgba8(peaks: &[SpectralPeak], channels: usize) -> RgbaIma
             data[o..o + 4].copy_from_slice(&code);
         }
     }
-    RgbaImage { width, height, stride: width * 4, data }
+    RgbaImage {
+        width,
+        height,
+        stride: width * 4,
+        data,
+    }
 }
 
 #[inline]
@@ -113,13 +131,28 @@ pub fn render_waveform_rgba8_scaled(
         || !vertical_full_scale.is_finite()
         || vertical_full_scale <= 0.0
     {
-        return RgbaImage { width, height, stride: width * 4, data };
+        return RgbaImage {
+            width,
+            height,
+            stride: width * 4,
+            data,
+        };
     }
     let Some(plan) = pyramid.choose_level(start_frame, end_frame, width) else {
-        return RgbaImage { width, height, stride: width * 4, data };
+        return RgbaImage {
+            width,
+            height,
+            stride: width * 4,
+            data,
+        };
     };
     let Some(peaks) = pyramid.read_plan(plan) else {
-        return RgbaImage { width, height, stride: width * 4, data };
+        return RgbaImage {
+            width,
+            height,
+            stride: width * 4,
+            data,
+        };
     };
     let band_h = height as f64 / pyramid.channels as f64;
     let span = (end_frame - start_frame) as f64;
@@ -160,7 +193,12 @@ pub fn render_waveform_rgba8_scaled(
             }
         }
     }
-    RgbaImage { width, height, stride: width * 4, data }
+    RgbaImage {
+        width,
+        height,
+        stride: width * 4,
+        data,
+    }
 }
 
 #[cfg(test)]
@@ -169,7 +207,10 @@ mod tests {
 
     #[test]
     fn envelope_texture_is_lossless_le() {
-        let p = [PeakPair { max: 0x1234, min: -2 }];
+        let p = [PeakPair {
+            max: 0x1234,
+            min: -2,
+        }];
         let x = encode_envelope_rgba8(&p, 1);
         assert_eq!(x.width, 1);
         assert_eq!(x.height, 1);
@@ -178,7 +219,10 @@ mod tests {
 
     #[test]
     fn spectral_texture_is_raw_code_le() {
-        let p = [SpectralPeak { frequency_hz: 1000, density: 12345 }];
+        let p = [SpectralPeak {
+            frequency_hz: 1000,
+            density: 12345,
+        }];
         let x = encode_spectral_rgba8(&p, 1);
         assert_eq!(x.data, p[0].code().to_le_bytes());
     }

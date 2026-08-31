@@ -29,7 +29,7 @@ fn pcm_i16(sr: u32, channels: usize, frames: usize, spec: &[&str]) -> Vec<i16> {
                     let f = base + delta * c as f64;
                     let phase = phase_step * c as f64;
                     out.push(q16(
-                        amp * (2.0 * PI * f * i as f64 / sr as f64 + phase).sin(),
+                        amp * (2.0 * PI * f * i as f64 / sr as f64 + phase).sin()
                     ));
                 }
             }
@@ -44,11 +44,7 @@ fn pcm_i16(sr: u32, channels: usize, frames: usize, spec: &[&str]) -> Vec<i16> {
                 for state in &mut states {
                     *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let x = (((*state >> 16) & 0xffff) as i32) - 32768;
-                    let x = if shift == 0 {
-                        x
-                    } else {
-                        x / (1i32 << shift)
-                    };
+                    let x = if shift == 0 { x } else { x / (1i32 << shift) };
                     out.push(x.clamp(-32768, 32767) as i16);
                 }
             }
@@ -68,12 +64,9 @@ fn pcm_i16(sr: u32, channels: usize, frames: usize, spec: &[&str]) -> Vec<i16> {
                             }
                         }
                         "saw" => {
-                            ((((i * 3 + c * 7) % 31) as f64 / 30.0 * 2.0 - 1.0) * 24000.0)
-                                as i32
+                            ((((i * 3 + c * 7) % 31) as f64 / 30.0 * 2.0 - 1.0) * 24000.0) as i32
                         }
-                        "dc" => {
-                            (c as i32 + 1) * 4096 * if c & 1 == 1 { -1 } else { 1 }
-                        }
+                        "dc" => (c as i32 + 1) * 4096 * if c & 1 == 1 { -1 } else { 1 },
                         _ => panic!("unknown pattern {mode}"),
                     };
                     out.push(v.clamp(-32768, 32767) as i16);
@@ -124,12 +117,7 @@ fn fnv64(codes: impl IntoIterator<Item = u32>) -> u64 {
     h
 }
 
-fn full_file_codes_i16(
-    pcm: &[i16],
-    sr: u32,
-    channels: usize,
-    division: u32,
-) -> Vec<u32> {
+fn full_file_codes_i16(pcm: &[i16], sr: u32, channels: usize, division: u32) -> Vec<u32> {
     let options = reapeaks::GenerateOptions {
         sample_rate: sr,
         channels,
@@ -148,12 +136,7 @@ fn full_file_codes_i16(
         .collect()
 }
 
-fn full_file_codes_f32(
-    pcm: &[f32],
-    sr: u32,
-    channels: usize,
-    division: u32,
-) -> Vec<u32> {
+fn full_file_codes_f32(pcm: &[f32], sr: u32, channels: usize, division: u32) -> Vec<u32> {
     let options = reapeaks::GenerateOptions {
         sample_rate: sr,
         channels,
@@ -209,7 +192,11 @@ fn reaper779_expanded_fresh_process_spectral_corpus_is_exact() {
         };
 
         let expected_codes = expected_count * channels;
-        assert_eq!(got.len(), expected_codes, "spectral count mismatch for {name}");
+        assert_eq!(
+            got.len(),
+            expected_codes,
+            "spectral count mismatch for {name}"
+        );
         let hash = fnv64(got.iter().map(|p| p.code()));
         assert_eq!(hash, expected_hash, "spectral payload mismatch for {name}");
 

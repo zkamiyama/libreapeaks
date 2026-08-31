@@ -1,0 +1,232 @@
+name: verified-loudness-final-merge
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: verified-loudness-final-merge
+  cancel-in-progress: false
+
+jobs:
+  verify-and-merge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Lock the exact branch and PR head
+        id: lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch_sha="$(git rev-parse HEAD)"
+          pr_head="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .head.sha)"
+          pr_base="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .base.ref)"
+          pr_state="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .state)"
+          test "$pr_state" = open
+          test "$pr_base" = main
+          test "$pr_head" = "$branch_sha"
+          echo "sha=$branch_sha" >> "$GITHUB_OUTPUT"
+          printf 'locked_sha=%s\n' "$branch_sha" | tee /tmp/verified-merge-lock.txt
+
+      - name: Download fixed exact-oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/verified-loudness-final
+          mkdir -p "$root/input" "$root/results"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+
+      - name: Run exact comparison and all local static/test gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          python -m compileall -q examples tests tools || true
+          if find tests -type f -name 'test_*.py' -print -quit | grep -q .; then
+            python -m unittest discover -s tests -p 'test_*.py'
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+
+          root = Path('/tmp/verified-loudness-final')
+          input_root = root / 'input'
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          dirs = [path for path in input_root.rglob('*') if path.is_dir()]
+          peak = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+          output = root / 'output'; shutil.rmtree(output, ignore_errors=True); output.mkdir(parents=True)
+          env = os.environ.copy()
+          for name in names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = output
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm
+              else:
+                  value = peak
+              env[name] = str(value)
+          completed = subprocess.run(
+              ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture'],
+              env=env,
+              text=True,
+              capture_output=True,
+              timeout=900,
+          )
+          text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+          (root / 'results' / 'exact-test.log').write_text(text, encoding='utf-8')
+          status = {
+              'returncode': completed.returncode,
+              'zero_tests': '0 tests' in text.lower(),
+              'tail': text[-8000:],
+          }
+          (root / 'results' / 'exact-test.json').write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+          if completed.returncode != 0 or status['zero_tests']:
+              raise SystemExit('complete-file byte identity did not pass')
+          PY
+
+      - name: Dispatch all independent SHA-pinned gates
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKED_SHA: ${{ steps.lock.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflows=(
+            ci.yml
+            strict-wdl-boundary.yml
+            strict-wdl-sanitizers.yml
+            strict-wdl-thread-sanitizer.yml
+            reaper-ffmpeg-function-call-provenance.yml
+            reaper-decoder-path-equivalence.yml
+            reaper-ffmpeg-byte-identical.yml
+          )
+          : > /tmp/dispatched-workflows.tsv
+          for workflow in "${workflows[@]}"; do
+            if ! gh workflow view "$workflow" >/dev/null 2>&1; then
+              echo "required workflow missing: $workflow" >&2
+              exit 1
+            fi
+            before="$(gh run list --workflow "$workflow" --branch hardening-reapeaks-cache-ffmpeg --limit 20 --json databaseId,headSha,event,createdAt --jq '[.[] | select(.headSha == env.LOCKED_SHA and .event == "workflow_dispatch") | .databaseId] | max // 0')"
+            gh workflow run "$workflow" --ref hardening-reapeaks-cache-ffmpeg
+            run_id=''
+            for attempt in $(seq 1 60); do
+              run_id="$(gh run list --workflow "$workflow" --branch hardening-reapeaks-cache-ffmpeg --limit 30 --json databaseId,headSha,event,createdAt --jq '[.[] | select(.headSha == env.LOCKED_SHA and .event == "workflow_dispatch" and .databaseId > '"$before"') | .databaseId] | max // 0')"
+              if [ "$run_id" != 0 ]; then
+                break
+              fi
+              sleep 2
+            done
+            test -n "$run_id"
+            test "$run_id" != 0
+            printf '%s\t%s\n' "$workflow" "$run_id" | tee -a /tmp/dispatched-workflows.tsv
+          done
+
+      - name: Wait for all independent gates and require success
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKED_SHA: ${{ steps.lock.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/independent-gates.tsv
+          while IFS=$'\t' read -r workflow run_id; do
+            gh run watch "$run_id" --exit-status
+            payload="$(gh api repos/${GITHUB_REPOSITORY}/actions/runs/${run_id})"
+            head_sha="$(jq -r .head_sha <<<"$payload")"
+            status="$(jq -r .status <<<"$payload")"
+            conclusion="$(jq -r .conclusion <<<"$payload")"
+            event="$(jq -r .event <<<"$payload")"
+            test "$head_sha" = "$LOCKED_SHA"
+            test "$status" = completed
+            test "$conclusion" = success
+            test "$event" = workflow_dispatch
+            printf '%s\t%s\t%s\t%s\n' "$workflow" "$run_id" "$head_sha" "$conclusion" | tee -a /tmp/independent-gates.tsv
+          done < /tmp/dispatched-workflows.tsv
+
+      - name: Reconfirm immutable PR head and current main base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKED_SHA: ${{ steps.lock.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_head="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .head.sha)"
+          mergeable_state="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .mergeable_state)"
+          test "$current_head" = "$LOCKED_SHA"
+          case "$mergeable_state" in
+            clean|unstable|has_hooks) ;;
+            *) echo "PR is not mergeable: $mergeable_state" >&2; exit 1 ;;
+          esac
+
+      - name: Merge the verified PR with head-SHA protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKED_SHA: ${{ steps.lock.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr merge 2 --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$LOCKED_SHA"
+          merged="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .merged)"
+          merge_sha="$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .merge_commit_sha)"
+          test "$merged" = true
+          test -n "$merge_sha"
+          echo "$merge_sha" > /tmp/merge-sha.txt
+
+      - name: Verify merged main tree and rerun local gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKED_SHA: ${{ steps.lock.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --force
+          merge_sha="$(cat /tmp/merge-sha.txt)"
+          test "$(git rev-parse origin/main)" = "$merge_sha"
+          verified_tree="$(git rev-parse "$LOCKED_SHA^{tree}")"
+          merged_tree="$(git rev-parse "$merge_sha^{tree}")"
+          test "$verified_tree" = "$merged_tree"
+          git checkout --detach "$merge_sha"
+          git submodule update --init --recursive
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Upload final audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-loudness-final-merge-${{ steps.lock.outputs.sha }}
+          path: |
+            /tmp/verified-merge-lock.txt
+            /tmp/dispatched-workflows.tsv
+            /tmp/independent-gates.tsv
+            /tmp/merge-sha.txt
+            /tmp/verified-loudness-final/results
+          if-no-files-found: warn
+          retention-days: 30

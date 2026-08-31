@@ -62,7 +62,10 @@ fn compare_pcm16_golden(pcm: Vec<i16>, text: &str) {
     let g = golden(text);
     let sr: u32 = g["sample_rate"].parse().unwrap();
     let ch: usize = g["channels"].parse().unwrap();
-    let divs: Vec<u32> = g["divisions"].split(',').map(|x| x.parse().unwrap()).collect();
+    let divs: Vec<u32> = g["divisions"]
+        .split(',')
+        .map(|x| x.parse().unwrap())
+        .collect();
     let opt = GenerateOptions {
         sample_rate: sr,
         channels: ch,
@@ -78,7 +81,11 @@ fn compare_pcm16_golden(pcm: Vec<i16>, text: &str) {
             bytes.extend_from_slice(&p.max.to_le_bytes());
             bytes.extend_from_slice(&p.min.to_le_bytes());
         }
-        assert_eq!(bytes, hex_decode(g[format!("wave{i}").as_str()]), "wave layer {i}");
+        assert_eq!(
+            bytes,
+            hex_decode(g[format!("wave{i}").as_str()]),
+            "wave layer {i}"
+        );
     }
 
     #[cfg(feature = "strict-wdl")]
@@ -87,7 +94,11 @@ fn compare_pcm16_golden(pcm: Vec<i16>, text: &str) {
         for p in &layer.peaks {
             bytes.extend_from_slice(&p.code().to_le_bytes());
         }
-        assert_eq!(bytes, hex_decode(g[format!("spectral{i}").as_str()]), "spectral layer {i}");
+        assert_eq!(
+            bytes,
+            hex_decode(g[format!("spectral{i}").as_str()]),
+            "spectral layer {i}"
+        );
     }
 }
 
@@ -98,7 +109,10 @@ fn reaper779_tone_1234_5() {
 
 #[test]
 fn reaper779_two_tone_minus6() {
-    compare_pcm16_golden(twotone_minus6(), include_str!("fixtures/twotone_minus6.golden"));
+    compare_pcm16_golden(
+        twotone_minus6(),
+        include_str!("fixtures/twotone_minus6.golden"),
+    );
 }
 
 #[test]
@@ -109,9 +123,8 @@ fn reaper779_impulse_boundary() {
 #[test]
 fn reaper779_rpkl_high_range_and_bucket_initialization() {
     let values: [f32; 22] = [
-        1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 255.0, 256.0, 512.0,
-        -1.0, -2.0, -4.0, -8.0, -16.0, -32.0, -64.0, -128.0, -255.0, -256.0,
-        -512.0,
+        1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 255.0, 256.0, 512.0, -1.0, -2.0, -4.0, -8.0,
+        -16.0, -32.0, -64.0, -128.0, -255.0, -256.0, -512.0,
     ];
     let mut pcm = Vec::with_capacity(values.len() * 147);
     for v in values {
@@ -126,13 +139,34 @@ fn reaper779_rpkl_high_range_and_bucket_initialization() {
         spectral: false,
     };
     let actual = ReaPeaks::parse(generate_f32(&pcm, &opt, true).unwrap()).unwrap();
-    let got: Vec<(i16, i16)> = actual.wave_layers[0].peaks.iter().map(|p| (p.max, p.min)).collect();
+    let got: Vec<(i16, i16)> = actual.wave_layers[0]
+        .peaks
+        .iter()
+        .map(|p| (p.max, p.min))
+        .collect();
     let expected = [
-        (24576,24576),(25600,24576),(26624,24576),(27648,24576),(28672,24576),
-        (29696,24576),(30720,24576),(31744,24576),(32762,24576),(32767,24576),
-        (32767,24576),(-24576,-24576),(-24576,-25600),(-24576,-26624),
-        (-24576,-27648),(-24576,-28672),(-24576,-29696),(-24576,-30720),
-        (-24576,-31744),(-24576,-32762),(-24576,-32768),(-24576,-32768),
+        (24576, 24576),
+        (25600, 24576),
+        (26624, 24576),
+        (27648, 24576),
+        (28672, 24576),
+        (29696, 24576),
+        (30720, 24576),
+        (31744, 24576),
+        (32762, 24576),
+        (32767, 24576),
+        (32767, 24576),
+        (-24576, -24576),
+        (-24576, -25600),
+        (-24576, -26624),
+        (-24576, -27648),
+        (-24576, -28672),
+        (-24576, -29696),
+        (-24576, -30720),
+        (-24576, -31744),
+        (-24576, -32762),
+        (-24576, -32768),
+        (-24576, -32768),
     ];
     assert_eq!(got, expected);
 }
@@ -140,9 +174,18 @@ fn reaper779_rpkl_high_range_and_bucket_initialization() {
 #[test]
 fn spectral_code_roundtrip_bits() {
     for p in [
-        SpectralPeak { frequency_hz: 0, density: 0 },
-        SpectralPeak { frequency_hz: 1000, density: 16383 },
-        SpectralPeak { frequency_hz: 32767, density: 12288 },
+        SpectralPeak {
+            frequency_hz: 0,
+            density: 0,
+        },
+        SpectralPeak {
+            frequency_hz: 1000,
+            density: 16383,
+        },
+        SpectralPeak {
+            frequency_hz: 32767,
+            density: 12288,
+        },
     ] {
         assert_eq!(SpectralPeak::from_code(p.code()), p);
     }

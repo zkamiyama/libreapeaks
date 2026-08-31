@@ -1,0 +1,158 @@
+name: apply-verified-strict-wdl-float-model
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - 'oracle-reports/strict-wdl-float-model-sweep/conclusion.json'
+      - '.github/workflows/apply-verified-strict-wdl-float-model.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Select a proven model and patch build.rs
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          conclusion_path = Path('oracle-reports/strict-wdl-float-model-sweep/conclusion.json')
+          if not conclusion_path.exists():
+              Path('/tmp/no-verified-model').write_text('report missing\n')
+              raise SystemExit(0)
+          conclusion = json.loads(conclusion_path.read_text(encoding='utf-8'))
+          if not conclusion.get('floating_point_model_alone_explains_mismatch'):
+              Path('/tmp/no-verified-model').write_text('no non-baseline model passed exact comparison\n')
+              raise SystemExit(0)
+          rows = {row['name']: row for row in conclusion.get('rows', [])}
+          candidates = [name for name in conclusion.get('passing_variants', []) if name != 'baseline']
+          if not candidates:
+              Path('/tmp/no-verified-model').write_text('no passing non-baseline variant\n')
+              raise SystemExit(0)
+          # Prefer the smallest semantic change.
+          preference = [
+              'no-contract', 'no-vectorize', 'no-contract-no-vectorize',
+              'sse-strict', 'strict-rounding', 'opt2-strict', 'opt1-strict',
+              'opt3-strict', 'opt0-strict', 'rust-no-fma', 'rust-strict',
+          ]
+          selected = next((name for name in preference if name in candidates), candidates[0])
+          row = rows[selected]
+          flags = str(row.get('cxxflags', '')).split()
+          rustflags = str(row.get('rustflags', '')).strip()
+          if rustflags:
+              # Do not encode global RUSTFLAGS into library semantics automatically.
+              Path('/tmp/no-verified-model').write_text(f'winning variant requires global Rust flags: {selected}\n')
+              raise SystemExit(0)
+          text_path = Path('build.rs')
+          text = text_path.read_text(encoding='utf-8')
+          marker = '// verified REAPER strict-WDL floating-point model'
+          if marker in text:
+              Path('/tmp/selected-model.txt').write_text(selected + '\n')
+              raise SystemExit(0)
+          statements = '\n'.join(f'    build.flag_if_supported("{flag}");' for flag in flags)
+          block = f'    {marker}\n{statements}\n'
+          patterns = [
+              r'(?m)^(\s*let\s+mut\s+build\s*=\s*cc::Build::new\(\);\s*\n)',
+              r'(?m)^(\s*let\s+mut\s+builder\s*=\s*cc::Build::new\(\);\s*\n)',
+          ]
+          replaced = False
+          for pattern in patterns:
+              match = re.search(pattern, text)
+              if match:
+                  variable = 'builder' if 'builder' in match.group(1) else 'build'
+                  statements_for_variable = '\n'.join(
+                      f'    {variable}.flag_if_supported("{flag}");' for flag in flags
+                  )
+                  block_for_variable = f'    {marker}\n{statements_for_variable}\n'
+                  text = text[:match.end()] + block_for_variable + text[match.end():]
+                  replaced = True
+                  break
+          if not replaced:
+              raise SystemExit('could not locate the cc::Build variable in build.rs')
+          text_path.write_text(text, encoding='utf-8')
+          Path('/tmp/selected-model.txt').write_text(selected + '\n')
+          Path('/tmp/selected-cxxflags.txt').write_text(' '.join(flags) + '\n')
+          PY
+
+      - name: Stop when the sweep did not prove a model
+        if: hashFiles('/tmp/no-verified-model') != ''
+        shell: bash
+        run: cat /tmp/no-verified-model
+
+      - name: Re-run exact comparison and all static gates
+        if: hashFiles('/tmp/selected-model.txt') != '' && hashFiles('/tmp/no-verified-model') == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Replay the fixed failing artifact through the same integration test.
+          root=/tmp/apply-strict-wdl-model
+          mkdir -p "$root/input"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+
+          root = Path('/tmp/apply-strict-wdl-model/input')
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          dirs = [p for p in root.rglob('*') if p.is_dir()]
+          peak = max(dirs or [root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm = max(dirs or [root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.raw', '.pcm', '.wav', '.m4a'}))
+          env = os.environ.copy()
+          for name in names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = Path('/tmp/apply-strict-wdl-model/output'); value.mkdir(parents=True, exist_ok=True)
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm
+              else:
+                  value = peak
+              env[name] = str(value)
+          completed = subprocess.run(
+              ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture'],
+              env=env,
+              check=False,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Commit only the re-verified build model
+        if: hashFiles('/tmp/selected-model.txt') != '' && hashFiles('/tmp/no-verified-model') == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add build.rs
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          model="$(cat /tmp/selected-model.txt)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "match REAPER strict-WDL floating-point model (${model})"
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

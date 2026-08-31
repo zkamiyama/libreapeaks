@@ -1,0 +1,4800 @@
+===== Cargo.toml:16 =====
+8: 
+9: [lib]
+10: name = "reapeaks"
+11: crate-type = ["rlib", "cdylib", "staticlib"]
+12: 
+13: [features]
+14: default = []
+15: python = ["dep:pyo3"]
+16: strict-wdl = []
+17: 
+18: [dependencies]
+19: pyo3 = { version = "0.29.2", optional = true, features = ["extension-module", "abi3-py310"] }
+20: 
+21: [build-dependencies]
+22: cc = "1.2"
+23: 
+24: [[test]]
+
+===== Cargo.toml:27 =====
+19: pyo3 = { version = "0.29.2", optional = true, features = ["extension-module", "abi3-py310"] }
+20: 
+21: [build-dependencies]
+22: cc = "1.2"
+23: 
+24: [[test]]
+25: name = "spectral_corpus_diagnostic"
+26: path = "tests/spectral_corpus_diagnostic.rs"
+27: required-features = ["strict-wdl"]
+28: 
+29: [[test]]
+30: name = "spectral_expanded_corpus"
+31: path = "tests/spectral_expanded_corpus.rs"
+32: required-features = ["strict-wdl"]
+
+===== Cargo.toml:32 =====
+24: [[test]]
+25: name = "spectral_corpus_diagnostic"
+26: path = "tests/spectral_corpus_diagnostic.rs"
+27: required-features = ["strict-wdl"]
+28: 
+29: [[test]]
+30: name = "spectral_expanded_corpus"
+31: path = "tests/spectral_expanded_corpus.rs"
+32: required-features = ["strict-wdl"]
+
+===== build.rs:4 =====
+1: use std::path::Path;
+2: 
+3: fn main() {
+4:     println!("cargo:rerun-if-changed=src/strict_wdl.cpp");
+5:     println!("cargo:rerun-if-changed=third_party/WDL/WDL/fft.c");
+6:     println!("cargo:rerun-if-changed=third_party/WDL/WDL/resample.cpp");
+7: 
+8:     if std::env::var_os("CARGO_FEATURE_STRICT_WDL").is_none() {
+9:         return;
+10:     }
+11: 
+12:     let wdl = Path::new("third_party/WDL/WDL");
+
+===== build.rs:8 =====
+1: use std::path::Path;
+2: 
+3: fn main() {
+4:     println!("cargo:rerun-if-changed=src/strict_wdl.cpp");
+5:     println!("cargo:rerun-if-changed=third_party/WDL/WDL/fft.c");
+6:     println!("cargo:rerun-if-changed=third_party/WDL/WDL/resample.cpp");
+7: 
+8:     if std::env::var_os("CARGO_FEATURE_STRICT_WDL").is_none() {
+9:         return;
+10:     }
+11: 
+12:     let wdl = Path::new("third_party/WDL/WDL");
+13:     if !wdl.join("fft.c").is_file() || !wdl.join("resample.cpp").is_file() {
+14:         panic!(
+15:             "strict-wdl requires the WDL submodule. Run: git submodule update --init --recursive"
+16:         );
+
+===== build.rs:15 =====
+7: 
+8:     if std::env::var_os("CARGO_FEATURE_STRICT_WDL").is_none() {
+9:         return;
+10:     }
+11: 
+12:     let wdl = Path::new("third_party/WDL/WDL");
+13:     if !wdl.join("fft.c").is_file() || !wdl.join("resample.cpp").is_file() {
+14:         panic!(
+15:             "strict-wdl requires the WDL submodule. Run: git submodule update --init --recursive"
+16:         );
+17:     }
+18: 
+19:     cc::Build::new()
+20:         .cpp(true)
+21:         .define("WDL_FFT_REALSIZE", Some("8"))
+22:         // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
+23:         // exact SSE2 mask emitted by WDL when this define is active. Without
+
+===== build.rs:21 =====
+13:     if !wdl.join("fft.c").is_file() || !wdl.join("resample.cpp").is_file() {
+14:         panic!(
+15:             "strict-wdl requires the WDL submodule. Run: git submodule update --init --recursive"
+16:         );
+17:     }
+18: 
+19:     cc::Build::new()
+20:         .cpp(true)
+21:         .define("WDL_FFT_REALSIZE", Some("8"))
+22:         // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
+23:         // exact SSE2 mask emitted by WDL when this define is active. Without
+24:         // it, tiny IIR tails survive and produce non-zero spectral codes after
+25:         // impulse material where REAPER has already flushed to silence.
+26:         .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
+27:         .include(wdl)
+28:         .file(wdl.join("fft.c"))
+29:         .file(wdl.join("resample.cpp"))
+
+===== build.rs:26 =====
+18: 
+19:     cc::Build::new()
+20:         .cpp(true)
+21:         .define("WDL_FFT_REALSIZE", Some("8"))
+22:         // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
+23:         // exact SSE2 mask emitted by WDL when this define is active. Without
+24:         // it, tiny IIR tails survive and produce non-zero spectral codes after
+25:         // impulse material where REAPER has already flushed to silence.
+26:         .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
+27:         .include(wdl)
+28:         .file(wdl.join("fft.c"))
+29:         .file(wdl.join("resample.cpp"))
+30:         .file("src/strict_wdl.cpp")
+31:         .flag_if_supported("-std=c++17")
+32:         .compile("reapeaks_wdl");
+33: }
+
+===== build.rs:30 =====
+22:         // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
+23:         // exact SSE2 mask emitted by WDL when this define is active. Without
+24:         // it, tiny IIR tails survive and produce non-zero spectral codes after
+25:         // impulse material where REAPER has already flushed to silence.
+26:         .define("WDL_DENORMAL_WANTS_SCOPED_FTZ", None)
+27:         .include(wdl)
+28:         .file(wdl.join("fft.c"))
+29:         .file(wdl.join("resample.cpp"))
+30:         .file("src/strict_wdl.cpp")
+31:         .flag_if_supported("-std=c++17")
+32:         .compile("reapeaks_wdl");
+33: }
+
+===== examples/player_common.py:991 =====
+983:             except FileNotFoundError:
+984:                 pass
+985: 
+986: 
+987: def ensure_reapeaks(
+988:     audio_path: str | Path,
+989:     peaks_path: str | Path | None = None,
+990:     *,
+991:     rebuild: bool = False,
+992:     spectral: bool = True,
+993:     decoder: CacheDecoder = "auto",
+994:     cache_mode: CacheMode = "auto",
+995:     cache_directory: str | Path | None = None,
+996:     reaper_cache_map: str | Path | None = None,
+997:     allow_stale_cache: bool = False,
+998:     ffmpeg: str | Path = "ffmpeg",
+999:     ffprobe: str | Path = "ffprobe",
+
+===== examples/player_common.py:1026 =====
+1018:             audio, cache_mode, cache_directory, reaper_cache_map
+1019:         )
+1020:         target = _write_target(
+1021:             audio, cache_mode, cache_directory, reaper_cache_map
+1022:         )
+1023:     if target == audio:
+1024:         raise PlayerCacheError("cache target resolves to the source audio file")
+1025: 
+1026:     if not rebuild:
+1027:         for candidate in candidates:
+1028:             inspection = inspect_reapeaks_cache(candidate, audio)
+1029:             if inspection.parseable and (inspection.fresh or allow_stale_cache):
+1030:                 return candidate, False
+1031: 
+1032:     try:
+1033:         target.parent.mkdir(parents=True, exist_ok=True)
+1034:     except OSError as exc:
+
+===== examples/player_common.py:1039 =====
+1031: 
+1032:     try:
+1033:         target.parent.mkdir(parents=True, exist_ok=True)
+1034:     except OSError as exc:
+1035:         raise PlayerCacheError(f"cannot create cache directory {target.parent}: {exc}") from exc
+1036: 
+1037:     with _exclusive_cache_lock(target, lock_timeout):
+1038:         # Another process may have completed while this process waited.
+1039:         if not rebuild:
+1040:             inspection = inspect_reapeaks_cache(target, audio)
+1041:             if inspection.parseable and (inspection.fresh or allow_stale_cache):
+1042:                 return target, False
+1043: 
+1044:         before = _source_fingerprint(audio)
+1045:         try:
+1046:             source_stat = audio.stat()
+1047:         except OSError as exc:
+
+===== examples/pyside6_player.py:116 =====
+108:         self.stop_button = QPushButton("Stop")
+109:         self.stop_button.clicked.connect(self.stop)
+110:         self.zoom_in = QPushButton("Zoom +")
+111:         self.zoom_in.clicked.connect(lambda: self.canvas.zoom(0.5))
+112:         self.zoom_out = QPushButton("Zoom −")
+113:         self.zoom_out.clicked.connect(lambda: self.canvas.zoom(2.0))
+114:         self.tiles_checkbox = QCheckBox("Show tile boundaries")
+115:         self.tiles_checkbox.setChecked(True)
+116:         self.tiles_checkbox.toggled.connect(self.canvas.set_tile_debug)
+117:         self.follow_checkbox = QCheckBox("Follow playhead")
+118:         self.follow_checkbox.setChecked(True)
+119:         self.follow_checkbox.toggled.connect(
+120:             lambda value: setattr(self, "follow", value)
+121:         )
+122:         self.vertical_scale = QDoubleSpinBox()
+123:         self.vertical_scale.setRange(0.1, 32.0)
+124:         self.vertical_scale.setDecimals(2)
+
+===== examples/pyside6_player.py:282 =====
+274:         raise argparse.ArgumentTypeError("divisions must contain positive integers")
+275:     return values
+276: 
+277: 
+278: def parse_args(argv: list[str]) -> argparse.Namespace:
+279:     parser = argparse.ArgumentParser(description=__doc__)
+280:     parser.add_argument("audio", type=Path)
+281:     parser.add_argument("--peaks", type=Path, help="existing or target .reapeaks path")
+282:     parser.add_argument("--rebuild-cache", action="store_true")
+283:     parser.add_argument(
+284:         "--cache-decoder", choices=("auto", "wav", "ffmpeg"), default="auto"
+285:     )
+286:     parser.add_argument(
+287:         "--playback-decoder", choices=("native", "ffmpeg"), default="native"
+288:     )
+289:     parser.add_argument(
+290:         "--cache-mode",
+
+===== examples/pyside6_player.py:321 =====
+313: def main(argv: list[str] | None = None) -> int:
+314:     args = parse_args(sys.argv[1:] if argv is None else argv)
+315:     audio = args.audio.expanduser().resolve(strict=False)
+316:     prepared = None
+317:     try:
+318:         peaks, generated = ensure_reapeaks(
+319:             audio,
+320:             args.peaks,
+321:             rebuild=args.rebuild_cache,
+322:             spectral=not args.no_spectral,
+323:             decoder=args.cache_decoder,
+324:             cache_mode=args.cache_mode,
+325:             cache_directory=args.cache_dir,
+326:             reaper_cache_map=args.reaper_cache_map,
+327:             allow_stale_cache=args.allow_stale_cache,
+328:             ffmpeg=args.ffmpeg,
+329:             ffprobe=args.ffprobe,
+
+===== examples/pyside6_views.py:119 =====
+111:         if emit:
+112:             self.viewChanged.emit(start, end)
+113:         self.update()
+114: 
+115:     def set_playhead(self, frame: int):
+116:         self.playhead = max(0, min(frame, self.total_frames))
+117:         self.update()
+118: 
+119:     def set_tile_debug(self, enabled: bool):
+120:         self.show_tiles = enabled
+121:         self.update()
+122: 
+123:     def set_vertical_full_scale(self, value: float):
+124:         self.vertical_full_scale = max(0.05, value)
+125:         self.update()
+126: 
+127:     def zoom(self, factor: float, anchor_ratio: float = 0.5):
+
+===== examples/pyside6_views.py:142 =====
+134:         self.set_view(new_start, new_start + new_span)
+135: 
+136:     def wheelEvent(self, event):  # noqa: N802 - Qt API
+137:         ratio = min(1.0, max(0.0, event.position().x() / max(1, self.width())))
+138:         self.zoom(0.72 if event.angleDelta().y() > 0 else 1.0 / 0.72, ratio)
+139:         event.accept()
+140: 
+141:     def mousePressEvent(self, event):  # noqa: N802
+142:         if event.button() == Qt.MouseButton.LeftButton:
+143:             self.drag_last_x = event.position().x()
+144:             self.drag_distance = 0.0
+145:             event.accept()
+146: 
+147:     def mouseMoveEvent(self, event):  # noqa: N802
+148:         if self.drag_last_x is None:
+149:             return
+150:         x = event.position().x()
+
+===== examples/pyside6_views.py:159 =====
+151:         dx = x - self.drag_last_x
+152:         self.drag_last_x = x
+153:         self.drag_distance += abs(dx)
+154:         frames_per_px = (self.view_end - self.view_start) / max(1, self.width())
+155:         shift = int(-dx * frames_per_px)
+156:         self.set_view(self.view_start + shift, self.view_end + shift)
+157: 
+158:     def mouseReleaseEvent(self, event):  # noqa: N802
+159:         if event.button() != Qt.MouseButton.LeftButton or self.drag_last_x is None:
+160:             return
+161:         if self.drag_distance < 4.0:
+162:             ratio = min(1.0, max(0.0, event.position().x() / max(1, self.width())))
+163:             frame = int(self.view_start + ratio * (self.view_end - self.view_start))
+164:             self.seekRequested.emit(frame)
+165:         self.drag_last_x = None
+166:         event.accept()
+167: 
+
+===== examples/pyside6_views.py:358 =====
+350:         self.setFixedHeight(max(76, image.height()))
+351: 
+352:     def set_state(self, start: int, end: int, playhead: int, total_frames: int):
+353:         self.total_frames = max(1, total_frames)
+354:         self.view_start, self.view_end, self.playhead = start, end, playhead
+355:         self.update()
+356: 
+357:     def mousePressEvent(self, event):  # noqa: N802
+358:         if event.button() == Qt.MouseButton.LeftButton:
+359:             frame = int(event.position().x() / max(1, self.width()) * self.total_frames)
+360:             self.seekRequested.emit(frame)
+361: 
+362:     def paintEvent(self, _event):  # noqa: N802
+363:         painter = QPainter(self)
+364:         painter.drawImage(self.rect(), self.image)
+365:         x0 = self.view_start / self.total_frames * self.width()
+366:         x1 = self.view_end / self.total_frames * self.width()
+
+===== examples/web_player/server.py:406 =====
+398:         raise argparse.ArgumentTypeError("divisions must contain positive integers")
+399:     return values
+400: 
+401: 
+402: def parse_args(argv: list[str]) -> argparse.Namespace:
+403:     parser = argparse.ArgumentParser(description=__doc__)
+404:     parser.add_argument("audio", type=Path)
+405:     parser.add_argument("--peaks", type=Path)
+406:     parser.add_argument("--rebuild-cache", action="store_true")
+407:     parser.add_argument(
+408:         "--cache-decoder", choices=("auto", "wav", "ffmpeg"), default="auto"
+409:     )
+410:     parser.add_argument(
+411:         "--playback-decoder", choices=("native", "ffmpeg"), default="native"
+412:     )
+413:     parser.add_argument(
+414:         "--cache-mode",
+
+===== examples/web_player/server.py:448 =====
+440:     args = parse_args(sys.argv[1:] if argv is None else argv)
+441:     audio = args.audio.expanduser().resolve(strict=False)
+442:     prepared = None
+443:     server = None
+444:     try:
+445:         peaks, generated = ensure_reapeaks(
+446:             audio,
+447:             args.peaks,
+448:             rebuild=args.rebuild_cache,
+449:             spectral=not args.no_spectral,
+450:             decoder=args.cache_decoder,
+451:             cache_mode=args.cache_mode,
+452:             cache_directory=args.cache_dir,
+453:             reaper_cache_map=args.reaper_cache_map,
+454:             allow_stale_cache=args.allow_stale_cache,
+455:             ffmpeg=args.ffmpeg,
+456:             ffprobe=args.ffprobe,
+
+===== src/error.rs:3 =====
+1: use std::fmt::{Display, Formatter};
+2: 
+3: #[derive(Debug, Clone)]
+4: pub enum ReaPeaksError {
+5:     Io(String),
+6:     Truncated,
+7:     InvalidMagic([u8; 4]),
+8:     InvalidHeader(&'static str),
+9:     Unsupported(&'static str),
+10:     InvalidArgument(&'static str),
+11: }
+
+===== src/format.rs:8 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::wave::PeakPair;
+3: use std::fs;
+4: use std::path::Path;
+5: 
+6: pub const TOKEN_SPECTRAL: i32 = -('s' as i32);
+7: pub const TOKEN_SPECTROGRAM: i32 = -('g' as i32);
+8: pub const TOKEN_LOUDNESS: i32 = -('r' as i32);
+9: pub const TOKEN_LOUDNESS_OLD: i32 = -('l' as i32);
+10: 
+11: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+12: pub enum Version {
+13:     Rpkm,
+14:     Rpkn,
+15:     Rpkl,
+16: }
+
+===== src/format.rs:9 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::wave::PeakPair;
+3: use std::fs;
+4: use std::path::Path;
+5: 
+6: pub const TOKEN_SPECTRAL: i32 = -('s' as i32);
+7: pub const TOKEN_SPECTROGRAM: i32 = -('g' as i32);
+8: pub const TOKEN_LOUDNESS: i32 = -('r' as i32);
+9: pub const TOKEN_LOUDNESS_OLD: i32 = -('l' as i32);
+10: 
+11: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+12: pub enum Version {
+13:     Rpkm,
+14:     Rpkn,
+15:     Rpkl,
+16: }
+17: 
+
+===== src/format.rs:11 =====
+3: use std::fs;
+4: use std::path::Path;
+5: 
+6: pub const TOKEN_SPECTRAL: i32 = -('s' as i32);
+7: pub const TOKEN_SPECTROGRAM: i32 = -('g' as i32);
+8: pub const TOKEN_LOUDNESS: i32 = -('r' as i32);
+9: pub const TOKEN_LOUDNESS_OLD: i32 = -('l' as i32);
+10: 
+11: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+12: pub enum Version {
+13:     Rpkm,
+14:     Rpkn,
+15:     Rpkl,
+16: }
+17: 
+18: impl Version {
+19:     pub fn magic(self) -> [u8; 4] {
+
+===== src/format.rs:28 =====
+20:         match self {
+21:             Self::Rpkm => *b"RPKM",
+22:             Self::Rpkn => *b"RPKN",
+23:             Self::Rpkl => *b"RPKL",
+24:         }
+25:     }
+26: }
+27: 
+28: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+29: pub struct Header {
+30:     pub version: Version,
+31:     pub channels: u8,
+32:     pub mipmap_count: u8,
+33:     pub sample_rate: u32,
+34:     pub source_mtime_low32: u32,
+35:     pub source_size_low32: u32,
+36: }
+
+===== src/format.rs:38 =====
+30:     pub version: Version,
+31:     pub channels: u8,
+32:     pub mipmap_count: u8,
+33:     pub sample_rate: u32,
+34:     pub source_mtime_low32: u32,
+35:     pub source_size_low32: u32,
+36: }
+37: 
+38: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+39: pub enum LayerKind {
+40:     Wave,
+41:     Spectral,
+42:     Spectrogram,
+43:     Loudness,
+44:     LoudnessOld,
+45: }
+46: 
+
+===== src/format.rs:43 =====
+35:     pub source_size_low32: u32,
+36: }
+37: 
+38: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+39: pub enum LayerKind {
+40:     Wave,
+41:     Spectral,
+42:     Spectrogram,
+43:     Loudness,
+44:     LoudnessOld,
+45: }
+46: 
+47: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+48: pub struct LayerHeader {
+49:     pub division: i32,
+50:     pub peak_count: u32,
+51: }
+
+===== src/format.rs:44 =====
+36: }
+37: 
+38: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+39: pub enum LayerKind {
+40:     Wave,
+41:     Spectral,
+42:     Spectrogram,
+43:     Loudness,
+44:     LoudnessOld,
+45: }
+46: 
+47: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+48: pub struct LayerHeader {
+49:     pub division: i32,
+50:     pub peak_count: u32,
+51: }
+52: 
+
+===== src/format.rs:47 =====
+39: pub enum LayerKind {
+40:     Wave,
+41:     Spectral,
+42:     Spectrogram,
+43:     Loudness,
+44:     LoudnessOld,
+45: }
+46: 
+47: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+48: pub struct LayerHeader {
+49:     pub division: i32,
+50:     pub peak_count: u32,
+51: }
+52: 
+53: impl LayerHeader {
+54:     pub fn kind(self) -> LayerKind {
+55:         match self.division {
+
+===== src/format.rs:59 =====
+51: }
+52: 
+53: impl LayerHeader {
+54:     pub fn kind(self) -> LayerKind {
+55:         match self.division {
+56:             d if d > 0 => LayerKind::Wave,
+57:             TOKEN_SPECTRAL => LayerKind::Spectral,
+58:             TOKEN_SPECTROGRAM => LayerKind::Spectrogram,
+59:             TOKEN_LOUDNESS => LayerKind::Loudness,
+60:             TOKEN_LOUDNESS_OLD => LayerKind::LoudnessOld,
+61:             _ => LayerKind::Wave,
+62:         }
+63:     }
+64: }
+65: 
+66: #[derive(Debug, Clone)]
+67: pub struct WaveLayer {
+
+===== src/format.rs:60 =====
+52: 
+53: impl LayerHeader {
+54:     pub fn kind(self) -> LayerKind {
+55:         match self.division {
+56:             d if d > 0 => LayerKind::Wave,
+57:             TOKEN_SPECTRAL => LayerKind::Spectral,
+58:             TOKEN_SPECTROGRAM => LayerKind::Spectrogram,
+59:             TOKEN_LOUDNESS => LayerKind::Loudness,
+60:             TOKEN_LOUDNESS_OLD => LayerKind::LoudnessOld,
+61:             _ => LayerKind::Wave,
+62:         }
+63:     }
+64: }
+65: 
+66: #[derive(Debug, Clone)]
+67: pub struct WaveLayer {
+68:     pub division: u32,
+
+===== src/format.rs:66 =====
+58:             TOKEN_SPECTROGRAM => LayerKind::Spectrogram,
+59:             TOKEN_LOUDNESS => LayerKind::Loudness,
+60:             TOKEN_LOUDNESS_OLD => LayerKind::LoudnessOld,
+61:             _ => LayerKind::Wave,
+62:         }
+63:     }
+64: }
+65: 
+66: #[derive(Debug, Clone)]
+67: pub struct WaveLayer {
+68:     pub division: u32,
+69:     pub peaks: Vec<PeakPair>, // [peak][channel]
+70: }
+71: 
+72: impl WaveLayer {
+73:     pub fn peak_count(&self, channels: usize) -> usize {
+74:         if channels == 0 {
+
+===== src/format.rs:82 =====
+74:         if channels == 0 {
+75:             0
+76:         } else {
+77:             self.peaks.len() / channels
+78:         }
+79:     }
+80: }
+81: 
+82: #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+83: pub struct SpectralPeak {
+84:     pub frequency_hz: u16,
+85:     pub density: u16,
+86: }
+87: 
+88: impl SpectralPeak {
+89:     pub fn from_code(code: u32) -> Self {
+90:         Self {
+
+===== src/format.rs:101 =====
+93:         }
+94:     }
+95: 
+96:     pub fn code(self) -> u32 {
+97:         (self.frequency_hz.min(0x7fff) as u32) | ((self.density.min(0x3fff) as u32) << 15)
+98:     }
+99: }
+100: 
+101: #[derive(Debug, Clone)]
+102: pub struct SpectralLayer {
+103:     pub mirrored_division: u32,
+104:     pub peaks: Vec<SpectralPeak>, // [peak][channel]
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+
+===== src/format.rs:107 =====
+99: }
+100: 
+101: #[derive(Debug, Clone)]
+102: pub struct SpectralLayer {
+103:     pub mirrored_division: u32,
+104:     pub peaks: Vec<SpectralPeak>, // [peak][channel]
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+
+===== src/format.rs:108 =====
+100: 
+101: #[derive(Debug, Clone)]
+102: pub struct SpectralLayer {
+103:     pub mirrored_division: u32,
+104:     pub peaks: Vec<SpectralPeak>, // [peak][channel]
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+
+===== src/format.rs:109 =====
+101: #[derive(Debug, Clone)]
+102: pub struct SpectralLayer {
+103:     pub mirrored_division: u32,
+104:     pub peaks: Vec<SpectralPeak>, // [peak][channel]
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+
+===== src/format.rs:110 =====
+102: pub struct SpectralLayer {
+103:     pub mirrored_division: u32,
+104:     pub peaks: Vec<SpectralPeak>, // [peak][channel]
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+118: 
+
+===== src/format.rs:113 =====
+105: }
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+118: 
+119: impl LoudnessLayer {
+120:     pub fn peak_count(&self, channels: usize) -> usize {
+121:         if channels == 0 {
+
+===== src/format.rs:114 =====
+106: 
+107: #[derive(Debug, Clone, Copy, PartialEq, Default)]
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+118: 
+119: impl LoudnessLayer {
+120:     pub fn peak_count(&self, channels: usize) -> usize {
+121:         if channels == 0 {
+122:             0
+
+===== src/format.rs:116 =====
+108: pub struct LoudnessPeak {
+109:     pub momentary_energy: f32,
+110:     pub short_term_energy: f32,
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+118: 
+119: impl LoudnessLayer {
+120:     pub fn peak_count(&self, channels: usize) -> usize {
+121:         if channels == 0 {
+122:             0
+123:         } else {
+124:             self.peaks.len() / channels
+
+===== src/format.rs:119 =====
+111: }
+112: 
+113: #[derive(Debug, Clone)]
+114: pub struct LoudnessLayer {
+115:     pub mirrored_division: u32,
+116:     pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+117: }
+118: 
+119: impl LoudnessLayer {
+120:     pub fn peak_count(&self, channels: usize) -> usize {
+121:         if channels == 0 {
+122:             0
+123:         } else {
+124:             self.peaks.len() / channels
+125:         }
+126:     }
+127: }
+
+===== src/format.rs:129 =====
+121:         if channels == 0 {
+122:             0
+123:         } else {
+124:             self.peaks.len() / channels
+125:         }
+126:     }
+127: }
+128: 
+129: #[derive(Debug, Clone)]
+130: pub struct ReaPeaks {
+131:     pub header: Header,
+132:     pub layer_headers: Vec<LayerHeader>,
+133:     pub wave_layers: Vec<WaveLayer>,
+134:     pub spectral_layers: Vec<SpectralLayer>,
+135:     pub loudness_layers: Vec<LoudnessLayer>,
+136:     pub raw: Vec<u8>,
+137: }
+
+===== src/format.rs:135 =====
+127: }
+128: 
+129: #[derive(Debug, Clone)]
+130: pub struct ReaPeaks {
+131:     pub header: Header,
+132:     pub layer_headers: Vec<LayerHeader>,
+133:     pub wave_layers: Vec<WaveLayer>,
+134:     pub spectral_layers: Vec<SpectralLayer>,
+135:     pub loudness_layers: Vec<LoudnessLayer>,
+136:     pub raw: Vec<u8>,
+137: }
+138: 
+139: fn get<const N: usize>(b: &[u8], o: usize) -> Result<[u8; N]> {
+140:     let end = o.checked_add(N).ok_or(ReaPeaksError::Truncated)?;
+141:     b.get(o..end)
+142:         .ok_or(ReaPeaksError::Truncated)?
+143:         .try_into()
+
+===== src/format.rs:151 =====
+143:         .try_into()
+144:         .map_err(|_| ReaPeaksError::Truncated)
+145: }
+146: 
+147: fn is_known_layer_division(division: i32) -> bool {
+148:     division > 0
+149:         || matches!(
+150:             division,
+151:             TOKEN_SPECTRAL | TOKEN_SPECTROGRAM | TOKEN_LOUDNESS | TOKEN_LOUDNESS_OLD
+152:         )
+153: }
+154: 
+155: fn checked_end(off: usize, size: usize) -> Result<usize> {
+156:     off.checked_add(size)
+157:         .ok_or(ReaPeaksError::InvalidHeader("layer offset overflow"))
+158: }
+159: 
+
+===== src/format.rs:170 =====
+162:     match h.kind() {
+163:         LayerKind::Wave => match version {
+164:             Version::Rpkm => n.checked_mul(channels)?.checked_mul(2),
+165:             Version::Rpkn | Version::Rpkl => n.checked_mul(channels)?.checked_mul(4),
+166:         },
+167:         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
+168:         LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
+169:         // The -'r' header count is the number of f32 values per channel. Each
+170:         // time record stores momentary and short-term energy, so the count is
+171:         // twice the number of records.
+172:         LayerKind::Loudness => n.checked_mul(channels)?.checked_mul(4),
+173:         // The legacy -'l' layout is not established.
+174:         LayerKind::LoudnessOld => None,
+175:     }
+176: }
+177: 
+178: impl ReaPeaks {
+
+===== src/format.rs:172 =====
+164:             Version::Rpkm => n.checked_mul(channels)?.checked_mul(2),
+165:             Version::Rpkn | Version::Rpkl => n.checked_mul(channels)?.checked_mul(4),
+166:         },
+167:         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
+168:         LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
+169:         // The -'r' header count is the number of f32 values per channel. Each
+170:         // time record stores momentary and short-term energy, so the count is
+171:         // twice the number of records.
+172:         LayerKind::Loudness => n.checked_mul(channels)?.checked_mul(4),
+173:         // The legacy -'l' layout is not established.
+174:         LayerKind::LoudnessOld => None,
+175:     }
+176: }
+177: 
+178: impl ReaPeaks {
+179:     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+180:         Self::parse(fs::read(path)?)
+
+===== src/format.rs:174 =====
+166:         },
+167:         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
+168:         LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
+169:         // The -'r' header count is the number of f32 values per channel. Each
+170:         // time record stores momentary and short-term energy, so the count is
+171:         // twice the number of records.
+172:         LayerKind::Loudness => n.checked_mul(channels)?.checked_mul(4),
+173:         // The legacy -'l' layout is not established.
+174:         LayerKind::LoudnessOld => None,
+175:     }
+176: }
+177: 
+178: impl ReaPeaks {
+179:     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+180:         Self::parse(fs::read(path)?)
+181:     }
+182: 
+
+===== src/format.rs:229 =====
+221:         }
+222: 
+223:         let channels_usize = channels as usize;
+224:         let positive_divs: Vec<u32> = hs
+225:             .iter()
+226:             .filter_map(|h| (h.division > 0).then_some(h.division as u32))
+227:             .collect();
+228:         let mut spectral_index = 0usize;
+229:         let mut loudness_index = 0usize;
+230:         let mut wave_layers = Vec::new();
+231:         let mut spectral_layers = Vec::new();
+232:         let mut loudness_layers = Vec::new();
+233: 
+234:         for (idx, h) in hs.iter().copied().enumerate() {
+235:             if !is_known_layer_division(h.division) {
+236:                 return Err(ReaPeaksError::Unsupported("unknown layer token"));
+237:             }
+
+===== src/format.rs:232 =====
+224:         let positive_divs: Vec<u32> = hs
+225:             .iter()
+226:             .filter_map(|h| (h.division > 0).then_some(h.division as u32))
+227:             .collect();
+228:         let mut spectral_index = 0usize;
+229:         let mut loudness_index = 0usize;
+230:         let mut wave_layers = Vec::new();
+231:         let mut spectral_layers = Vec::new();
+232:         let mut loudness_layers = Vec::new();
+233: 
+234:         for (idx, h) in hs.iter().copied().enumerate() {
+235:             if !is_known_layer_division(h.division) {
+236:                 return Err(ReaPeaksError::Unsupported("unknown layer token"));
+237:             }
+238:             match h.kind() {
+239:                 LayerKind::Wave => {
+240:                     let n = h.peak_count as usize;
+
+===== src/format.rs:317 =====
+309:                     let size = layer_payload_size(version, h, channels_usize)
+310:                         .ok_or(ReaPeaksError::Unsupported("spectrogram layout"))?;
+311:                     let end = checked_end(off, size)?;
+312:                     if end > raw.len() {
+313:                         return Err(ReaPeaksError::Truncated);
+314:                     }
+315:                     off = end;
+316:                 }
+317:                 LayerKind::Loudness => {
+318:                     if h.peak_count % 2 != 0 {
+319:                         return Err(ReaPeaksError::InvalidHeader(
+320:                             "loudness value count must be even",
+321:                         ));
+322:                     }
+323:                     let wave_index =
+324:                         loudness_index
+325:                             .checked_add(1)
+
+===== src/format.rs:320 =====
+312:                     if end > raw.len() {
+313:                         return Err(ReaPeaksError::Truncated);
+314:                     }
+315:                     off = end;
+316:                 }
+317:                 LayerKind::Loudness => {
+318:                     if h.peak_count % 2 != 0 {
+319:                         return Err(ReaPeaksError::InvalidHeader(
+320:                             "loudness value count must be even",
+321:                         ));
+322:                     }
+323:                     let wave_index =
+324:                         loudness_index
+325:                             .checked_add(1)
+326:                             .ok_or(ReaPeaksError::InvalidHeader(
+327:                                 "loudness layer index overflow",
+328:                             ))?;
+
+===== src/format.rs:324 =====
+316:                 }
+317:                 LayerKind::Loudness => {
+318:                     if h.peak_count % 2 != 0 {
+319:                         return Err(ReaPeaksError::InvalidHeader(
+320:                             "loudness value count must be even",
+321:                         ));
+322:                     }
+323:                     let wave_index =
+324:                         loudness_index
+325:                             .checked_add(1)
+326:                             .ok_or(ReaPeaksError::InvalidHeader(
+327:                                 "loudness layer index overflow",
+328:                             ))?;
+329:                     let mirrored = hs
+330:                         .iter()
+331:                         .filter(|header| header.division > 0)
+332:                         .nth(wave_index)
+
+===== src/format.rs:327 =====
+319:                         return Err(ReaPeaksError::InvalidHeader(
+320:                             "loudness value count must be even",
+321:                         ));
+322:                     }
+323:                     let wave_index =
+324:                         loudness_index
+325:                             .checked_add(1)
+326:                             .ok_or(ReaPeaksError::InvalidHeader(
+327:                                 "loudness layer index overflow",
+328:                             ))?;
+329:                     let mirrored = hs
+330:                         .iter()
+331:                         .filter(|header| header.division > 0)
+332:                         .nth(wave_index)
+333:                         .copied()
+334:                         .ok_or(ReaPeaksError::InvalidHeader(
+335:                             "loudness layer without matching waveform layer",
+
+===== src/format.rs:335 =====
+327:                                 "loudness layer index overflow",
+328:                             ))?;
+329:                     let mirrored = hs
+330:                         .iter()
+331:                         .filter(|header| header.division > 0)
+332:                         .nth(wave_index)
+333:                         .copied()
+334:                         .ok_or(ReaPeaksError::InvalidHeader(
+335:                             "loudness layer without matching waveform layer",
+336:                         ))?;
+337:                     let expected_value_count =
+338:                         mirrored
+339:                             .peak_count
+340:                             .checked_mul(2)
+341:                             .ok_or(ReaPeaksError::InvalidHeader(
+342:                                 "loudness value count overflow",
+343:                             ))?;
+
+===== src/format.rs:342 =====
+334:                         .ok_or(ReaPeaksError::InvalidHeader(
+335:                             "loudness layer without matching waveform layer",
+336:                         ))?;
+337:                     let expected_value_count =
+338:                         mirrored
+339:                             .peak_count
+340:                             .checked_mul(2)
+341:                             .ok_or(ReaPeaksError::InvalidHeader(
+342:                                 "loudness value count overflow",
+343:                             ))?;
+344:                     if h.peak_count != expected_value_count {
+345:                         return Err(ReaPeaksError::InvalidHeader(
+346:                             "loudness count does not match waveform layer",
+347:                         ));
+348:                     }
+349: 
+350:                     let record_count = h.peak_count as usize / 2;
+
+===== src/format.rs:346 =====
+338:                         mirrored
+339:                             .peak_count
+340:                             .checked_mul(2)
+341:                             .ok_or(ReaPeaksError::InvalidHeader(
+342:                                 "loudness value count overflow",
+343:                             ))?;
+344:                     if h.peak_count != expected_value_count {
+345:                         return Err(ReaPeaksError::InvalidHeader(
+346:                             "loudness count does not match waveform layer",
+347:                         ));
+348:                     }
+349: 
+350:                     let record_count = h.peak_count as usize / 2;
+351:                     let sample_count = record_count.checked_mul(channels_usize).ok_or(
+352:                         ReaPeaksError::InvalidHeader("loudness sample count overflow"),
+353:                     )?;
+354:                     let size = sample_count
+
+===== src/format.rs:352 =====
+344:                     if h.peak_count != expected_value_count {
+345:                         return Err(ReaPeaksError::InvalidHeader(
+346:                             "loudness count does not match waveform layer",
+347:                         ));
+348:                     }
+349: 
+350:                     let record_count = h.peak_count as usize / 2;
+351:                     let sample_count = record_count.checked_mul(channels_usize).ok_or(
+352:                         ReaPeaksError::InvalidHeader("loudness sample count overflow"),
+353:                     )?;
+354:                     let size = sample_count
+355:                         .checked_mul(8)
+356:                         .ok_or(ReaPeaksError::InvalidHeader("loudness size overflow"))?;
+357:                     let end = checked_end(off, size)?;
+358:                     if end > raw.len() {
+359:                         return Err(ReaPeaksError::Truncated);
+360:                     }
+
+===== src/format.rs:356 =====
+348:                     }
+349: 
+350:                     let record_count = h.peak_count as usize / 2;
+351:                     let sample_count = record_count.checked_mul(channels_usize).ok_or(
+352:                         ReaPeaksError::InvalidHeader("loudness sample count overflow"),
+353:                     )?;
+354:                     let size = sample_count
+355:                         .checked_mul(8)
+356:                         .ok_or(ReaPeaksError::InvalidHeader("loudness size overflow"))?;
+357:                     let end = checked_end(off, size)?;
+358:                     if end > raw.len() {
+359:                         return Err(ReaPeaksError::Truncated);
+360:                     }
+361:                     let mut peaks = Vec::with_capacity(sample_count);
+362:                     for sample_index in 0..sample_count {
+363:                         let position = off + sample_index * 8;
+364:                         peaks.push(LoudnessPeak {
+
+===== src/format.rs:364 =====
+356:                         .ok_or(ReaPeaksError::InvalidHeader("loudness size overflow"))?;
+357:                     let end = checked_end(off, size)?;
+358:                     if end > raw.len() {
+359:                         return Err(ReaPeaksError::Truncated);
+360:                     }
+361:                     let mut peaks = Vec::with_capacity(sample_count);
+362:                     for sample_index in 0..sample_count {
+363:                         let position = off + sample_index * 8;
+364:                         peaks.push(LoudnessPeak {
+365:                             momentary_energy: f32::from_le_bytes(get::<4>(&raw, position)?),
+366:                             short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+367:                         });
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+
+===== src/format.rs:365 =====
+357:                     let end = checked_end(off, size)?;
+358:                     if end > raw.len() {
+359:                         return Err(ReaPeaksError::Truncated);
+360:                     }
+361:                     let mut peaks = Vec::with_capacity(sample_count);
+362:                     for sample_index in 0..sample_count {
+363:                         let position = off + sample_index * 8;
+364:                         peaks.push(LoudnessPeak {
+365:                             momentary_energy: f32::from_le_bytes(get::<4>(&raw, position)?),
+366:                             short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+367:                         });
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+373:                     });
+
+===== src/format.rs:366 =====
+358:                     if end > raw.len() {
+359:                         return Err(ReaPeaksError::Truncated);
+360:                     }
+361:                     let mut peaks = Vec::with_capacity(sample_count);
+362:                     for sample_index in 0..sample_count {
+363:                         let position = off + sample_index * 8;
+364:                         peaks.push(LoudnessPeak {
+365:                             momentary_energy: f32::from_le_bytes(get::<4>(&raw, position)?),
+366:                             short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+367:                         });
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+373:                     });
+374:                     loudness_index += 1;
+
+===== src/format.rs:370 =====
+362:                     for sample_index in 0..sample_count {
+363:                         let position = off + sample_index * 8;
+364:                         peaks.push(LoudnessPeak {
+365:                             momentary_energy: f32::from_le_bytes(get::<4>(&raw, position)?),
+366:                             short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+367:                         });
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+373:                     });
+374:                     loudness_index += 1;
+375:                 }
+376:                 LayerKind::LoudnessOld => {
+377:                     // The legacy -'l' layout is unknown, so it can only be
+378:                     // retained as an opaque terminal payload.
+
+===== src/format.rs:374 =====
+366:                             short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+367:                         });
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+373:                     });
+374:                     loudness_index += 1;
+375:                 }
+376:                 LayerKind::LoudnessOld => {
+377:                     // The legacy -'l' layout is unknown, so it can only be
+378:                     // retained as an opaque terminal payload.
+379:                     if idx + 1 != hs.len() {
+380:                         return Err(ReaPeaksError::Unsupported(
+381:                             "non-terminal legacy loudness layer",
+382:                         ));
+
+===== src/format.rs:376 =====
+368:                     }
+369:                     off = end;
+370:                     loudness_layers.push(LoudnessLayer {
+371:                         mirrored_division: mirrored.division as u32,
+372:                         peaks,
+373:                     });
+374:                     loudness_index += 1;
+375:                 }
+376:                 LayerKind::LoudnessOld => {
+377:                     // The legacy -'l' layout is unknown, so it can only be
+378:                     // retained as an opaque terminal payload.
+379:                     if idx + 1 != hs.len() {
+380:                         return Err(ReaPeaksError::Unsupported(
+381:                             "non-terminal legacy loudness layer",
+382:                         ));
+383:                     }
+384:                     let minimum_size = (h.peak_count as usize)
+
+===== src/format.rs:381 =====
+373:                     });
+374:                     loudness_index += 1;
+375:                 }
+376:                 LayerKind::LoudnessOld => {
+377:                     // The legacy -'l' layout is unknown, so it can only be
+378:                     // retained as an opaque terminal payload.
+379:                     if idx + 1 != hs.len() {
+380:                         return Err(ReaPeaksError::Unsupported(
+381:                             "non-terminal legacy loudness layer",
+382:                         ));
+383:                     }
+384:                     let minimum_size = (h.peak_count as usize)
+385:                         .checked_mul(channels_usize)
+386:                         .and_then(|value| value.checked_mul(4))
+387:                         .ok_or(ReaPeaksError::InvalidHeader(
+388:                             "legacy loudness size overflow",
+389:                         ))?;
+
+===== src/format.rs:388 =====
+380:                         return Err(ReaPeaksError::Unsupported(
+381:                             "non-terminal legacy loudness layer",
+382:                         ));
+383:                     }
+384:                     let minimum_size = (h.peak_count as usize)
+385:                         .checked_mul(channels_usize)
+386:                         .and_then(|value| value.checked_mul(4))
+387:                         .ok_or(ReaPeaksError::InvalidHeader(
+388:                             "legacy loudness size overflow",
+389:                         ))?;
+390:                     let end = checked_end(off, minimum_size)?;
+391:                     if end > raw.len() {
+392:                         return Err(ReaPeaksError::Truncated);
+393:                     }
+394:                     off = raw.len();
+395:                 }
+396:             }
+
+===== src/format.rs:408 =====
+400:             return Err(ReaPeaksError::InvalidHeader("trailing bytes after layers"));
+401:         }
+402: 
+403:         Ok(Self {
+404:             header,
+405:             layer_headers: hs,
+406:             wave_layers,
+407:             spectral_layers,
+408:             loudness_layers,
+409:             raw,
+410:         })
+411:     }
+412: }
+413: 
+414: #[derive(Debug, Clone)]
+415: pub struct GeneratedLayer {
+416:     pub header: LayerHeader,
+
+===== src/format.rs:414 =====
+406:             wave_layers,
+407:             spectral_layers,
+408:             loudness_layers,
+409:             raw,
+410:         })
+411:     }
+412: }
+413: 
+414: #[derive(Debug, Clone)]
+415: pub struct GeneratedLayer {
+416:     pub header: LayerHeader,
+417:     pub bytes: Vec<u8>,
+418: }
+419: 
+420: pub fn encode(
+421:     version: Version,
+422:     channels: u8,
+
+===== src/format.rs:444 =====
+436:     }
+437:     if layers.len() > u8::MAX as usize {
+438:         return Err(ReaPeaksError::InvalidArgument("too many layers"));
+439:     }
+440:     for layer in layers {
+441:         if !is_known_layer_division(layer.header.division) {
+442:             return Err(ReaPeaksError::InvalidArgument("unknown layer token"));
+443:         }
+444:         if layer.header.division == TOKEN_LOUDNESS && layer.header.peak_count % 2 != 0 {
+445:             return Err(ReaPeaksError::InvalidArgument(
+446:                 "loudness value count must be even",
+447:             ));
+448:         }
+449:         if let Some(expected) = layer_payload_size(version, layer.header, channels as usize) {
+450:             if expected != layer.bytes.len() {
+451:                 return Err(ReaPeaksError::InvalidArgument(
+452:                     "layer payload length mismatch",
+
+===== src/format.rs:446 =====
+438:         return Err(ReaPeaksError::InvalidArgument("too many layers"));
+439:     }
+440:     for layer in layers {
+441:         if !is_known_layer_division(layer.header.division) {
+442:             return Err(ReaPeaksError::InvalidArgument("unknown layer token"));
+443:         }
+444:         if layer.header.division == TOKEN_LOUDNESS && layer.header.peak_count % 2 != 0 {
+445:             return Err(ReaPeaksError::InvalidArgument(
+446:                 "loudness value count must be even",
+447:             ));
+448:         }
+449:         if let Some(expected) = layer_payload_size(version, layer.header, channels as usize) {
+450:             if expected != layer.bytes.len() {
+451:                 return Err(ReaPeaksError::InvalidArgument(
+452:                     "layer payload length mismatch",
+453:                 ));
+454:             }
+
+===== src/generate.rs:3 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{encode, GeneratedLayer, Version};
+3: use crate::loudness::{build_loudness_layers_f32, build_loudness_layers_pcm16};
+4: use crate::spectral::{build_spectral_layers, build_spectral_layers_f32};
+5: use crate::wave::{build_wave_layers, build_wave_layers_f32, WaveEncoding};
+6: 
+7: #[derive(Debug, Clone)]
+8: pub struct GenerateOptions {
+9:     pub sample_rate: u32,
+10:     pub channels: usize,
+11:     pub divisions: Vec<u32>,
+
+===== src/generate.rs:7 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{encode, GeneratedLayer, Version};
+3: use crate::loudness::{build_loudness_layers_f32, build_loudness_layers_pcm16};
+4: use crate::spectral::{build_spectral_layers, build_spectral_layers_f32};
+5: use crate::wave::{build_wave_layers, build_wave_layers_f32, WaveEncoding};
+6: 
+7: #[derive(Debug, Clone)]
+8: pub struct GenerateOptions {
+9:     pub sample_rate: u32,
+10:     pub channels: usize,
+11:     pub divisions: Vec<u32>,
+12:     pub source_mtime_low32: u32,
+13:     pub source_size_low32: u32,
+14:     pub spectral: bool,
+15: }
+
+===== src/generate.rs:17 =====
+9:     pub sample_rate: u32,
+10:     pub channels: usize,
+11:     pub divisions: Vec<u32>,
+12:     pub source_mtime_low32: u32,
+13:     pub source_size_low32: u32,
+14:     pub spectral: bool,
+15: }
+16: 
+17: fn validate(options: &GenerateOptions, sample_len: usize, loudness: bool) -> Result<usize> {
+18:     if options.channels == 0 {
+19:         return Err(ReaPeaksError::InvalidArgument("channels=0"));
+20:     }
+21:     if options.channels > u8::MAX as usize {
+22:         return Err(ReaPeaksError::InvalidArgument(
+23:             "channels exceed .ReaPeaks header capacity",
+24:         ));
+25:     }
+
+===== src/generate.rs:40 =====
+32:     if options.divisions.iter().any(|&x| x == 0) {
+33:         return Err(ReaPeaksError::InvalidArgument("division=0"));
+34:     }
+35:     if options.divisions.iter().any(|&x| x > i32::MAX as u32) {
+36:         return Err(ReaPeaksError::InvalidArgument(
+37:             "division exceeds signed .ReaPeaks range",
+38:         ));
+39:     }
+40:     if loudness && !options.spectral {
+41:         return Err(ReaPeaksError::InvalidArgument(
+42:             "mode-3 generation requires spectral=true",
+43:         ));
+44:     }
+45:     if loudness && options.divisions.len() < 2 {
+46:         return Err(ReaPeaksError::InvalidArgument(
+47:             "mode-3 generation requires at least two divisions",
+48:         ));
+
+===== src/generate.rs:45 =====
+37:             "division exceeds signed .ReaPeaks range",
+38:         ));
+39:     }
+40:     if loudness && !options.spectral {
+41:         return Err(ReaPeaksError::InvalidArgument(
+42:             "mode-3 generation requires spectral=true",
+43:         ));
+44:     }
+45:     if loudness && options.divisions.len() < 2 {
+46:         return Err(ReaPeaksError::InvalidArgument(
+47:             "mode-3 generation requires at least two divisions",
+48:         ));
+49:     }
+50: 
+51:     let spectral_count = if options.spectral {
+52:         options.divisions.len()
+53:     } else {
+
+===== src/generate.rs:56 =====
+48:         ));
+49:     }
+50: 
+51:     let spectral_count = if options.spectral {
+52:         options.divisions.len()
+53:     } else {
+54:         0
+55:     };
+56:     let loudness_count = if loudness {
+57:         options.divisions.len() - 1
+58:     } else {
+59:         0
+60:     };
+61:     let layer_count = options
+62:         .divisions
+63:         .len()
+64:         .checked_add(spectral_count)
+
+===== src/generate.rs:65 =====
+57:         options.divisions.len() - 1
+58:     } else {
+59:         0
+60:     };
+61:     let layer_count = options
+62:         .divisions
+63:         .len()
+64:         .checked_add(spectral_count)
+65:         .and_then(|count| count.checked_add(loudness_count))
+66:         .ok_or(ReaPeaksError::InvalidArgument("too many layers"))?;
+67:     if layer_count > u8::MAX as usize {
+68:         return Err(ReaPeaksError::InvalidArgument("too many layers"));
+69:     }
+70:     if sample_len % options.channels != 0 {
+71:         return Err(ReaPeaksError::InvalidArgument(
+72:             "PCM is not whole interleaved frames",
+73:         ));
+
+===== src/generate.rs:93 =====
+85:         options.channels as u8,
+86:         options.sample_rate,
+87:         options.source_mtime_low32,
+88:         options.source_size_low32,
+89:         layers,
+90:     )
+91: }
+92: 
+93: fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -> Result<Vec<u8>> {
+94:     let frames = validate(options, pcm.len(), loudness)?;
+95:     let mut layers: Vec<GeneratedLayer> =
+96:         build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
+97:     if options.spectral {
+98:         layers.extend(build_spectral_layers(
+99:             pcm,
+100:             frames,
+101:             options.channels,
+
+===== src/generate.rs:94 =====
+86:         options.sample_rate,
+87:         options.source_mtime_low32,
+88:         options.source_size_low32,
+89:         layers,
+90:     )
+91: }
+92: 
+93: fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -> Result<Vec<u8>> {
+94:     let frames = validate(options, pcm.len(), loudness)?;
+95:     let mut layers: Vec<GeneratedLayer> =
+96:         build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
+97:     if options.spectral {
+98:         layers.extend(build_spectral_layers(
+99:             pcm,
+100:             frames,
+101:             options.channels,
+102:             options.sample_rate,
+
+===== src/generate.rs:106 =====
+98:         layers.extend(build_spectral_layers(
+99:             pcm,
+100:             frames,
+101:             options.channels,
+102:             options.sample_rate,
+103:             &options.divisions,
+104:         )?);
+105:     }
+106:     if loudness {
+107:         layers.extend(build_loudness_layers_pcm16(
+108:             pcm,
+109:             frames,
+110:             options.channels,
+111:             options.sample_rate,
+112:             &options.divisions,
+113:         )?);
+114:     }
+
+===== src/generate.rs:107 =====
+99:             pcm,
+100:             frames,
+101:             options.channels,
+102:             options.sample_rate,
+103:             &options.divisions,
+104:         )?);
+105:     }
+106:     if loudness {
+107:         layers.extend(build_loudness_layers_pcm16(
+108:             pcm,
+109:             frames,
+110:             options.channels,
+111:             options.sample_rate,
+112:             &options.divisions,
+113:         )?);
+114:     }
+115:     encode_generated(Version::Rpkn, options, &layers)
+
+===== src/generate.rs:121 =====
+113:         )?);
+114:     }
+115:     encode_generated(Version::Rpkn, options, &layers)
+116: }
+117: 
+118: /// Generate RPKN v1.1 from interleaved decoded PCM16.
+119: ///
+120: /// Waveform generation is byte-exact against the REAPER 7.79 Linux oracle for
+121: /// the validated corpus. Spectral generation is closest with `strict-wdl`.
+122: ///
+123: /// This legacy entry point writes waveform and optional spectral layers only.
+124: /// Use [`generate_pcm16_mode3`] for REAPER mode-3 waveform, spectral and
+125: /// loudness output.
+126: pub fn generate_pcm16(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
+127:     generate_pcm16_impl(pcm, options, false)
+128: }
+129: 
+
+===== src/generate.rs:125 =====
+117: 
+118: /// Generate RPKN v1.1 from interleaved decoded PCM16.
+119: ///
+120: /// Waveform generation is byte-exact against the REAPER 7.79 Linux oracle for
+121: /// the validated corpus. Spectral generation is closest with `strict-wdl`.
+122: ///
+123: /// This legacy entry point writes waveform and optional spectral layers only.
+124: /// Use [`generate_pcm16_mode3`] for REAPER mode-3 waveform, spectral and
+125: /// loudness output.
+126: pub fn generate_pcm16(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
+127:     generate_pcm16_impl(pcm, options, false)
+128: }
+129: 
+130: /// Generate a complete REAPER peak-cache mode-3 RPKN file.
+131: ///
+132: /// `options.spectral` must be `true`. The resulting layer order matches REAPER
+133: /// 7.79: waveform layers, mirrored `-'s'` spectral layers, then `-'r'`
+
+===== src/generate.rs:134 =====
+126: pub fn generate_pcm16(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
+127:     generate_pcm16_impl(pcm, options, false)
+128: }
+129: 
+130: /// Generate a complete REAPER peak-cache mode-3 RPKN file.
+131: ///
+132: /// `options.spectral` must be `true`. The resulting layer order matches REAPER
+133: /// 7.79: waveform layers, mirrored `-'s'` spectral layers, then `-'r'`
+134: /// loudness layers for every waveform division except the finest.
+135: pub fn generate_pcm16_mode3(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
+136:     generate_pcm16_impl(pcm, options, true)
+137: }
+138: 
+139: fn generate_f32_impl(
+140:     pcm: &[f32],
+141:     options: &GenerateOptions,
+142:     large_range: bool,
+
+===== src/generate.rs:143 =====
+135: pub fn generate_pcm16_mode3(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
+136:     generate_pcm16_impl(pcm, options, true)
+137: }
+138: 
+139: fn generate_f32_impl(
+140:     pcm: &[f32],
+141:     options: &GenerateOptions,
+142:     large_range: bool,
+143:     loudness: bool,
+144: ) -> Result<Vec<u8>> {
+145:     let frames = validate(options, pcm.len(), loudness)?;
+146:     let encoding = if large_range {
+147:         WaveEncoding::Rpkl
+148:     } else {
+149:         WaveEncoding::Rpkn
+150:     };
+151:     let version = if large_range {
+
+===== src/generate.rs:145 =====
+137: }
+138: 
+139: fn generate_f32_impl(
+140:     pcm: &[f32],
+141:     options: &GenerateOptions,
+142:     large_range: bool,
+143:     loudness: bool,
+144: ) -> Result<Vec<u8>> {
+145:     let frames = validate(options, pcm.len(), loudness)?;
+146:     let encoding = if large_range {
+147:         WaveEncoding::Rpkl
+148:     } else {
+149:         WaveEncoding::Rpkn
+150:     };
+151:     let version = if large_range {
+152:         Version::Rpkl
+153:     } else {
+
+===== src/generate.rs:167 =====
+159:         layers.extend(build_spectral_layers_f32(
+160:             pcm,
+161:             frames,
+162:             options.channels,
+163:             options.sample_rate,
+164:             &options.divisions,
+165:         )?);
+166:     }
+167:     if loudness {
+168:         layers.extend(build_loudness_layers_f32(
+169:             pcm,
+170:             frames,
+171:             options.channels,
+172:             options.sample_rate,
+173:             &options.divisions,
+174:         )?);
+175:     }
+
+===== src/generate.rs:168 =====
+160:             pcm,
+161:             frames,
+162:             options.channels,
+163:             options.sample_rate,
+164:             &options.divisions,
+165:         )?);
+166:     }
+167:     if loudness {
+168:         layers.extend(build_loudness_layers_f32(
+169:             pcm,
+170:             frames,
+171:             options.channels,
+172:             options.sample_rate,
+173:             &options.divisions,
+174:         )?);
+175:     }
+176:     encode_generated(version, options, &layers)
+
+===== src/lib.rs:19 =====
+11:     clippy::needless_range_loop,
+12:     clippy::too_many_arguments
+13: )]
+14: 
+15: pub mod error;
+16: pub mod ffi;
+17: pub mod format;
+18: pub mod generate;
+19: pub mod loudness;
+20: pub mod pyramid;
+21: 
+22: // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
+23: // deliberately bypasses its public source-domain scheduler entrypoints. Those
+24: // entrypoints remain live in the normal build; suppress dead-code only on this
+25: // private strict alias so `clippy -D warnings` keeps its normal coverage.
+26: #[cfg(feature = "strict-wdl")]
+27: #[path = "spectral_strict.rs"]
+
+===== src/lib.rs:26 =====
+18: pub mod generate;
+19: pub mod loudness;
+20: pub mod pyramid;
+21: 
+22: // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
+23: // deliberately bypasses its public source-domain scheduler entrypoints. Those
+24: // entrypoints remain live in the normal build; suppress dead-code only on this
+25: // private strict alias so `clippy -D warnings` keeps its normal coverage.
+26: #[cfg(feature = "strict-wdl")]
+27: #[path = "spectral_strict.rs"]
+28: pub mod spectral;
+29: #[cfg(not(feature = "strict-wdl"))]
+30: pub mod spectral;
+31: #[cfg(feature = "strict-wdl")]
+32: #[allow(dead_code)]
+33: #[path = "spectral.rs"]
+34: mod spectral_base;
+
+===== src/lib.rs:29 =====
+21: 
+22: // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
+23: // deliberately bypasses its public source-domain scheduler entrypoints. Those
+24: // entrypoints remain live in the normal build; suppress dead-code only on this
+25: // private strict alias so `clippy -D warnings` keeps its normal coverage.
+26: #[cfg(feature = "strict-wdl")]
+27: #[path = "spectral_strict.rs"]
+28: pub mod spectral;
+29: #[cfg(not(feature = "strict-wdl"))]
+30: pub mod spectral;
+31: #[cfg(feature = "strict-wdl")]
+32: #[allow(dead_code)]
+33: #[path = "spectral.rs"]
+34: mod spectral_base;
+35: 
+36: pub mod texture;
+37: pub mod wave;
+
+===== src/lib.rs:31 =====
+23: // deliberately bypasses its public source-domain scheduler entrypoints. Those
+24: // entrypoints remain live in the normal build; suppress dead-code only on this
+25: // private strict alias so `clippy -D warnings` keeps its normal coverage.
+26: #[cfg(feature = "strict-wdl")]
+27: #[path = "spectral_strict.rs"]
+28: pub mod spectral;
+29: #[cfg(not(feature = "strict-wdl"))]
+30: pub mod spectral;
+31: #[cfg(feature = "strict-wdl")]
+32: #[allow(dead_code)]
+33: #[path = "spectral.rs"]
+34: mod spectral_base;
+35: 
+36: pub mod texture;
+37: pub mod wave;
+38: 
+39: #[cfg(feature = "python")]
+
+===== src/lib.rs:43 =====
+35: 
+36: pub mod texture;
+37: pub mod wave;
+38: 
+39: #[cfg(feature = "python")]
+40: mod python;
+41: 
+42: pub use error::{ReaPeaksError, Result};
+43: pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
+44: pub use generate::{
+45:     generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3, GenerateOptions,
+46: };
+47: pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
+48: pub use texture::{
+49:     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8, render_waveform_rgba8,
+50:     render_waveform_rgba8_scaled, RgbaImage,
+51: };
+
+===== src/loudness.rs:2 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+3: use std::f64::consts::PI;
+4: 
+5: const MOMENTARY_BLOCKS_100MS: usize = 4;
+6: const SHORT_TERM_BLOCKS_100MS: usize = 30;
+7: 
+8: #[derive(Debug, Clone, Copy)]
+9: struct BiquadCoefficients {
+10:     b0: f64,
+
+===== src/loudness.rs:5 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+3: use std::f64::consts::PI;
+4: 
+5: const MOMENTARY_BLOCKS_100MS: usize = 4;
+6: const SHORT_TERM_BLOCKS_100MS: usize = 30;
+7: 
+8: #[derive(Debug, Clone, Copy)]
+9: struct BiquadCoefficients {
+10:     b0: f64,
+11:     b1: f64,
+12:     b2: f64,
+13:     a1: f64,
+
+===== src/loudness.rs:6 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+3: use std::f64::consts::PI;
+4: 
+5: const MOMENTARY_BLOCKS_100MS: usize = 4;
+6: const SHORT_TERM_BLOCKS_100MS: usize = 30;
+7: 
+8: #[derive(Debug, Clone, Copy)]
+9: struct BiquadCoefficients {
+10:     b0: f64,
+11:     b1: f64,
+12:     b2: f64,
+13:     a1: f64,
+14:     a2: f64,
+
+===== src/loudness.rs:8 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+3: use std::f64::consts::PI;
+4: 
+5: const MOMENTARY_BLOCKS_100MS: usize = 4;
+6: const SHORT_TERM_BLOCKS_100MS: usize = 30;
+7: 
+8: #[derive(Debug, Clone, Copy)]
+9: struct BiquadCoefficients {
+10:     b0: f64,
+11:     b1: f64,
+12:     b2: f64,
+13:     a1: f64,
+14:     a2: f64,
+15: }
+16: 
+
+===== src/loudness.rs:17 =====
+9: struct BiquadCoefficients {
+10:     b0: f64,
+11:     b1: f64,
+12:     b2: f64,
+13:     a1: f64,
+14:     a2: f64,
+15: }
+16: 
+17: #[derive(Debug, Clone, Copy)]
+18: struct Biquad {
+19:     coefficients: BiquadCoefficients,
+20:     x1: f64,
+21:     x2: f64,
+22:     y1: f64,
+23:     y2: f64,
+24: }
+25: 
+
+===== src/loudness.rs:50 =====
+42:         self.x2 = self.x1;
+43:         self.x1 = input;
+44:         self.y2 = self.y1;
+45:         self.y1 = output;
+46:         output
+47:     }
+48: }
+49: 
+50: #[derive(Debug, Clone, Copy)]
+51: struct KWeightingFilter {
+52:     pre_filter: Biquad,
+53:     rlb_filter: Biquad,
+54: }
+55: 
+56: impl KWeightingFilter {
+57:     fn new(sample_rate: u32) -> Result<Self> {
+58:         let (pre_filter, rlb_filter) = k_weighting_coefficients(sample_rate)?;
+
+===== src/loudness.rs:51 =====
+43:         self.x1 = input;
+44:         self.y2 = self.y1;
+45:         self.y1 = output;
+46:         output
+47:     }
+48: }
+49: 
+50: #[derive(Debug, Clone, Copy)]
+51: struct KWeightingFilter {
+52:     pre_filter: Biquad,
+53:     rlb_filter: Biquad,
+54: }
+55: 
+56: impl KWeightingFilter {
+57:     fn new(sample_rate: u32) -> Result<Self> {
+58:         let (pre_filter, rlb_filter) = k_weighting_coefficients(sample_rate)?;
+59:         Ok(Self {
+
+===== src/loudness.rs:56 =====
+48: }
+49: 
+50: #[derive(Debug, Clone, Copy)]
+51: struct KWeightingFilter {
+52:     pre_filter: Biquad,
+53:     rlb_filter: Biquad,
+54: }
+55: 
+56: impl KWeightingFilter {
+57:     fn new(sample_rate: u32) -> Result<Self> {
+58:         let (pre_filter, rlb_filter) = k_weighting_coefficients(sample_rate)?;
+59:         Ok(Self {
+60:             pre_filter: Biquad::new(pre_filter),
+61:             rlb_filter: Biquad::new(rlb_filter),
+62:         })
+63:     }
+64: 
+
+===== src/loudness.rs:58 =====
+50: #[derive(Debug, Clone, Copy)]
+51: struct KWeightingFilter {
+52:     pre_filter: Biquad,
+53:     rlb_filter: Biquad,
+54: }
+55: 
+56: impl KWeightingFilter {
+57:     fn new(sample_rate: u32) -> Result<Self> {
+58:         let (pre_filter, rlb_filter) = k_weighting_coefficients(sample_rate)?;
+59:         Ok(Self {
+60:             pre_filter: Biquad::new(pre_filter),
+61:             rlb_filter: Biquad::new(rlb_filter),
+62:         })
+63:     }
+64: 
+65:     #[inline]
+66:     fn process(&mut self, input: f64) -> f64 {
+
+===== src/loudness.rs:72 =====
+64: 
+65:     #[inline]
+66:     fn process(&mut self, input: f64) -> f64 {
+67:         let pre_filtered = self.pre_filter.process(input);
+68:         self.rlb_filter.process(pre_filtered)
+69:     }
+70: }
+71: 
+72: #[derive(Debug, Clone)]
+73: struct SlidingEnergy {
+74:     values: Vec<f64>,
+75:     next: usize,
+76:     filled: usize,
+77:     sum: f64,
+78: }
+79: 
+80: impl SlidingEnergy {
+
+===== src/loudness.rs:84 =====
+76:     filled: usize,
+77:     sum: f64,
+78: }
+79: 
+80: impl SlidingEnergy {
+81:     fn new(window_frames: usize) -> Result<Self> {
+82:         if window_frames == 0 {
+83:             return Err(ReaPeaksError::InvalidArgument(
+84:                 "loudness window has zero frames",
+85:             ));
+86:         }
+87:         let bytes = window_frames
+88:             .checked_mul(std::mem::size_of::<f64>())
+89:             .filter(|&size| size <= isize::MAX as usize)
+90:             .ok_or(ReaPeaksError::InvalidArgument(
+91:                 "loudness window is too large",
+92:             ))?;
+
+===== src/loudness.rs:91 =====
+83:             return Err(ReaPeaksError::InvalidArgument(
+84:                 "loudness window has zero frames",
+85:             ));
+86:         }
+87:         let bytes = window_frames
+88:             .checked_mul(std::mem::size_of::<f64>())
+89:             .filter(|&size| size <= isize::MAX as usize)
+90:             .ok_or(ReaPeaksError::InvalidArgument(
+91:                 "loudness window is too large",
+92:             ))?;
+93:         let mut values = Vec::new();
+94:         values
+95:             .try_reserve_exact(bytes / std::mem::size_of::<f64>())
+96:             .map_err(|_| ReaPeaksError::InvalidArgument("loudness window allocation failed"))?;
+97:         values.resize(window_frames, 0.0);
+98:         Ok(Self {
+99:             values,
+
+===== src/loudness.rs:96 =====
+88:             .checked_mul(std::mem::size_of::<f64>())
+89:             .filter(|&size| size <= isize::MAX as usize)
+90:             .ok_or(ReaPeaksError::InvalidArgument(
+91:                 "loudness window is too large",
+92:             ))?;
+93:         let mut values = Vec::new();
+94:         values
+95:             .try_reserve_exact(bytes / std::mem::size_of::<f64>())
+96:             .map_err(|_| ReaPeaksError::InvalidArgument("loudness window allocation failed"))?;
+97:         values.resize(window_frames, 0.0);
+98:         Ok(Self {
+99:             values,
+100:             next: 0,
+101:             filled: 0,
+102:             sum: 0.0,
+103:         })
+104:     }
+
+===== src/loudness.rs:127 =====
+119:     }
+120: 
+121:     #[inline]
+122:     fn normalized(&self) -> f64 {
+123:         self.sum / self.values.len() as f64
+124:     }
+125: }
+126: 
+127: fn k_weighting_coefficients(sample_rate: u32) -> Result<(BiquadCoefficients, BiquadCoefficients)> {
+128:     if sample_rate < 16 {
+129:         return Err(ReaPeaksError::InvalidArgument(
+130:             "sample rate is too low for loudness filtering",
+131:         ));
+132:     }
+133: 
+134:     // Preserve the exact BS.1770 coefficients used by the REAPER 7.79
+135:     // 48 kHz oracle. The formula below produces the same coefficients within
+
+===== src/loudness.rs:130 =====
+122:     fn normalized(&self) -> f64 {
+123:         self.sum / self.values.len() as f64
+124:     }
+125: }
+126: 
+127: fn k_weighting_coefficients(sample_rate: u32) -> Result<(BiquadCoefficients, BiquadCoefficients)> {
+128:     if sample_rate < 16 {
+129:         return Err(ReaPeaksError::InvalidArgument(
+130:             "sample rate is too low for loudness filtering",
+131:         ));
+132:     }
+133: 
+134:     // Preserve the exact BS.1770 coefficients used by the REAPER 7.79
+135:     // 48 kHz oracle. The formula below produces the same coefficients within
+136:     // floating-point rounding, but spelling these constants explicitly keeps
+137:     // the byte-exact path independent of platform libm details.
+138:     if sample_rate == 48_000 {
+
+===== src/loudness.rs:189 =====
+181:         b2: 1.0,
+182:         a1: 2.0 * (high_pass_k * high_pass_k - 1.0) / high_pass_a0,
+183:         a2: (1.0 - high_pass_k / high_pass_q + high_pass_k * high_pass_k) / high_pass_a0,
+184:     };
+185: 
+186:     Ok((pre_filter, rlb_filter))
+187: }
+188: 
+189: fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+
+===== src/loudness.rs:191 =====
+183:         a2: (1.0 - high_pass_k / high_pass_q + high_pass_k * high_pass_k) / high_pass_a0,
+184:     };
+185: 
+186:     Ok((pre_filter, rlb_filter))
+187: }
+188: 
+189: fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+
+===== src/loudness.rs:192 =====
+184:     };
+185: 
+186:     Ok((pre_filter, rlb_filter))
+187: }
+188: 
+189: fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+
+===== src/loudness.rs:195 =====
+187: }
+188: 
+189: fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+
+===== src/loudness.rs:197 =====
+189: fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+
+===== src/loudness.rs:198 =====
+190:     let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
+191:     let momentary = samples_in_100ms
+192:         .checked_mul(MOMENTARY_BLOCKS_100MS as u64)
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+
+===== src/loudness.rs:201 =====
+193:         .and_then(|value| usize::try_from(value).ok())
+194:         .ok_or(ReaPeaksError::InvalidArgument(
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+
+===== src/loudness.rs:203 =====
+195:             "momentary loudness window is too large",
+196:         ))?;
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+210: 
+211: fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
+
+===== src/loudness.rs:205 =====
+197:     let short_term = samples_in_100ms
+198:         .checked_mul(SHORT_TERM_BLOCKS_100MS as u64)
+199:         .and_then(|value| usize::try_from(value).ok())
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+210: 
+211: fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
+212:     if channels == 0 || records.len() % channels != 0 {
+213:         return Err(ReaPeaksError::InvalidArgument(
+
+===== src/loudness.rs:208 =====
+200:         .ok_or(ReaPeaksError::InvalidArgument(
+201:             "short-term loudness window is too large",
+202:         ))?;
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+210: 
+211: fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
+212:     if channels == 0 || records.len() % channels != 0 {
+213:         return Err(ReaPeaksError::InvalidArgument(
+214:             "invalid loudness channel layout",
+215:         ));
+216:     }
+
+===== src/loudness.rs:211 =====
+203:     if momentary == 0 || short_term == 0 {
+204:         return Err(ReaPeaksError::InvalidArgument(
+205:             "loudness window has zero frames",
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+210: 
+211: fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
+212:     if channels == 0 || records.len() % channels != 0 {
+213:         return Err(ReaPeaksError::InvalidArgument(
+214:             "invalid loudness channel layout",
+215:         ));
+216:     }
+217:     let record_count = records.len() / channels;
+218:     let peak_count = record_count
+219:         .checked_mul(2)
+
+===== src/loudness.rs:214 =====
+206:         ));
+207:     }
+208:     Ok((momentary, short_term))
+209: }
+210: 
+211: fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<GeneratedLayer> {
+212:     if channels == 0 || records.len() % channels != 0 {
+213:         return Err(ReaPeaksError::InvalidArgument(
+214:             "invalid loudness channel layout",
+215:         ));
+216:     }
+217:     let record_count = records.len() / channels;
+218:     let peak_count = record_count
+219:         .checked_mul(2)
+220:         .and_then(|value| u32::try_from(value).ok())
+221:         .ok_or(ReaPeaksError::InvalidArgument(
+222:             "loudness peak count exceeds u32",
+
+===== src/loudness.rs:222 =====
+214:             "invalid loudness channel layout",
+215:         ));
+216:     }
+217:     let record_count = records.len() / channels;
+218:     let peak_count = record_count
+219:         .checked_mul(2)
+220:         .and_then(|value| u32::try_from(value).ok())
+221:         .ok_or(ReaPeaksError::InvalidArgument(
+222:             "loudness peak count exceeds u32",
+223:         ))?;
+224:     let capacity = records
+225:         .len()
+226:         .checked_mul(8)
+227:         .filter(|&size| size <= isize::MAX as usize)
+228:         .ok_or(ReaPeaksError::InvalidArgument(
+229:             "loudness payload is too large",
+230:         ))?;
+
+===== src/loudness.rs:229 =====
+221:         .ok_or(ReaPeaksError::InvalidArgument(
+222:             "loudness peak count exceeds u32",
+223:         ))?;
+224:     let capacity = records
+225:         .len()
+226:         .checked_mul(8)
+227:         .filter(|&size| size <= isize::MAX as usize)
+228:         .ok_or(ReaPeaksError::InvalidArgument(
+229:             "loudness payload is too large",
+230:         ))?;
+231:     let mut bytes = Vec::with_capacity(capacity);
+232:     for peak in records {
+233:         bytes.extend_from_slice(&peak.momentary_energy.to_le_bytes());
+234:         bytes.extend_from_slice(&peak.short_term_energy.to_le_bytes());
+235:     }
+236:     Ok(GeneratedLayer {
+237:         header: LayerHeader {
+
+===== src/loudness.rs:233 =====
+225:         .len()
+226:         .checked_mul(8)
+227:         .filter(|&size| size <= isize::MAX as usize)
+228:         .ok_or(ReaPeaksError::InvalidArgument(
+229:             "loudness payload is too large",
+230:         ))?;
+231:     let mut bytes = Vec::with_capacity(capacity);
+232:     for peak in records {
+233:         bytes.extend_from_slice(&peak.momentary_energy.to_le_bytes());
+234:         bytes.extend_from_slice(&peak.short_term_energy.to_le_bytes());
+235:     }
+236:     Ok(GeneratedLayer {
+237:         header: LayerHeader {
+238:             division: TOKEN_LOUDNESS,
+239:             peak_count,
+240:         },
+241:         bytes,
+
+===== src/loudness.rs:234 =====
+226:         .checked_mul(8)
+227:         .filter(|&size| size <= isize::MAX as usize)
+228:         .ok_or(ReaPeaksError::InvalidArgument(
+229:             "loudness payload is too large",
+230:         ))?;
+231:     let mut bytes = Vec::with_capacity(capacity);
+232:     for peak in records {
+233:         bytes.extend_from_slice(&peak.momentary_energy.to_le_bytes());
+234:         bytes.extend_from_slice(&peak.short_term_energy.to_le_bytes());
+235:     }
+236:     Ok(GeneratedLayer {
+237:         header: LayerHeader {
+238:             division: TOKEN_LOUDNESS,
+239:             peak_count,
+240:         },
+241:         bytes,
+242:     })
+
+===== src/loudness.rs:238 =====
+230:         ))?;
+231:     let mut bytes = Vec::with_capacity(capacity);
+232:     for peak in records {
+233:         bytes.extend_from_slice(&peak.momentary_energy.to_le_bytes());
+234:         bytes.extend_from_slice(&peak.short_term_energy.to_le_bytes());
+235:     }
+236:     Ok(GeneratedLayer {
+237:         header: LayerHeader {
+238:             division: TOKEN_LOUDNESS,
+239:             peak_count,
+240:         },
+241:         bytes,
+242:     })
+243: }
+244: 
+245: fn build_loudness_layers<F>(
+246:     frames: usize,
+
+===== src/loudness.rs:245 =====
+237:         header: LayerHeader {
+238:             division: TOKEN_LOUDNESS,
+239:             peak_count,
+240:         },
+241:         bytes,
+242:     })
+243: }
+244: 
+245: fn build_loudness_layers<F>(
+246:     frames: usize,
+247:     channels: usize,
+248:     sample_rate: u32,
+249:     divisions: &[u32],
+250:     sample: F,
+251: ) -> Result<Vec<GeneratedLayer>>
+252: where
+253:     F: Fn(usize) -> f64,
+
+===== src/loudness.rs:260 =====
+252: where
+253:     F: Fn(usize) -> f64,
+254: {
+255:     if channels == 0 {
+256:         return Err(ReaPeaksError::InvalidArgument("channels=0"));
+257:     }
+258:     if divisions.len() < 2 {
+259:         return Err(ReaPeaksError::InvalidArgument(
+260:             "mode-3 loudness requires at least two waveform divisions",
+261:         ));
+262:     }
+263:     if divisions.iter().any(|&division| division == 0) {
+264:         return Err(ReaPeaksError::InvalidArgument("division=0"));
+265:     }
+266: 
+267:     let base_division = divisions[1] as usize;
+268:     for pair in divisions[1..].windows(2) {
+
+===== src/loudness.rs:271 =====
+263:     if divisions.iter().any(|&division| division == 0) {
+264:         return Err(ReaPeaksError::InvalidArgument("division=0"));
+265:     }
+266: 
+267:     let base_division = divisions[1] as usize;
+268:     for pair in divisions[1..].windows(2) {
+269:         if pair[1] <= pair[0] || pair[1] % pair[0] != 0 {
+270:             return Err(ReaPeaksError::InvalidArgument(
+271:                 "loudness divisions must be increasing nested multiples",
+272:             ));
+273:         }
+274:     }
+275: 
+276:     let base_record_count = frames.div_ceil(base_division);
+277:     let base_value_count =
+278:         base_record_count
+279:             .checked_mul(channels)
+
+===== src/loudness.rs:281 =====
+273:         }
+274:     }
+275: 
+276:     let base_record_count = frames.div_ceil(base_division);
+277:     let base_value_count =
+278:         base_record_count
+279:             .checked_mul(channels)
+280:             .ok_or(ReaPeaksError::InvalidArgument(
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+
+===== src/loudness.rs:283 =====
+275: 
+276:     let base_record_count = frames.div_ceil(base_division);
+277:     let base_value_count =
+278:         base_record_count
+279:             .checked_mul(channels)
+280:             .ok_or(ReaPeaksError::InvalidArgument(
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+
+===== src/loudness.rs:284 =====
+276:     let base_record_count = frames.div_ceil(base_division);
+277:     let base_value_count =
+278:         base_record_count
+279:             .checked_mul(channels)
+280:             .ok_or(ReaPeaksError::InvalidArgument(
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+
+===== src/loudness.rs:287 =====
+279:             .checked_mul(channels)
+280:             .ok_or(ReaPeaksError::InvalidArgument(
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+
+===== src/loudness.rs:288 =====
+280:             .ok_or(ReaPeaksError::InvalidArgument(
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+
+===== src/loudness.rs:289 =====
+281:                 "loudness record count overflow",
+282:             ))?;
+283:     let mut base_records = vec![LoudnessPeak::default(); base_value_count];
+284:     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
+285: 
+286:     for channel in 0..channels {
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+
+===== src/loudness.rs:295 =====
+287:         let mut filter = KWeightingFilter::new(sample_rate)?;
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+298:             let completed_frame = frame + 1;
+299:             if completed_frame % base_division == 0 || completed_frame == frames {
+300:                 base_records[record_index * channels + channel] = LoudnessPeak {
+301:                     momentary_energy: momentary.normalized() as f32,
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+
+===== src/loudness.rs:296 =====
+288:         let mut momentary = SlidingEnergy::new(momentary_window)?;
+289:         let mut short_term = SlidingEnergy::new(short_term_window)?;
+290:         let mut record_index = 0usize;
+291: 
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+298:             let completed_frame = frame + 1;
+299:             if completed_frame % base_division == 0 || completed_frame == frames {
+300:                 base_records[record_index * channels + channel] = LoudnessPeak {
+301:                     momentary_energy: momentary.normalized() as f32,
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+304:                 record_index += 1;
+
+===== src/loudness.rs:300 =====
+292:         for frame in 0..frames {
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+298:             let completed_frame = frame + 1;
+299:             if completed_frame % base_division == 0 || completed_frame == frames {
+300:                 base_records[record_index * channels + channel] = LoudnessPeak {
+301:                     momentary_energy: momentary.normalized() as f32,
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+304:                 record_index += 1;
+305:             }
+306:         }
+307: 
+308:         if record_index != base_record_count {
+
+===== src/loudness.rs:301 =====
+293:             let filtered = filter.process(sample(frame * channels + channel));
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+298:             let completed_frame = frame + 1;
+299:             if completed_frame % base_division == 0 || completed_frame == frames {
+300:                 base_records[record_index * channels + channel] = LoudnessPeak {
+301:                     momentary_energy: momentary.normalized() as f32,
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+304:                 record_index += 1;
+305:             }
+306:         }
+307: 
+308:         if record_index != base_record_count {
+309:             return Err(ReaPeaksError::InvalidArgument(
+
+===== src/loudness.rs:302 =====
+294:             let energy = filtered * filtered;
+295:             momentary.push(energy);
+296:             short_term.push(energy);
+297: 
+298:             let completed_frame = frame + 1;
+299:             if completed_frame % base_division == 0 || completed_frame == frames {
+300:                 base_records[record_index * channels + channel] = LoudnessPeak {
+301:                     momentary_energy: momentary.normalized() as f32,
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+304:                 record_index += 1;
+305:             }
+306:         }
+307: 
+308:         if record_index != base_record_count {
+309:             return Err(ReaPeaksError::InvalidArgument(
+310:                 "loudness record count mismatch",
+
+===== src/loudness.rs:310 =====
+302:                     short_term_energy: short_term.normalized() as f32,
+303:                 };
+304:                 record_index += 1;
+305:             }
+306:         }
+307: 
+308:         if record_index != base_record_count {
+309:             return Err(ReaPeaksError::InvalidArgument(
+310:                 "loudness record count mismatch",
+311:             ));
+312:         }
+313:     }
+314: 
+315:     let mut layers = Vec::with_capacity(divisions.len() - 1);
+316:     layers.push(encode_loudness_layer(&base_records, channels)?);
+317: 
+318:     for &division in divisions.iter().skip(2) {
+
+===== src/loudness.rs:316 =====
+308:         if record_index != base_record_count {
+309:             return Err(ReaPeaksError::InvalidArgument(
+310:                 "loudness record count mismatch",
+311:             ));
+312:         }
+313:     }
+314: 
+315:     let mut layers = Vec::with_capacity(divisions.len() - 1);
+316:     layers.push(encode_loudness_layer(&base_records, channels)?);
+317: 
+318:     for &division in divisions.iter().skip(2) {
+319:         let group = usize::try_from(division / divisions[1])
+320:             .map_err(|_| ReaPeaksError::InvalidArgument("loudness group is too large"))?;
+321:         if group == 0 || division % divisions[1] != 0 {
+322:             return Err(ReaPeaksError::InvalidArgument(
+323:                 "loudness divisions must be nested multiples",
+324:             ));
+
+===== src/loudness.rs:320 =====
+312:         }
+313:     }
+314: 
+315:     let mut layers = Vec::with_capacity(divisions.len() - 1);
+316:     layers.push(encode_loudness_layer(&base_records, channels)?);
+317: 
+318:     for &division in divisions.iter().skip(2) {
+319:         let group = usize::try_from(division / divisions[1])
+320:             .map_err(|_| ReaPeaksError::InvalidArgument("loudness group is too large"))?;
+321:         if group == 0 || division % divisions[1] != 0 {
+322:             return Err(ReaPeaksError::InvalidArgument(
+323:                 "loudness divisions must be nested multiples",
+324:             ));
+325:         }
+326:         let division_usize = usize::try_from(division)
+327:             .map_err(|_| ReaPeaksError::InvalidArgument("division is too large"))?;
+328:         let record_count = frames.div_ceil(division_usize);
+
+===== src/loudness.rs:323 =====
+315:     let mut layers = Vec::with_capacity(divisions.len() - 1);
+316:     layers.push(encode_loudness_layer(&base_records, channels)?);
+317: 
+318:     for &division in divisions.iter().skip(2) {
+319:         let group = usize::try_from(division / divisions[1])
+320:             .map_err(|_| ReaPeaksError::InvalidArgument("loudness group is too large"))?;
+321:         if group == 0 || division % divisions[1] != 0 {
+322:             return Err(ReaPeaksError::InvalidArgument(
+323:                 "loudness divisions must be nested multiples",
+324:             ));
+325:         }
+326:         let division_usize = usize::try_from(division)
+327:             .map_err(|_| ReaPeaksError::InvalidArgument("division is too large"))?;
+328:         let record_count = frames.div_ceil(division_usize);
+329:         let value_count =
+330:             record_count
+331:                 .checked_mul(channels)
+
+===== src/loudness.rs:333 =====
+325:         }
+326:         let division_usize = usize::try_from(division)
+327:             .map_err(|_| ReaPeaksError::InvalidArgument("division is too large"))?;
+328:         let record_count = frames.div_ceil(division_usize);
+329:         let value_count =
+330:             record_count
+331:                 .checked_mul(channels)
+332:                 .ok_or(ReaPeaksError::InvalidArgument(
+333:                     "loudness record count overflow",
+334:                 ))?;
+335:         let mut records = Vec::with_capacity(value_count);
+336: 
+337:         for record_index in 0..record_count {
+338:             let start = record_index
+339:                 .checked_mul(group)
+340:                 .ok_or(ReaPeaksError::InvalidArgument(
+341:                     "loudness group offset overflow",
+
+===== src/loudness.rs:341 =====
+333:                     "loudness record count overflow",
+334:                 ))?;
+335:         let mut records = Vec::with_capacity(value_count);
+336: 
+337:         for record_index in 0..record_count {
+338:             let start = record_index
+339:                 .checked_mul(group)
+340:                 .ok_or(ReaPeaksError::InvalidArgument(
+341:                     "loudness group offset overflow",
+342:                 ))?;
+343:             let end = start.saturating_add(group).min(base_record_count);
+344:             if start >= end {
+345:                 return Err(ReaPeaksError::InvalidArgument(
+346:                     "empty loudness aggregation group",
+347:                 ));
+348:             }
+349:             let divisor = (end - start) as f64;
+
+===== src/loudness.rs:346 =====
+338:             let start = record_index
+339:                 .checked_mul(group)
+340:                 .ok_or(ReaPeaksError::InvalidArgument(
+341:                     "loudness group offset overflow",
+342:                 ))?;
+343:             let end = start.saturating_add(group).min(base_record_count);
+344:             if start >= end {
+345:                 return Err(ReaPeaksError::InvalidArgument(
+346:                     "empty loudness aggregation group",
+347:                 ));
+348:             }
+349:             let divisor = (end - start) as f64;
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+
+===== src/loudness.rs:351 =====
+343:             let end = start.saturating_add(group).min(base_record_count);
+344:             if start >= end {
+345:                 return Err(ReaPeaksError::InvalidArgument(
+346:                     "empty loudness aggregation group",
+347:                 ));
+348:             }
+349:             let divisor = (end - start) as f64;
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+
+===== src/loudness.rs:352 =====
+344:             if start >= end {
+345:                 return Err(ReaPeaksError::InvalidArgument(
+346:                     "empty loudness aggregation group",
+347:                 ));
+348:             }
+349:             let divisor = (end - start) as f64;
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+
+===== src/loudness.rs:355 =====
+347:                 ));
+348:             }
+349:             let divisor = (end - start) as f64;
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+
+===== src/loudness.rs:356 =====
+348:             }
+349:             let divisor = (end - start) as f64;
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+364: 
+
+===== src/loudness.rs:358 =====
+350:             for channel in 0..channels {
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+364: 
+365:         layers.push(encode_loudness_layer(&records, channels)?);
+366:     }
+
+===== src/loudness.rs:359 =====
+351:                 let mut momentary_sum = 0.0f64;
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+364: 
+365:         layers.push(encode_loudness_layer(&records, channels)?);
+366:     }
+367: 
+
+===== src/loudness.rs:360 =====
+352:                 let mut short_term_sum = 0.0f64;
+353:                 for base_index in start..end {
+354:                     let peak = base_records[base_index * channels + channel];
+355:                     momentary_sum += f64::from(peak.momentary_energy);
+356:                     short_term_sum += f64::from(peak.short_term_energy);
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+364: 
+365:         layers.push(encode_loudness_layer(&records, channels)?);
+366:     }
+367: 
+368:     Ok(layers)
+
+===== src/loudness.rs:365 =====
+357:                 }
+358:                 records.push(LoudnessPeak {
+359:                     momentary_energy: (momentary_sum / divisor) as f32,
+360:                     short_term_energy: (short_term_sum / divisor) as f32,
+361:                 });
+362:             }
+363:         }
+364: 
+365:         layers.push(encode_loudness_layer(&records, channels)?);
+366:     }
+367: 
+368:     Ok(layers)
+369: }
+370: 
+371: pub fn build_loudness_layers_pcm16(
+372:     pcm: &[i16],
+373:     frames: usize,
+
+===== src/loudness.rs:371 =====
+363:         }
+364: 
+365:         layers.push(encode_loudness_layer(&records, channels)?);
+366:     }
+367: 
+368:     Ok(layers)
+369: }
+370: 
+371: pub fn build_loudness_layers_pcm16(
+372:     pcm: &[i16],
+373:     frames: usize,
+374:     channels: usize,
+375:     sample_rate: u32,
+376:     divisions: &[u32],
+377: ) -> Result<Vec<GeneratedLayer>> {
+378:     let required = frames
+379:         .checked_mul(channels)
+
+===== src/loudness.rs:386 =====
+378:     let required = frames
+379:         .checked_mul(channels)
+380:         .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+381:     if pcm.len() < required {
+382:         return Err(ReaPeaksError::InvalidArgument(
+383:             "PCM buffer shorter than frames*channels",
+384:         ));
+385:     }
+386:     build_loudness_layers(frames, channels, sample_rate, divisions, |index| {
+387:         f64::from(pcm[index]) / 32_768.0
+388:     })
+389: }
+390: 
+391: pub fn build_loudness_layers_f32(
+392:     pcm: &[f32],
+393:     frames: usize,
+394:     channels: usize,
+
+===== src/loudness.rs:391 =====
+383:             "PCM buffer shorter than frames*channels",
+384:         ));
+385:     }
+386:     build_loudness_layers(frames, channels, sample_rate, divisions, |index| {
+387:         f64::from(pcm[index]) / 32_768.0
+388:     })
+389: }
+390: 
+391: pub fn build_loudness_layers_f32(
+392:     pcm: &[f32],
+393:     frames: usize,
+394:     channels: usize,
+395:     sample_rate: u32,
+396:     divisions: &[u32],
+397: ) -> Result<Vec<GeneratedLayer>> {
+398:     let required = frames
+399:         .checked_mul(channels)
+
+===== src/loudness.rs:406 =====
+398:     let required = frames
+399:         .checked_mul(channels)
+400:         .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+401:     if pcm.len() < required {
+402:         return Err(ReaPeaksError::InvalidArgument(
+403:             "PCM buffer shorter than frames*channels",
+404:         ));
+405:     }
+406:     build_loudness_layers(frames, channels, sample_rate, divisions, |index| {
+407:         f64::from(pcm[index])
+408:     })
+409: }
+410: 
+411: #[cfg(test)]
+412: mod tests {
+413:     use super::*;
+414: 
+
+===== src/loudness.rs:425 =====
+417:         for &byte in bytes {
+418:             hash ^= u64::from(byte);
+419:             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+420:         }
+421:         hash
+422:     }
+423: 
+424:     #[test]
+425:     fn reaper779_sine997_loudness_payload_is_byte_exact() {
+426:         let sample_rate = 48_000usize;
+427:         let frames = sample_rate * 3;
+428:         let mut pcm = Vec::with_capacity(frames * 2);
+429:         for frame in 0..frames {
+430:             let phase = 2.0 * PI * 997.0 * frame as f64 / sample_rate as f64;
+431:             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
+432:             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
+433:         }
+
+===== src/loudness.rs:435 =====
+427:         let frames = sample_rate * 3;
+428:         let mut pcm = Vec::with_capacity(frames * 2);
+429:         for frame in 0..frames {
+430:             let phase = 2.0 * PI * 997.0 * frame as f64 / sample_rate as f64;
+431:             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
+432:             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
+433:         }
+434: 
+435:         let layers = build_loudness_layers_pcm16(&pcm, frames, 2, 48_000, &[160, 2_400, 48_000])
+436:             .expect("loudness generation");
+437:         assert_eq!(layers.len(), 2);
+438:         assert_eq!(layers[0].header.peak_count, 120);
+439:         assert_eq!(layers[0].bytes.len(), 960);
+440:         assert_eq!(fnv64(&layers[0].bytes), 0x0db3_2799_c4f9_f411);
+441:         assert_eq!(layers[1].header.peak_count, 6);
+442:         assert_eq!(layers[1].bytes.len(), 48);
+443:         assert_eq!(fnv64(&layers[1].bytes), 0xbd0f_e30e_9f89_cef0);
+
+===== src/loudness.rs:436 =====
+428:         let mut pcm = Vec::with_capacity(frames * 2);
+429:         for frame in 0..frames {
+430:             let phase = 2.0 * PI * 997.0 * frame as f64 / sample_rate as f64;
+431:             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
+432:             pcm.push((0.25 * 32_767.0 * phase.sin()).round() as i16);
+433:         }
+434: 
+435:         let layers = build_loudness_layers_pcm16(&pcm, frames, 2, 48_000, &[160, 2_400, 48_000])
+436:             .expect("loudness generation");
+437:         assert_eq!(layers.len(), 2);
+438:         assert_eq!(layers[0].header.peak_count, 120);
+439:         assert_eq!(layers[0].bytes.len(), 960);
+440:         assert_eq!(fnv64(&layers[0].bytes), 0x0db3_2799_c4f9_f411);
+441:         assert_eq!(layers[1].header.peak_count, 6);
+442:         assert_eq!(layers[1].bytes.len(), 48);
+443:         assert_eq!(fnv64(&layers[1].bytes), 0xbd0f_e30e_9f89_cef0);
+444:     }
+
+===== src/loudness.rs:447 =====
+439:         assert_eq!(layers[0].bytes.len(), 960);
+440:         assert_eq!(fnv64(&layers[0].bytes), 0x0db3_2799_c4f9_f411);
+441:         assert_eq!(layers[1].header.peak_count, 6);
+442:         assert_eq!(layers[1].bytes.len(), 48);
+443:         assert_eq!(fnv64(&layers[1].bytes), 0xbd0f_e30e_9f89_cef0);
+444:     }
+445: 
+446:     #[test]
+447:     fn rejects_non_nested_loudness_divisions() {
+448:         let pcm = vec![0i16; 48_000];
+449:         assert!(
+450:             build_loudness_layers_pcm16(&pcm, 48_000, 1, 48_000, &[160, 2_400, 47_999],).is_err()
+451:         );
+452:     }
+453: }
+
+===== src/loudness.rs:450 =====
+442:         assert_eq!(layers[1].bytes.len(), 48);
+443:         assert_eq!(fnv64(&layers[1].bytes), 0xbd0f_e30e_9f89_cef0);
+444:     }
+445: 
+446:     #[test]
+447:     fn rejects_non_nested_loudness_divisions() {
+448:         let pcm = vec![0i16; 48_000];
+449:         assert!(
+450:             build_loudness_layers_pcm16(&pcm, 48_000, 1, 48_000, &[160, 2_400, 47_999],).is_err()
+451:         );
+452:     }
+453: }
+
+===== src/pyramid.rs:4 =====
+1: use crate::format::{ReaPeaks, WaveLayer};
+2: use crate::wave::{PeakPair, WaveEncoding};
+3: 
+4: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+5: pub struct WaveLevelMeta {
+6:     pub division: u64,
+7:     pub peak_count: usize,
+8:     pub native: bool,
+9: }
+10: 
+11: #[derive(Debug, Clone)]
+12: struct NativeWaveLevel {
+
+===== src/pyramid.rs:11 =====
+3: 
+4: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+5: pub struct WaveLevelMeta {
+6:     pub division: u64,
+7:     pub peak_count: usize,
+8:     pub native: bool,
+9: }
+10: 
+11: #[derive(Debug, Clone)]
+12: struct NativeWaveLevel {
+13:     division: u64,
+14:     peaks: Vec<PeakPair>, // [peak][channel]
+15: }
+16: 
+17: #[derive(Debug, Clone, Copy)]
+18: enum LevelSource {
+19:     Native { native_index: usize },
+
+===== src/pyramid.rs:17 =====
+9: }
+10: 
+11: #[derive(Debug, Clone)]
+12: struct NativeWaveLevel {
+13:     division: u64,
+14:     peaks: Vec<PeakPair>, // [peak][channel]
+15: }
+16: 
+17: #[derive(Debug, Clone, Copy)]
+18: enum LevelSource {
+19:     Native { native_index: usize },
+20:     DerivedFromFine { factor: usize },
+21: }
+22: 
+23: #[derive(Debug, Clone, Copy, PartialEq)]
+24: pub struct WaveViewPlan {
+25:     pub level_index: usize,
+
+===== src/pyramid.rs:23 =====
+15: }
+16: 
+17: #[derive(Debug, Clone, Copy)]
+18: enum LevelSource {
+19:     Native { native_index: usize },
+20:     DerivedFromFine { factor: usize },
+21: }
+22: 
+23: #[derive(Debug, Clone, Copy, PartialEq)]
+24: pub struct WaveViewPlan {
+25:     pub level_index: usize,
+26:     pub division: u64,
+27:     pub first_peak: usize,
+28:     pub peak_count: usize,
+29:     pub peaks_per_pixel: f64,
+30: }
+31: 
+
+===== src/pyramid.rs:33 =====
+25:     pub level_index: usize,
+26:     pub division: u64,
+27:     pub first_peak: usize,
+28:     pub peak_count: usize,
+29:     pub peaks_per_pixel: f64,
+30: }
+31: 
+32: /// Stable cache key for GUI-side CPU/GPU LRU caches.
+33: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+34: pub struct WaveTileKey {
+35:     pub level_index: u16,
+36:     pub tile_index: u64,
+37: }
+38: 
+39: #[derive(Debug, Clone)]
+40: pub struct WaveTile {
+41:     pub key: WaveTileKey,
+
+===== src/pyramid.rs:39 =====
+31: 
+32: /// Stable cache key for GUI-side CPU/GPU LRU caches.
+33: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+34: pub struct WaveTileKey {
+35:     pub level_index: u16,
+36:     pub tile_index: u64,
+37: }
+38: 
+39: #[derive(Debug, Clone)]
+40: pub struct WaveTile {
+41:     pub key: WaveTileKey,
+42:     pub first_peak: usize,
+43:     pub peak_count: usize,
+44:     pub peaks: Vec<PeakPair>, // [peak][channel]
+45: }
+46: 
+47: /// Multiresolution waveform index optimized for GUI zooming.
+
+===== src/pyramid.rs:56 =====
+48: ///
+49: /// Native REAPER mipmaps are kept exactly. Additional geometric display levels
+50: /// are metadata-only: their peaks are aggregated lazily from the finest native
+51: /// level per requested range/tile. This avoids the ~33% RAM overhead of an
+52: /// eagerly materialized ratio-4 pyramid while giving smooth zoom transitions.
+53: ///
+54: /// Tiles are fixed at 4096 peaks by default. Frontends can use WaveTileKey as a
+55: /// stable identity for an LRU of CPU buffers or GPU textures.
+56: #[derive(Debug, Clone)]
+57: pub struct WavePyramid {
+58:     pub channels: usize,
+59:     pub source_frames: u64,
+60:     pub encoding: WaveEncoding,
+61:     pub levels: Vec<WaveLevelMeta>,
+62:     pub tile_peaks: usize,
+63:     native_levels: Vec<NativeWaveLevel>,
+64:     sources: Vec<LevelSource>,
+
+===== src/spectral.rs:9 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
+3: use std::f64::consts::PI;
+4: 
+5: const ANALYSIS_RATE: f64 = 22_050.0;
+6: const FFT_N: usize = 1024;
+7: const HALF_BINS: usize = 512;
+8: 
+9: #[derive(Debug, Clone, Copy, Default)]
+10: struct C64 {
+11:     re: f64,
+12:     im: f64,
+13: }
+14: 
+15: #[derive(Debug, Clone, Copy, Default)]
+16: struct C32 {
+17:     re: f32,
+
+===== src/spectral.rs:15 =====
+7: const HALF_BINS: usize = 512;
+8: 
+9: #[derive(Debug, Clone, Copy, Default)]
+10: struct C64 {
+11:     re: f64,
+12:     im: f64,
+13: }
+14: 
+15: #[derive(Debug, Clone, Copy, Default)]
+16: struct C32 {
+17:     re: f32,
+18:     im: f32,
+19: }
+20: 
+21: #[inline]
+22: fn wrap_phase(mut x: f64) -> f64 {
+23:     x %= 2.0;
+
+===== src/spectral.rs:32 =====
+24:     if x <= -1.0 {
+25:         x += 2.0;
+26:     } else if x > 1.0 {
+27:         x -= 2.0;
+28:     }
+29:     x
+30: }
+31: 
+32: #[cfg(not(feature = "strict-wdl"))]
+33: fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
+34:     let mut a = [C64::default(); FFT_N];
+35:     for (dst, &x) in a.iter_mut().zip(input.iter()) {
+36:         dst.re = x;
+37:     }
+38: 
+39:     let mut j = 0usize;
+40:     for i in 1..FFT_N {
+
+===== src/spectral.rs:87 =====
+79:                 };
+80:             }
+81:         }
+82:         len <<= 1;
+83:     }
+84:     a
+85: }
+86: 
+87: #[cfg(feature = "strict-wdl")]
+88: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+89:     unsafe extern "C" {
+90:         fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+91:     }
+92:     let mut re = [0.0f64; HALF_BINS + 1];
+93:     let mut im = [0.0f64; HALF_BINS + 1];
+94:     let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+95:     assert_eq!(rc, 0, "WDL FFT bridge failed");
+
+===== src/spectral.rs:90 =====
+82:         len <<= 1;
+83:     }
+84:     a
+85: }
+86: 
+87: #[cfg(feature = "strict-wdl")]
+88: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+89:     unsafe extern "C" {
+90:         fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+91:     }
+92:     let mut re = [0.0f64; HALF_BINS + 1];
+93:     let mut im = [0.0f64; HALF_BINS + 1];
+94:     let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+95:     assert_eq!(rc, 0, "WDL FFT bridge failed");
+96:     let mut out = [C64::default(); HALF_BINS + 1];
+97:     for k in 0..=HALF_BINS {
+98:         out[k] = C64 {
+
+===== src/spectral.rs:94 =====
+86: 
+87: #[cfg(feature = "strict-wdl")]
+88: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+89:     unsafe extern "C" {
+90:         fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+91:     }
+92:     let mut re = [0.0f64; HALF_BINS + 1];
+93:     let mut im = [0.0f64; HALF_BINS + 1];
+94:     let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+95:     assert_eq!(rc, 0, "WDL FFT bridge failed");
+96:     let mut out = [C64::default(); HALF_BINS + 1];
+97:     for k in 0..=HALF_BINS {
+98:         out[k] = C64 {
+99:             re: re[k],
+100:             im: im[k],
+101:         };
+102:     }
+
+===== src/spectral.rs:106 =====
+98:         out[k] = C64 {
+99:             re: re[k],
+100:             im: im[k],
+101:         };
+102:     }
+103:     out
+104: }
+105: 
+106: #[cfg(not(feature = "strict-wdl"))]
+107: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+108:     let full = fft_radix2(input);
+109:     let mut out = [C64::default(); HALF_BINS + 1];
+110:     out.copy_from_slice(&full[..=HALF_BINS]);
+111:     out
+112: }
+113: 
+114: #[cfg(not(feature = "strict-wdl"))]
+
+===== src/spectral.rs:114 =====
+106: #[cfg(not(feature = "strict-wdl"))]
+107: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+108:     let full = fft_radix2(input);
+109:     let mut out = [C64::default(); HALF_BINS + 1];
+110:     out.copy_from_slice(&full[..=HALF_BINS]);
+111:     out
+112: }
+113: 
+114: #[cfg(not(feature = "strict-wdl"))]
+115: fn apply_wdl_iir(interleaved: &mut [f64], frames: usize, channels: usize, ratio: f64) {
+116:     if ratio <= 1.0 || frames == 0 {
+117:         return;
+118:     }
+119:     // WDL_Resampler defaults are float constants, even when audio samples are
+120:     // double. Preserve that precision here.
+121:     let fpos2 = 0.693f32 as f64;
+122:     let q = 0.707f32 as f64;
+
+===== src/spectral.rs:115 =====
+107: fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+108:     let full = fft_radix2(input);
+109:     let mut out = [C64::default(); HALF_BINS + 1];
+110:     out.copy_from_slice(&full[..=HALF_BINS]);
+111:     out
+112: }
+113: 
+114: #[cfg(not(feature = "strict-wdl"))]
+115: fn apply_wdl_iir(interleaved: &mut [f64], frames: usize, channels: usize, ratio: f64) {
+116:     if ratio <= 1.0 || frames == 0 {
+117:         return;
+118:     }
+119:     // WDL_Resampler defaults are float constants, even when audio samples are
+120:     // double. Preserve that precision here.
+121:     let fpos2 = 0.693f32 as f64;
+122:     let q = 0.707f32 as f64;
+123:     let fpos = (1.0 / ratio) * fpos2;
+
+===== src/spectral.rs:119 =====
+111:     out
+112: }
+113: 
+114: #[cfg(not(feature = "strict-wdl"))]
+115: fn apply_wdl_iir(interleaved: &mut [f64], frames: usize, channels: usize, ratio: f64) {
+116:     if ratio <= 1.0 || frames == 0 {
+117:         return;
+118:     }
+119:     // WDL_Resampler defaults are float constants, even when audio samples are
+120:     // double. Preserve that precision here.
+121:     let fpos2 = 0.693f32 as f64;
+122:     let q = 0.707f32 as f64;
+123:     let fpos = (1.0 / ratio) * fpos2;
+124:     let pos = fpos * PI;
+125:     let cpos = pos.cos();
+126:     let spos = pos.sin();
+127:     let alpha = spos / (2.0 * q);
+
+===== src/spectral.rs:150 =====
+142:             h0 = x;
+143:             h3 = h2;
+144:             h2 = y;
+145:             interleaved[idx] = y;
+146:         }
+147:     }
+148: }
+149: 
+150: #[cfg(feature = "strict-wdl")]
+151: fn resample_to_analysis(
+152:     input: &[f64],
+153:     frames: usize,
+154:     channels: usize,
+155:     source_rate: u32,
+156: ) -> Vec<f64> {
+157:     unsafe extern "C" {
+158:         fn rpk_wdl_resample_all(
+
+===== src/spectral.rs:158 =====
+150: #[cfg(feature = "strict-wdl")]
+151: fn resample_to_analysis(
+152:     input: &[f64],
+153:     frames: usize,
+154:     channels: usize,
+155:     source_rate: u32,
+156: ) -> Vec<f64> {
+157:     unsafe extern "C" {
+158:         fn rpk_wdl_resample_all(
+159:             input: *const f64,
+160:             input_frames: i64,
+161:             channels: i32,
+162:             input_rate: f64,
+163:             output_rate: f64,
+164:             output: *mut f64,
+165:             output_capacity_frames: i64,
+166:         ) -> i64;
+
+===== src/spectral.rs:172 =====
+164:             output: *mut f64,
+165:             output_capacity_frames: i64,
+166:         ) -> i64;
+167:     }
+168:     let cap_frames =
+169:         ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize).saturating_add(4096);
+170:     let mut out = vec![0.0f64; cap_frames.saturating_mul(channels)];
+171:     let got = unsafe {
+172:         rpk_wdl_resample_all(
+173:             input.as_ptr(),
+174:             frames as i64,
+175:             channels as i32,
+176:             source_rate as f64,
+177:             ANALYSIS_RATE,
+178:             out.as_mut_ptr(),
+179:             cap_frames as i64,
+180:         )
+
+===== src/spectral.rs:189 =====
+181:     };
+182:     if got <= 0 {
+183:         return Vec::new();
+184:     }
+185:     out.truncate(got as usize * channels);
+186:     out
+187: }
+188: 
+189: #[cfg(not(feature = "strict-wdl"))]
+190: fn resample_to_analysis(
+191:     input: &[f64],
+192:     frames: usize,
+193:     channels: usize,
+194:     source_rate: u32,
+195: ) -> Vec<f64> {
+196:     let ratio = source_rate as f64 / ANALYSIS_RATE;
+197:     let mut src = input[..frames * channels].to_vec();
+
+===== src/spectral.rs:198 =====
+190: fn resample_to_analysis(
+191:     input: &[f64],
+192:     frames: usize,
+193:     channels: usize,
+194:     source_rate: u32,
+195: ) -> Vec<f64> {
+196:     let ratio = source_rate as f64 / ANALYSIS_RATE;
+197:     let mut src = input[..frames * channels].to_vec();
+198:     apply_wdl_iir(&mut src, frames, channels, ratio);
+199:     if (ratio - 1.0).abs() < f64::EPSILON {
+200:         return src;
+201:     }
+202: 
+203:     let mut out = Vec::with_capacity(((frames as f64 / ratio) as usize + 4) * channels);
+204:     let mut p = 0.0f64;
+205:     loop {
+206:         let i = p as usize;
+
+===== src/spectral.rs:341 =====
+333:     if source.len() < frames.saturating_mul(channels) {
+334:         return Err(ReaPeaksError::InvalidArgument(
+335:             "PCM buffer shorter than frames*channels",
+336:         ));
+337:     }
+338: 
+339:     // Normal mode deliberately keeps the historical source-domain termination
+340:     // rule. Strict mode supplies REAPER's analysis-domain count here, without
+341:     // changing the source slice or the frame count seen by WDL_Resampler.
+342:     let expected = match expected_override {
+343:         Some(expected) => expected,
+344:         None => {
+345:             if frames <= 1024 {
+346:                 return Ok(Vec::new());
+347:             }
+348:             (frames - 1024) / division as usize
+349:         }
+
+===== src/spectral.rs:473 =====
+465:     channels: usize,
+466:     source_rate: u32,
+467:     division: u32,
+468: ) -> Result<Vec<SpectralPeak>> {
+469:     let source = source_from_f32(pcm, frames, channels)?;
+470:     build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+471: }
+472: 
+473: #[cfg(feature = "strict-wdl")]
+474: pub(crate) fn build_fine_spectral_with_expected(
+475:     pcm: &[i16],
+476:     frames: usize,
+477:     channels: usize,
+478:     source_rate: u32,
+479:     division: u32,
+480:     expected: usize,
+481: ) -> Result<Vec<SpectralPeak>> {
+
+===== src/spectral.rs:493 =====
+485:         frames,
+486:         channels,
+487:         source_rate,
+488:         division,
+489:         Some(expected),
+490:     )
+491: }
+492: 
+493: #[cfg(feature = "strict-wdl")]
+494: pub(crate) fn build_fine_spectral_f32_with_expected(
+495:     pcm: &[f32],
+496:     frames: usize,
+497:     channels: usize,
+498:     source_rate: u32,
+499:     division: u32,
+500:     expected: usize,
+501: ) -> Result<Vec<SpectralPeak>> {
+
+===== src/spectral_strict.rs:6 =====
+1: //! REAPER 7.79 strict compatibility shim for spectral generation.
+2: //!
+3: //! REAPER has a non-DSP quirk for source rates <= 22.05 kHz: it still emits
+4: //! spectral mipmap structures, but every spectral code is zero. Keep that
+5: //! behavior out of the normal implementation and intercept it only when the
+6: //! `strict-wdl` feature selects this module.
+7: //!
+8: //! REAPER's fine spectral scheduler is centered on the 22.05 kHz analysis
+9: //! domain with a 512-analysis-sample half-window. Strict mode overrides only
+10: //! the expected output count while leaving the original media length passed to
+11: //! WDL_Resampler untouched; declaring padded source frames changes WDL's edge
+12: //! response and therefore does not match REAPER.
+13: 
+14: use crate::error::{ReaPeaksError, Result};
+
+===== src/spectral_strict.rs:11 =====
+3: //! REAPER has a non-DSP quirk for source rates <= 22.05 kHz: it still emits
+4: //! spectral mipmap structures, but every spectral code is zero. Keep that
+5: //! behavior out of the normal implementation and intercept it only when the
+6: //! `strict-wdl` feature selects this module.
+7: //!
+8: //! REAPER's fine spectral scheduler is centered on the 22.05 kHz analysis
+9: //! domain with a 512-analysis-sample half-window. Strict mode overrides only
+10: //! the expected output count while leaving the original media length passed to
+11: //! WDL_Resampler untouched; declaring padded source frames changes WDL's edge
+12: //! response and therefore does not match REAPER.
+13: 
+14: use crate::error::{ReaPeaksError, Result};
+15: use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
+16: 
+17: const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
+18: const REAPER_ANALYSIS_RATE: u128 = 22_050;
+19: const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
+
+===== src/strict_wdl.cpp:22 =====
+14: namespace {
+15: 
+16: constexpr int kInvalidArgument = -1;
+17: constexpr int kProcessingFailure = -2;
+18: constexpr int kCppException = -3;
+19: constexpr int kMaxReaPeaksChannels = 255;
+20: 
+21: static_assert(
+22:     std::is_same<WDL_ResampleSample, double>::value,
+23:     "strict-wdl requires WDL_ResampleSample=double");
+24: 
+25: void rpk_wdl_fft_init_once() {
+26:     // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+27:     // filling its process-global twiddle/permutation tables. Concurrent first
+28:     // calls can therefore observe partially initialized tables. Strict mode is
+29:     // callable from parallel Rust/Python workers, so complete WDL's one-time
+30:     // initialization under C++'s thread-safe once primitive before any FFT.
+
+===== src/strict_wdl.cpp:23 =====
+15: 
+16: constexpr int kInvalidArgument = -1;
+17: constexpr int kProcessingFailure = -2;
+18: constexpr int kCppException = -3;
+19: constexpr int kMaxReaPeaksChannels = 255;
+20: 
+21: static_assert(
+22:     std::is_same<WDL_ResampleSample, double>::value,
+23:     "strict-wdl requires WDL_ResampleSample=double");
+24: 
+25: void rpk_wdl_fft_init_once() {
+26:     // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+27:     // filling its process-global twiddle/permutation tables. Concurrent first
+28:     // calls can therefore observe partially initialized tables. Strict mode is
+29:     // callable from parallel Rust/Python workers, so complete WDL's one-time
+30:     // initialization under C++'s thread-safe once primitive before any FFT.
+31:     static std::once_flag once;
+
+===== src/strict_wdl.cpp:25 =====
+17: constexpr int kProcessingFailure = -2;
+18: constexpr int kCppException = -3;
+19: constexpr int kMaxReaPeaksChannels = 255;
+20: 
+21: static_assert(
+22:     std::is_same<WDL_ResampleSample, double>::value,
+23:     "strict-wdl requires WDL_ResampleSample=double");
+24: 
+25: void rpk_wdl_fft_init_once() {
+26:     // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+27:     // filling its process-global twiddle/permutation tables. Concurrent first
+28:     // calls can therefore observe partially initialized tables. Strict mode is
+29:     // callable from parallel Rust/Python workers, so complete WDL's one-time
+30:     // initialization under C++'s thread-safe once primitive before any FFT.
+31:     static std::once_flag once;
+32:     std::call_once(once, [] { WDL_fft_init(); });
+33: }
+
+===== src/strict_wdl.cpp:26 =====
+18: constexpr int kCppException = -3;
+19: constexpr int kMaxReaPeaksChannels = 255;
+20: 
+21: static_assert(
+22:     std::is_same<WDL_ResampleSample, double>::value,
+23:     "strict-wdl requires WDL_ResampleSample=double");
+24: 
+25: void rpk_wdl_fft_init_once() {
+26:     // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+27:     // filling its process-global twiddle/permutation tables. Concurrent first
+28:     // calls can therefore observe partially initialized tables. Strict mode is
+29:     // callable from parallel Rust/Python workers, so complete WDL's one-time
+30:     // initialization under C++'s thread-safe once primitive before any FFT.
+31:     static std::once_flag once;
+32:     std::call_once(once, [] { WDL_fft_init(); });
+33: }
+34: 
+
+===== src/strict_wdl.cpp:32 =====
+24: 
+25: void rpk_wdl_fft_init_once() {
+26:     // WDL's WDL_fft_init() uses a plain static int guard and sets it before
+27:     // filling its process-global twiddle/permutation tables. Concurrent first
+28:     // calls can therefore observe partially initialized tables. Strict mode is
+29:     // callable from parallel Rust/Python workers, so complete WDL's one-time
+30:     // initialization under C++'s thread-safe once primitive before any FFT.
+31:     static std::once_flag once;
+32:     std::call_once(once, [] { WDL_fft_init(); });
+33: }
+34: 
+35: bool valid_interleaved_span(long long frames, int channels) noexcept {
+36:     if (frames < 0 || channels <= 0 || channels > kMaxReaPeaksChannels) {
+37:         return false;
+38:     }
+39: 
+40:     const auto frame_count = static_cast<unsigned long long>(frames);
+
+===== src/strict_wdl.cpp:55 =====
+47:     return frame_count <= max_pointer_elements / channel_count &&
+48:            frame_count <= max_double_elements / channel_count;
+49: }
+50: 
+51: } // namespace
+52: 
+53: extern "C" {
+54: 
+55: int rpk_wdl_real_fft_1024(
+56:     const double *input,
+57:     double *out_re,
+58:     double *out_im) noexcept {
+59:     try {
+60:         if (!input || !out_re || !out_im) return kInvalidArgument;
+61:         rpk_wdl_fft_init_once();
+62:         double buf[1024];
+63:         std::memcpy(buf, input, sizeof(buf));
+
+===== src/strict_wdl.cpp:61 =====
+53: extern "C" {
+54: 
+55: int rpk_wdl_real_fft_1024(
+56:     const double *input,
+57:     double *out_re,
+58:     double *out_im) noexcept {
+59:     try {
+60:         if (!input || !out_re || !out_im) return kInvalidArgument;
+61:         rpk_wdl_fft_init_once();
+62:         double buf[1024];
+63:         std::memcpy(buf, input, sizeof(buf));
+64:         WDL_real_fft(buf, 1024, 0);
+65: 
+66:         auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+67:         out_re[0] = c[0].re;
+68:         out_im[0] = 0.0;
+69:         out_re[512] = c[0].im;
+
+===== src/strict_wdl.cpp:64 =====
+56:     const double *input,
+57:     double *out_re,
+58:     double *out_im) noexcept {
+59:     try {
+60:         if (!input || !out_re || !out_im) return kInvalidArgument;
+61:         rpk_wdl_fft_init_once();
+62:         double buf[1024];
+63:         std::memcpy(buf, input, sizeof(buf));
+64:         WDL_real_fft(buf, 1024, 0);
+65: 
+66:         auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+67:         out_re[0] = c[0].re;
+68:         out_im[0] = 0.0;
+69:         out_re[512] = c[0].im;
+70:         out_im[512] = 0.0;
+71:         int *perm = WDL_fft_permute_tab(512);
+72:         if (!perm) return kProcessingFailure;
+
+===== src/strict_wdl.cpp:66 =====
+58:     double *out_im) noexcept {
+59:     try {
+60:         if (!input || !out_re || !out_im) return kInvalidArgument;
+61:         rpk_wdl_fft_init_once();
+62:         double buf[1024];
+63:         std::memcpy(buf, input, sizeof(buf));
+64:         WDL_real_fft(buf, 1024, 0);
+65: 
+66:         auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+67:         out_re[0] = c[0].re;
+68:         out_im[0] = 0.0;
+69:         out_re[512] = c[0].im;
+70:         out_im[512] = 0.0;
+71:         int *perm = WDL_fft_permute_tab(512);
+72:         if (!perm) return kProcessingFailure;
+73:         for (int k = 1; k < 512; ++k) {
+74:             const int j = perm[k];
+
+===== src/strict_wdl.cpp:71 =====
+63:         std::memcpy(buf, input, sizeof(buf));
+64:         WDL_real_fft(buf, 1024, 0);
+65: 
+66:         auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+67:         out_re[0] = c[0].re;
+68:         out_im[0] = 0.0;
+69:         out_re[512] = c[0].im;
+70:         out_im[512] = 0.0;
+71:         int *perm = WDL_fft_permute_tab(512);
+72:         if (!perm) return kProcessingFailure;
+73:         for (int k = 1; k < 512; ++k) {
+74:             const int j = perm[k];
+75:             out_re[k] = c[j].re;
+76:             out_im[k] = c[j].im;
+77:         }
+78:         return 0;
+79:     } catch (...) {
+
+===== src/strict_wdl.cpp:85 =====
+77:         }
+78:         return 0;
+79:     } catch (...) {
+80:         // No C++ exception may cross the C ABI into Rust.
+81:         return kCppException;
+82:     }
+83: }
+84: 
+85: long long rpk_wdl_resample_all(
+86:     const double *input,
+87:     long long input_frames,
+88:     int channels,
+89:     double input_rate,
+90:     double output_rate,
+91:     double *output,
+92:     long long output_capacity_frames) noexcept {
+93:     try {
+
+===== src/strict_wdl.cpp:102 =====
+94:         if (!input || !output || !std::isfinite(input_rate) ||
+95:             !std::isfinite(output_rate) || input_rate <= 0.0 ||
+96:             output_rate <= 0.0 ||
+97:             !valid_interleaved_span(input_frames, channels) ||
+98:             !valid_interleaved_span(output_capacity_frames, channels)) {
+99:             return kInvalidArgument;
+100:         }
+101: 
+102:         WDL_Resampler rs;
+103:         rs.SetMode(true, 1, false, 64, 32);
+104:         rs.SetFeedMode(true);
+105:         rs.SetRates(input_rate, output_rate);
+106: 
+107:         long long in_pos = 0;
+108:         long long out_pos = 0;
+109: 
+110:         // Fresh-process REAPER 7.79 pointwise probes at the 22.05 kHz boundary
+
+===== src/strict_wdl.cpp:118 =====
+110:         // Fresh-process REAPER 7.79 pointwise probes at the 22.05 kHz boundary
+111:         // identify a 2048-double source buffer. WDL's IIR prefilter fade depends
+112:         // on the number of frames passed to ResampleOut(), so this feed granularity
+113:         // is part of strict spectral compatibility. The buffer is interleaved,
+114:         // therefore the frame count is divided by the channel count.
+115:         const int block_frames = std::max(1, 2048 / channels);
+116: 
+117:         while (in_pos < input_frames && out_pos < output_capacity_frames) {
+118:             WDL_ResampleSample *inbuf = nullptr;
+119:             const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
+120:             if (wanted <= 0 || !inbuf) return kProcessingFailure;
+121: 
+122:             const int avail = static_cast<int>(std::min<long long>(
+123:                 wanted, input_frames - in_pos));
+124:             if (avail <= 0) return kProcessingFailure;
+125: 
+126:             const auto input_offset = static_cast<std::size_t>(in_pos) *
+
+===== src/texture.rs:5 =====
+1: use crate::format::SpectralPeak;
+2: use crate::pyramid::{WavePyramid, WaveTile};
+3: use crate::wave::{decode_peak_code, PeakPair};
+4: 
+5: #[derive(Debug, Clone)]
+6: pub struct RgbaImage {
+7:     pub width: usize,
+8:     pub height: usize,
+9:     pub stride: usize,
+10:     pub data: Vec<u8>,
+11: }
+12: 
+13: /// Lossless packed waveform data texture.
+
+===== src/wave.rs:5 =====
+1: use crate::error::{ReaPeaksError, Result};
+2: use crate::format::{GeneratedLayer, LayerHeader, Version};
+3: 
+4: #[repr(C)]
+5: #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+6: pub struct PeakPair {
+7:     pub max: i16,
+8:     pub min: i16,
+9: }
+10: 
+11: #[repr(u8)]
+12: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+13: pub enum WaveEncoding {
+
+===== src/wave.rs:12 =====
+4: #[repr(C)]
+5: #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+6: pub struct PeakPair {
+7:     pub max: i16,
+8:     pub min: i16,
+9: }
+10: 
+11: #[repr(u8)]
+12: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+13: pub enum WaveEncoding {
+14:     Rpkn = 1,
+15:     Rpkl = 2,
+16: }
+17: 
+18: impl WaveEncoding {
+19:     pub fn from_version(version: Version) -> Self {
+20:         match version {
+
+===== tests/aa_spectral_two32000_diag.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: 
+3: use reapeaks::{generate_pcm16, GenerateOptions, ReaPeaks};
+4: 
+5: const EXPECTED_FIRST64: [u32; 64] = [
+6:     399410175, 392791045, 398427145, 392627209, 396166153, 391676937, 392496137, 389547017,
+7:     386958345, 385647625, 380765192, 380961801, 377160712, 377914376, 376538120, 377291784,
+8:     375981064, 376210440, 375358472, 374998024, 375391240, 374440968, 375620616, 374670344,
+9:     376341512, 375227400, 376833032, 375981064, 377127944, 376439816, 377422856, 377193480,
+
+===== tests/ab_after_n22051.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: mod sequence_common;
+3: 
+4: #[test]
+5: fn target_is_exact_after_n22051_mono_noise() {
+6:     let pcm = sequence_common::n22051_pcm();
+7:     let _ = sequence_common::generate_i16(&pcm, 22_051, 1, &[73, 1168, 22192]);
+8:     sequence_common::assert_target_exact();
+9: }
+
+===== tests/ac_after_sq22051.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: mod sequence_common;
+3: 
+4: #[test]
+5: fn target_is_exact_after_sq22051_stereo() {
+6:     let pcm = sequence_common::sq22051_pcm();
+7:     let _ = sequence_common::generate_i16(&pcm, 22_051, 2, &[73, 1168, 22192]);
+8:     sequence_common::assert_target_exact();
+9: }
+
+===== tests/ad_after_tri32000.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: mod sequence_common;
+3: 
+4: #[test]
+5: fn target_is_exact_after_tri32000_mono() {
+6:     let pcm = sequence_common::tri32000_pcm();
+7:     let _ = sequence_common::generate_i16(&pcm, 32_000, 1, &[106, 1696, 32224]);
+8:     sequence_common::assert_target_exact();
+9: }
+
+===== tests/hardening.rs:3 =====
+1: use reapeaks::ffi::{rpk_close, rpk_generate_pcm16, rpk_open, rpk_tile_texture_rgba8, RpkBuffer};
+2: use reapeaks::format::{
+3:     encode, GeneratedLayer, LayerHeader, Version, TOKEN_LOUDNESS, TOKEN_SPECTRAL,
+4: };
+5: use reapeaks::{generate_pcm16, GenerateOptions, ReaPeaks, WaveEncoding, WaveLayer, WavePyramid};
+6: use std::ffi::CString;
+7: use std::ptr::{self, NonNull};
+8: 
+9: fn bare_header(channels: u8, mipmaps: u8, sample_rate: u32) -> Vec<u8> {
+10:     let mut raw = Vec::new();
+11:     raw.extend_from_slice(b"RPKN");
+
+===== tests/hardening.rs:67 =====
+59: #[test]
+60: fn parser_rejects_trailing_garbage() {
+61:     let mut raw = bare_header(1, 0, 48_000);
+62:     raw.push(0xaa);
+63:     assert!(ReaPeaks::parse(raw).is_err());
+64: }
+65: 
+66: #[test]
+67: fn parser_rejects_truncated_terminal_loudness() {
+68:     let mut raw = bare_header(1, 1, 48_000);
+69:     raw.extend_from_slice(&TOKEN_LOUDNESS.to_le_bytes());
+70:     raw.extend_from_slice(&1u32.to_le_bytes());
+71:     assert!(ReaPeaks::parse(raw).is_err());
+72: }
+73: 
+74: #[test]
+75: fn parser_rejects_spectral_layer_without_wave_partner() {
+
+===== tests/hardening.rs:69 =====
+61:     let mut raw = bare_header(1, 0, 48_000);
+62:     raw.push(0xaa);
+63:     assert!(ReaPeaks::parse(raw).is_err());
+64: }
+65: 
+66: #[test]
+67: fn parser_rejects_truncated_terminal_loudness() {
+68:     let mut raw = bare_header(1, 1, 48_000);
+69:     raw.extend_from_slice(&TOKEN_LOUDNESS.to_le_bytes());
+70:     raw.extend_from_slice(&1u32.to_le_bytes());
+71:     assert!(ReaPeaks::parse(raw).is_err());
+72: }
+73: 
+74: #[test]
+75: fn parser_rejects_spectral_layer_without_wave_partner() {
+76:     let mut raw = bare_header(1, 1, 48_000);
+77:     raw.extend_from_slice(&TOKEN_SPECTRAL.to_le_bytes());
+
+===== tests/no_global_fast_math.rs:5 =====
+1: use std::fs;
+2: use std::path::PathBuf;
+3: 
+4: #[test]
+5: fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut() {
+6:     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+7:     let build_rs = fs::read_to_string(manifest.join("build.rs")).expect("read build.rs");
+8: 
+9:     // These options alter NaN, infinity, signed-zero, reassociation, and reciprocal
+10:     // semantics globally.  A REAPER compatibility fix must instead reproduce the
+11:     // specific runtime floating-point environment or the exact local algorithm.
+12:     // Passing a finite oracle corpus is not sufficient justification for enabling
+13:     // any of these flags across the whole strict-WDL translation unit.
+
+===== tests/no_global_fast_math.rs:13 =====
+5: fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut() {
+6:     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+7:     let build_rs = fs::read_to_string(manifest.join("build.rs")).expect("read build.rs");
+8: 
+9:     // These options alter NaN, infinity, signed-zero, reassociation, and reciprocal
+10:     // semantics globally.  A REAPER compatibility fix must instead reproduce the
+11:     // specific runtime floating-point environment or the exact local algorithm.
+12:     // Passing a finite oracle corpus is not sufficient justification for enabling
+13:     // any of these flags across the whole strict-WDL translation unit.
+14:     let forbidden = [
+15:         "-ffast-math",
+16:         "-Ofast",
+17:         "-funsafe-math-optimizations",
+18:         "-fassociative-math",
+19:         "-ffinite-math-only",
+20:         "-freciprocal-math",
+21:         "/fp:fast",
+
+===== tests/python/test_player_common.py:185 =====
+177:         )
+178:         self.assertEqual(pc.reaper_mapped_peak_path(self.audio, json_map, for_write=True), mapped)
+179:         self.assertEqual(pc.reaper_mapped_peak_path(self.audio, json_map, for_write=False), mapped)
+180: 
+181:         tsv_map = self.root / "map.tsv"
+182:         tsv_map.write_text(f"{key}\t{mapped}\t{mapped}\n", encoding="utf-8")
+183:         self.assertEqual(pc.reaper_mapped_peak_path(self.audio, tsv_map, for_write=False), mapped)
+184: 
+185:     def test_generate_reuse_and_stale_rebuild(self) -> None:
+186:         peaks, generated = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+187:         self.assertTrue(generated)
+188:         self.assertTrue(peaks.is_file())
+189:         parsed = reapeaks.ReaPeaks.open(str(peaks))
+190:         self.assertIsNotNone(parsed)
+191:         header = pc.read_reapeaks_header(peaks)
+192:         self.assertEqual(header.magic, b"RPKN")
+193:         self.assertEqual(header.sample_rate, 44_100)
+
+===== tests/python/test_player_common.py:205 =====
+197:         reused, generated_again = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+198:         self.assertEqual(reused, peaks)
+199:         self.assertFalse(generated_again)
+200: 
+201:         old_payload = peaks.read_bytes()
+202:         stat = self.audio.stat()
+203:         os.utime(self.audio, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+204:         self.assertFalse(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+205:         rebuilt, did_rebuild = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+206:         self.assertEqual(rebuilt, peaks)
+207:         self.assertTrue(did_rebuild)
+208:         self.assertNotEqual(rebuilt.read_bytes(), old_payload)  # header mtime changed
+209:         self.assertTrue(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+210: 
+211:     def test_invalid_cache_is_never_reused(self) -> None:
+212:         peaks = pc.sidecar_peak_path(self.audio)
+213:         peaks.write_bytes(b"RPKN")
+
+===== tests/python/test_player_common.py:206 =====
+198:         self.assertEqual(reused, peaks)
+199:         self.assertFalse(generated_again)
+200: 
+201:         old_payload = peaks.read_bytes()
+202:         stat = self.audio.stat()
+203:         os.utime(self.audio, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+204:         self.assertFalse(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+205:         rebuilt, did_rebuild = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+206:         self.assertEqual(rebuilt, peaks)
+207:         self.assertTrue(did_rebuild)
+208:         self.assertNotEqual(rebuilt.read_bytes(), old_payload)  # header mtime changed
+209:         self.assertTrue(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+210: 
+211:     def test_invalid_cache_is_never_reused(self) -> None:
+212:         peaks = pc.sidecar_peak_path(self.audio)
+213:         peaks.write_bytes(b"RPKN")
+214:         result, generated = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+
+===== tests/python/test_player_common.py:207 =====
+199:         self.assertFalse(generated_again)
+200: 
+201:         old_payload = peaks.read_bytes()
+202:         stat = self.audio.stat()
+203:         os.utime(self.audio, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+204:         self.assertFalse(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+205:         rebuilt, did_rebuild = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+206:         self.assertEqual(rebuilt, peaks)
+207:         self.assertTrue(did_rebuild)
+208:         self.assertNotEqual(rebuilt.read_bytes(), old_payload)  # header mtime changed
+209:         self.assertTrue(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+210: 
+211:     def test_invalid_cache_is_never_reused(self) -> None:
+212:         peaks = pc.sidecar_peak_path(self.audio)
+213:         peaks.write_bytes(b"RPKN")
+214:         result, generated = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+215:         self.assertEqual(result, peaks)
+
+===== tests/python/test_player_common.py:208 =====
+200: 
+201:         old_payload = peaks.read_bytes()
+202:         stat = self.audio.stat()
+203:         os.utime(self.audio, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+204:         self.assertFalse(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+205:         rebuilt, did_rebuild = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+206:         self.assertEqual(rebuilt, peaks)
+207:         self.assertTrue(did_rebuild)
+208:         self.assertNotEqual(rebuilt.read_bytes(), old_payload)  # header mtime changed
+209:         self.assertTrue(pc.inspect_reapeaks_cache(peaks, self.audio).fresh)
+210: 
+211:     def test_invalid_cache_is_never_reused(self) -> None:
+212:         peaks = pc.sidecar_peak_path(self.audio)
+213:         peaks.write_bytes(b"RPKN")
+214:         result, generated = pc.ensure_reapeaks(self.audio, decoder="wav", spectral=False)
+215:         self.assertEqual(result, peaks)
+216:         self.assertTrue(generated)
+
+===== tests/python/test_player_common.py:365 =====
+357:                 decoder="ffmpeg",
+358:                 spectral=False,
+359:                 wave_encoding="auto",
+360:             )
+361:             self.assertTrue(generated)
+362:             self.assertEqual(pc.read_reapeaks_header(result).magic, expected_magic)
+363:             reapeaks.ReaPeaks.open(str(result))
+364:             first = result.read_bytes()
+365:             _result, rebuilt = pc.ensure_reapeaks(
+366:                 compressed,
+367:                 peaks,
+368:                 decoder="ffmpeg",
+369:                 spectral=False,
+370:                 wave_encoding="auto",
+371:                 rebuild=True,
+372:             )
+373:             self.assertTrue(rebuilt)
+
+===== tests/python/test_player_common.py:371 =====
+363:             reapeaks.ReaPeaks.open(str(result))
+364:             first = result.read_bytes()
+365:             _result, rebuilt = pc.ensure_reapeaks(
+366:                 compressed,
+367:                 peaks,
+368:                 decoder="ffmpeg",
+369:                 spectral=False,
+370:                 wave_encoding="auto",
+371:                 rebuild=True,
+372:             )
+373:             self.assertTrue(rebuilt)
+374:             self.assertEqual(first, result.read_bytes())
+375:         self.assertGreaterEqual(made, 1, "no FFmpeg compressed encoder was available")
+376: 
+377:     def test_ffmpeg_playback_option_produces_valid_temporary_float_wav(self) -> None:
+378:         compressed = self.root / "source.flac"
+379:         self.assertTrue(run_ffmpeg(self.wav, compressed, ["-c:a", "flac"]))
+
+===== tests/python/test_player_common.py:373 =====
+365:             _result, rebuilt = pc.ensure_reapeaks(
+366:                 compressed,
+367:                 peaks,
+368:                 decoder="ffmpeg",
+369:                 spectral=False,
+370:                 wave_encoding="auto",
+371:                 rebuild=True,
+372:             )
+373:             self.assertTrue(rebuilt)
+374:             self.assertEqual(first, result.read_bytes())
+375:         self.assertGreaterEqual(made, 1, "no FFmpeg compressed encoder was available")
+376: 
+377:     def test_ffmpeg_playback_option_produces_valid_temporary_float_wav(self) -> None:
+378:         compressed = self.root / "source.flac"
+379:         self.assertTrue(run_ffmpeg(self.wav, compressed, ["-c:a", "flac"]))
+380:         prepared = pc.prepare_playback_audio(compressed, decoder="ffmpeg")
+381:         path = prepared.path
+
+===== tests/reaper779_compat.rs:91 =====
+83:         }
+84:         assert_eq!(
+85:             bytes,
+86:             hex_decode(g[format!("wave{i}").as_str()]),
+87:             "wave layer {i}"
+88:         );
+89:     }
+90: 
+91:     #[cfg(feature = "strict-wdl")]
+92:     for (i, layer) in actual.spectral_layers.iter().enumerate() {
+93:         let mut bytes = Vec::with_capacity(layer.peaks.len() * 4);
+94:         for p in &layer.peaks {
+95:             bytes.extend_from_slice(&p.code().to_le_bytes());
+96:         }
+97:         assert_eq!(
+98:             bytes,
+99:             hex_decode(g[format!("spectral{i}").as_str()]),
+
+===== tests/reaper_ffmpeg_byte_identical.rs:90 =====
+82:         .map(|header| (header.division, header.peak_count))
+83:         .collect();
+84:     assert_eq!(
+85:         layout,
+86:         [
+87:             (160, 900),
+88:             (2400, 60),
+89:             (48_000, 3),
+90:             (-115, 893),
+91:             (-115, 59),
+92:             (-115, 2),
+93:             (-114, 120),
+94:             (-114, 6),
+95:         ]
+96:         .to_vec()
+97:     );
+98: 
+
+===== tests/reaper_ffmpeg_byte_identical.rs:91 =====
+83:         .collect();
+84:     assert_eq!(
+85:         layout,
+86:         [
+87:             (160, 900),
+88:             (2400, 60),
+89:             (48_000, 3),
+90:             (-115, 893),
+91:             (-115, 59),
+92:             (-115, 2),
+93:             (-114, 120),
+94:             (-114, 6),
+95:         ]
+96:         .to_vec()
+97:     );
+98: 
+99:     let source_metadata = fs::metadata(&source_path)
+
+===== tests/reaper_ffmpeg_byte_identical.rs:92 =====
+84:     assert_eq!(
+85:         layout,
+86:         [
+87:             (160, 900),
+88:             (2400, 60),
+89:             (48_000, 3),
+90:             (-115, 893),
+91:             (-115, 59),
+92:             (-115, 2),
+93:             (-114, 120),
+94:             (-114, 6),
+95:         ]
+96:         .to_vec()
+97:     );
+98: 
+99:     let source_metadata = fs::metadata(&source_path)
+100:         .unwrap_or_else(|error| panic!("stat {}: {error}", source_path.display()));
+
+===== tests/reaper_ffmpeg_byte_identical.rs:93 =====
+85:         layout,
+86:         [
+87:             (160, 900),
+88:             (2400, 60),
+89:             (48_000, 3),
+90:             (-115, 893),
+91:             (-115, 59),
+92:             (-115, 2),
+93:             (-114, 120),
+94:             (-114, 6),
+95:         ]
+96:         .to_vec()
+97:     );
+98: 
+99:     let source_metadata = fs::metadata(&source_path)
+100:         .unwrap_or_else(|error| panic!("stat {}: {error}", source_path.display()));
+101:     assert_eq!(
+
+===== tests/reaper_ffmpeg_byte_identical.rs:94 =====
+86:         [
+87:             (160, 900),
+88:             (2400, 60),
+89:             (48_000, 3),
+90:             (-115, 893),
+91:             (-115, 59),
+92:             (-115, 2),
+93:             (-114, 120),
+94:             (-114, 6),
+95:         ]
+96:         .to_vec()
+97:     );
+98: 
+99:     let source_metadata = fs::metadata(&source_path)
+100:         .unwrap_or_else(|error| panic!("stat {}: {error}", source_path.display()));
+101:     assert_eq!(
+102:         parsed.header.source_size_low32,
+
+===== tests/reaper_ffmpeg_byte_identical.rs:146 =====
+138:             fnv64(&oracle),
+139:             fnv64(&generated),
+140:             hex_window(&oracle, offset),
+141:             hex_window(&generated, offset),
+142:         );
+143:     }
+144: 
+145:     println!(
+146:         "REAPER_FFMPEG_BYTE_IDENTICAL bytes={} fnv64={:016x} layers={} wave={} spectral={} loudness={}",
+147:         oracle.len(),
+148:         fnv64(&oracle),
+149:         parsed.layer_headers.len(),
+150:         parsed.wave_layers.len(),
+151:         parsed.spectral_layers.len(),
+152:         parsed.loudness_layers.len(),
+153:     );
+154: }
+
+===== tests/reaper_ffmpeg_byte_identical.rs:152 =====
+144: 
+145:     println!(
+146:         "REAPER_FFMPEG_BYTE_IDENTICAL bytes={} fnv64={:016x} layers={} wave={} spectral={} loudness={}",
+147:         oracle.len(),
+148:         fnv64(&oracle),
+149:         parsed.layer_headers.len(),
+150:         parsed.wave_layers.len(),
+151:         parsed.spectral_layers.len(),
+152:         parsed.loudness_layers.len(),
+153:     );
+154: }
+
+===== tests/spectral_22051_diag.rs:1 =====
+1: #[cfg(feature = "strict-wdl")]
+2: use std::f64::consts::PI;
+3: 
+4: #[cfg(feature = "strict-wdl")]
+5: const TONE_EXPECTED: [u32; 61] = [
+6:     509772759, 512426978, 515605474, 519799779, 525272036, 531497956, 536151013, 536740837,
+7:     536740837, 536740837, 536740837, 536773605, 536773605, 536773605, 536773605, 536773605,
+8:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605,
+9:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536806373,
+
+===== tests/spectral_22051_diag.rs:4 =====
+1: #[cfg(feature = "strict-wdl")]
+2: use std::f64::consts::PI;
+3: 
+4: #[cfg(feature = "strict-wdl")]
+5: const TONE_EXPECTED: [u32; 61] = [
+6:     509772759, 512426978, 515605474, 519799779, 525272036, 531497956, 536151013, 536740837,
+7:     536740837, 536740837, 536740837, 536773605, 536773605, 536773605, 536773605, 536773605,
+8:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605,
+9:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536806373,
+10:     536773605, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373,
+11:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605,
+12:     536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373,
+
+===== tests/spectral_22051_diag.rs:16 =====
+8:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605,
+9:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536806373,
+10:     536773605, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373,
+11:     536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605, 536773605,
+12:     536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373, 536806373,
+13:     536806373, 536806374, 536806373, 536806374, 536806374,
+14: ];
+15: 
+16: #[cfg(feature = "strict-wdl")]
+17: const NOISE_EXPECTED: [u32; 61] = [
+18:     355438949, 355144019, 356192594, 271682438, 273877893, 365991732, 371987313, 371331952,
+19:     341118517, 345869859, 350555682, 353209890, 354520610, 355143202, 357371426, 360123938,
+20:     364580385, 202540241, 218760400, 143425983, 160858551, 174031287, 412749623, 411569528,
+21:     420941581, 424054540, 426348299, 427888394, 387746139, 388729179, 388532582, 240091823,
+22:     233407152, 228917937, 229933746, 232424115, 413895903, 414518494, 414747870, 218890825,
+23:     352520171, 350685160, 351340518, 354256866, 416713864, 384895296, 425659804, 426216863,
+24:     427101602, 427920818, 428346804, 428707253, 428379574, 420154418, 418942001, 355698488,
+
+===== tests/spectral_22051_diag.rs:28 =====
+20:     364580385, 202540241, 218760400, 143425983, 160858551, 174031287, 412749623, 411569528,
+21:     420941581, 424054540, 426348299, 427888394, 387746139, 388729179, 388532582, 240091823,
+22:     233407152, 228917937, 229933746, 232424115, 413895903, 414518494, 414747870, 218890825,
+23:     352520171, 350685160, 351340518, 354256866, 416713864, 384895296, 425659804, 426216863,
+24:     427101602, 427920818, 428346804, 428707253, 428379574, 420154418, 418942001, 355698488,
+25:     356222778, 358418235, 359696188, 362284879, 364447568,
+26: ];
+27: 
+28: #[cfg(feature = "strict-wdl")]
+29: fn fnv_i16(pcm: &[i16]) -> u64 {
+30:     let mut h = 0xcbf2_9ce4_8422_2325u64;
+31:     for &sample in pcm {
+32:         for byte in sample.to_le_bytes() {
+33:             h ^= byte as u64;
+34:             h = h.wrapping_mul(0x0000_0100_0000_01b3);
+35:         }
+36:     }
+
+===== tests/spectral_22051_diag.rs:40 =====
+32:         for byte in sample.to_le_bytes() {
+33:             h ^= byte as u64;
+34:             h = h.wrapping_mul(0x0000_0100_0000_01b3);
+35:         }
+36:     }
+37:     h
+38: }
+39: 
+40: #[cfg(feature = "strict-wdl")]
+41: fn tone_pcm() -> Vec<i16> {
+42:     let sr = 22_051u32;
+43:     let frames = 5_000usize;
+44:     let mut pcm = Vec::with_capacity(frames);
+45:     for i in 0..frames {
+46:         let x = 0.73 * (2.0 * PI * 997.5 * i as f64 / sr as f64).sin();
+47:         let y = x.clamp(-1.0, 1.0) * 32767.0;
+48:         let v = if y >= 0.0 {
+
+===== tests/spectral_22051_diag.rs:58 =====
+50:         } else {
+51:             (y - 0.5).ceil()
+52:         };
+53:         pcm.push(v.clamp(-32768.0, 32767.0) as i16);
+54:     }
+55:     pcm
+56: }
+57: 
+58: #[cfg(feature = "strict-wdl")]
+59: fn noise_pcm() -> Vec<i16> {
+60:     let frames = 5_000usize;
+61:     let seed = 826_347_269u32;
+62:     let mut state = seed ^ 0x9E37_79B9;
+63:     let mut pcm = Vec::with_capacity(frames);
+64:     for _ in 0..frames {
+65:         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+66:         let x = (((state >> 16) & 0xffff) as i32) - 32768;
+
+===== tests/spectral_22051_diag.rs:72 =====
+64:     for _ in 0..frames {
+65:         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+66:         let x = (((state >> 16) & 0xffff) as i32) - 32768;
+67:         pcm.push((x / 8) as i16);
+68:     }
+69:     pcm
+70: }
+71: 
+72: #[cfg(feature = "strict-wdl")]
+73: fn full_file_fine_codes(pcm: &[i16]) -> Vec<u32> {
+74:     let opt = reapeaks::GenerateOptions {
+75:         sample_rate: 22_051,
+76:         channels: 1,
+77:         divisions: vec![73, 1095, 21_900],
+78:         source_mtime_low32: 0,
+79:         source_size_low32: 0,
+80:         spectral: true,
+
+===== tests/spectral_22051_diag.rs:95 =====
+87:     assert_eq!(parsed.spectral_layers[2].peaks.len(), 0);
+88:     parsed.spectral_layers[0]
+89:         .peaks
+90:         .iter()
+91:         .map(|p| p.code())
+92:         .collect()
+93: }
+94: 
+95: #[cfg(feature = "strict-wdl")]
+96: #[test]
+97: fn reconstructed_22051_pcm_matches_reaper_input_wavs() {
+98:     // FNV-1a over the little-endian PCM data chunks of the exact WAV files
+99:     // used to generate the fresh-process REAPER 7.79 oracle.
+100:     assert_eq!(fnv_i16(&tone_pcm()), 0x6929_98ab_c735_b04a);
+101:     assert_eq!(fnv_i16(&noise_pcm()), 0x6b28_12c2_c1a0_6ab4);
+102: }
+103: 
+
+===== tests/spectral_22051_diag.rs:104 =====
+96: #[test]
+97: fn reconstructed_22051_pcm_matches_reaper_input_wavs() {
+98:     // FNV-1a over the little-endian PCM data chunks of the exact WAV files
+99:     // used to generate the fresh-process REAPER 7.79 oracle.
+100:     assert_eq!(fnv_i16(&tone_pcm()), 0x6929_98ab_c735_b04a);
+101:     assert_eq!(fnv_i16(&noise_pcm()), 0x6b28_12c2_c1a0_6ab4);
+102: }
+103: 
+104: #[cfg(feature = "strict-wdl")]
+105: #[test]
+106: fn rate_tone_22051_matches_pointwise_oracle() {
+107:     let got = reapeaks::spectral::build_fine_spectral(&tone_pcm(), 5000, 1, 22_051, 73).unwrap();
+108:     assert_eq!(got.len(), TONE_EXPECTED.len());
+109:     for (index, (got_peak, expected)) in got.iter().zip(TONE_EXPECTED).enumerate() {
+110:         assert_eq!(
+111:             got_peak.code(),
+112:             expected,
+
+===== tests/spectral_22051_diag.rs:122 =====
+114:             got_peak.frequency_hz,
+115:             got_peak.density,
+116:             expected & 0x7fff,
+117:             (expected >> 15) & 0x3fff,
+118:         );
+119:     }
+120: }
+121: 
+122: #[cfg(feature = "strict-wdl")]
+123: #[test]
+124: fn rate_noise_22051_matches_pointwise_oracle() {
+125:     let got = reapeaks::spectral::build_fine_spectral(&noise_pcm(), 5000, 1, 22_051, 73).unwrap();
+126:     assert_eq!(got.len(), NOISE_EXPECTED.len());
+127:     for (index, (got_peak, expected)) in got.iter().zip(NOISE_EXPECTED).enumerate() {
+128:         assert_eq!(
+129:             got_peak.code(),
+130:             expected,
+
+===== tests/spectral_22051_diag.rs:140 =====
+132:             got_peak.frequency_hz,
+133:             got_peak.density,
+134:             expected & 0x7fff,
+135:             (expected >> 15) & 0x3fff,
+136:         );
+137:     }
+138: }
+139: 
+140: #[cfg(feature = "strict-wdl")]
+141: #[test]
+142: fn full_file_tone_22051_matches_pointwise_oracle() {
+143:     assert_eq!(full_file_fine_codes(&tone_pcm()), TONE_EXPECTED);
+144: }
+145: 
+146: #[cfg(feature = "strict-wdl")]
+147: #[test]
+148: fn full_file_noise_22051_matches_pointwise_oracle() {
+
+===== tests/spectral_22051_diag.rs:146 =====
+138: }
+139: 
+140: #[cfg(feature = "strict-wdl")]
+141: #[test]
+142: fn full_file_tone_22051_matches_pointwise_oracle() {
+143:     assert_eq!(full_file_fine_codes(&tone_pcm()), TONE_EXPECTED);
+144: }
+145: 
+146: #[cfg(feature = "strict-wdl")]
+147: #[test]
+148: fn full_file_noise_22051_matches_pointwise_oracle() {
+149:     assert_eq!(full_file_fine_codes(&noise_pcm()), NOISE_EXPECTED);
+150: }
+
+===== tests/spectral_corpus_diagnostic.rs:5 =====
+1: #![allow(clippy::too_many_lines)]
+2: use reapeaks::spectral::build_fine_spectral;
+3: use std::f64::consts::PI;
+4: 
+5: #[derive(Clone, Copy, Debug)]
+6: enum Kind {
+7:     Tone {
+8:         freq: f64,
+9:         amp: f64,
+10:         phase: f64,
+11:     },
+12:     AltFull,
+13:     AltLsb,
+
+===== tests/spectral_corpus_diagnostic.rs:33 =====
+25:     },
+26:     ToneNoise {
+27:         freq: f64,
+28:         noise_div: i32,
+29:         seed: u32,
+30:     },
+31: }
+32: 
+33: #[derive(Clone, Copy, Debug)]
+34: struct Case {
+35:     sr: u32,
+36:     frames: usize,
+37:     div: u32,
+38:     kind: Kind,
+39: }
+40: 
+41: fn q16(x: f64) -> i16 {
+
+===== tests/spectral_corpus_diagnostic.rs:459 =====
+451:     0xd454d8499a7166d3,
+452:     0x0b678d813e8d032c,
+453:     0xde65f6d7d32ae7f5,
+454:     0xde65f6d7d32ae7f5,
+455:     0xde65f6d7d32ae7f5,
+456: ];
+457: 
+458: #[test]
+459: #[cfg(feature = "strict-wdl")]
+460: fn reaper779_fresh_process_spectral_corpus_diagnostic() {
+461:     let cs = cases();
+462:     let mut oracle_points = 0usize;
+463:     let mut count_mismatch = 0usize;
+464:     let mut hash_mismatch = 0usize;
+465:     let mut exact_cases = 0usize;
+466:     let mut exact_points = 0usize;
+467:     for (i, c) in cs.into_iter().enumerate() {
+
+===== tests/spectral_expanded_corpus.rs:159 =====
+151:     parsed.spectral_layers[0]
+152:         .peaks
+153:         .iter()
+154:         .map(|p| p.code())
+155:         .collect()
+156: }
+157: 
+158: #[test]
+159: #[cfg(feature = "strict-wdl")]
+160: fn reaper779_expanded_fresh_process_spectral_corpus_is_exact() {
+161:     let mut cases = 0usize;
+162:     let mut codes = 0usize;
+163:     for line in include_str!("data/spectral_expanded_oracle.tsv").lines() {
+164:         if line.is_empty() || line.starts_with('#') {
+165:             continue;
+166:         }
+167:         let cols: Vec<&str> = line.split('\t').collect();
+
+===== tests/spectral_mipmap_oracle.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: 
+3: use reapeaks::{generate_f32, generate_pcm16, GenerateOptions, ReaPeaks, SpectralPeak};
+4: 
+5: fn ch_seed(seed: u32, channel: usize) -> u32 {
+6:     seed ^ ((channel as u32 + 1).wrapping_mul(0x9E37_79B9))
+7: }
+8: 
+9: fn pcm_i16(channels: usize, frames: usize, seed: u32, shift: u32) -> Vec<i16> {
+
+===== tests/spectral_stress_oracle.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: #![allow(clippy::too_many_lines)]
+3: 
+4: use reapeaks::{generate_f32, generate_pcm16, GenerateOptions, ReaPeaks, SpectralPeak};
+5: 
+6: fn ch_seed(seed: u32, channel: usize) -> u32 {
+7:     seed ^ ((channel as u32 + 1).wrapping_mul(0x9E37_79B9))
+8: }
+9: 
+
+===== tests/spectral_two32000_diag.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: 
+3: use reapeaks::{generate_pcm16, GenerateOptions, ReaPeaks};
+4: 
+5: const EXPECTED_FIRST64: [u32; 64] = [
+6:     399410175, 392791045, 398427145, 392627209, 396166153, 391676937, 392496137, 389547017,
+7:     386958345, 385647625, 380765192, 380961801, 377160712, 377914376, 376538120, 377291784,
+8:     375981064, 376210440, 375358472, 374998024, 375391240, 374440968, 375620616, 374670344,
+9:     376341512, 375227400, 376833032, 375981064, 377127944, 376439816, 377422856, 377193480,
+
+===== tests/strict_wdl_boundary.rs:1 =====
+1: #![cfg(feature = "strict-wdl")]
+2: 
+3: use reapeaks::default_divisions;
+4: use std::sync::{Arc, Barrier};
+5: use std::thread;
+6: 
+7: const FFT_SIZE: usize = 1024;
+8: const FFT_BINS: usize = FFT_SIZE / 2 + 1;
+9: const ANALYSIS_RATE: f64 = 22_050.0;
+
+===== tests/strict_wdl_boundary.rs:12 =====
+4: use std::sync::{Arc, Barrier};
+5: use std::thread;
+6: 
+7: const FFT_SIZE: usize = 1024;
+8: const FFT_BINS: usize = FFT_SIZE / 2 + 1;
+9: const ANALYSIS_RATE: f64 = 22_050.0;
+10: 
+11: unsafe extern "C" {
+12:     fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+13:     fn rpk_wdl_resample_all(
+14:         input: *const f64,
+15:         input_frames: i64,
+16:         channels: i32,
+17:         input_rate: f64,
+18:         output_rate: f64,
+19:         output: *mut f64,
+20:         output_capacity_frames: i64,
+
+===== tests/strict_wdl_boundary.rs:13 =====
+5: use std::thread;
+6: 
+7: const FFT_SIZE: usize = 1024;
+8: const FFT_BINS: usize = FFT_SIZE / 2 + 1;
+9: const ANALYSIS_RATE: f64 = 22_050.0;
+10: 
+11: unsafe extern "C" {
+12:     fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+13:     fn rpk_wdl_resample_all(
+14:         input: *const f64,
+15:         input_frames: i64,
+16:         channels: i32,
+17:         input_rate: f64,
+18:         output_rate: f64,
+19:         output: *mut f64,
+20:         output_capacity_frames: i64,
+21:     ) -> i64;
+
+===== tests/strict_wdl_boundary.rs:31 =====
+23: 
+24: fn fft_bits() -> Vec<(u64, u64)> {
+25:     let mut input = [0.0f64; FFT_SIZE];
+26:     let mut re = [0.0f64; FFT_BINS];
+27:     let mut im = [0.0f64; FFT_BINS];
+28:     input[17] = 0.75;
+29:     input[511] = -0.25;
+30: 
+31:     let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+32:     assert_eq!(rc, 0, "strict-WDL FFT bridge failed with status {rc}");
+33: 
+34:     re.into_iter()
+35:         .zip(im)
+36:         .map(|(real, imaginary)| (real.to_bits(), imaginary.to_bits()))
+37:         .collect()
+38: }
+39: 
+
+===== tests/strict_wdl_boundary.rs:32 =====
+24: fn fft_bits() -> Vec<(u64, u64)> {
+25:     let mut input = [0.0f64; FFT_SIZE];
+26:     let mut re = [0.0f64; FFT_BINS];
+27:     let mut im = [0.0f64; FFT_BINS];
+28:     input[17] = 0.75;
+29:     input[511] = -0.25;
+30: 
+31:     let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+32:     assert_eq!(rc, 0, "strict-WDL FFT bridge failed with status {rc}");
+33: 
+34:     re.into_iter()
+35:         .zip(im)
+36:         .map(|(real, imaginary)| (real.to_bits(), imaginary.to_bits()))
+37:         .collect()
+38: }
+39: 
+40: #[test]
+
+===== tests/strict_wdl_boundary.rs:61 =====
+53:                 barrier.wait();
+54:                 fft_bits()
+55:             })
+56:         })
+57:         .collect();
+58: 
+59:     let mut results = handles
+60:         .into_iter()
+61:         .map(|handle| handle.join().expect("strict-WDL worker panicked"));
+62:     let expected = results.next().expect("at least one strict-WDL worker");
+63:     for result in results {
+64:         assert_eq!(result, expected);
+65:     }
+66: }
+67: 
+68: #[test]
+69: fn resampler_bridge_rejects_invalid_boundary_values() {
+
+===== tests/strict_wdl_boundary.rs:62 =====
+54:                 fft_bits()
+55:             })
+56:         })
+57:         .collect();
+58: 
+59:     let mut results = handles
+60:         .into_iter()
+61:         .map(|handle| handle.join().expect("strict-WDL worker panicked"));
+62:     let expected = results.next().expect("at least one strict-WDL worker");
+63:     for result in results {
+64:         assert_eq!(result, expected);
+65:     }
+66: }
+67: 
+68: #[test]
+69: fn resampler_bridge_rejects_invalid_boundary_values() {
+70:     let input = [0.0f64; 1];
+
+===== tests/strict_wdl_boundary.rs:74 =====
+66: }
+67: 
+68: #[test]
+69: fn resampler_bridge_rejects_invalid_boundary_values() {
+70:     let input = [0.0f64; 1];
+71:     let mut output = [0.0f64; 1];
+72: 
+73:     let nan_rate = unsafe {
+74:         rpk_wdl_resample_all(
+75:             input.as_ptr(),
+76:             1,
+77:             1,
+78:             f64::NAN,
+79:             ANALYSIS_RATE,
+80:             output.as_mut_ptr(),
+81:             1,
+82:         )
+
+===== tests/strict_wdl_boundary.rs:87 =====
+79:             ANALYSIS_RATE,
+80:             output.as_mut_ptr(),
+81:             1,
+82:         )
+83:     };
+84:     assert_eq!(nan_rate, -1);
+85: 
+86:     let too_many_channels = unsafe {
+87:         rpk_wdl_resample_all(
+88:             input.as_ptr(),
+89:             1,
+90:             256,
+91:             48_000.0,
+92:             ANALYSIS_RATE,
+93:             output.as_mut_ptr(),
+94:             1,
+95:         )
+
+===== tests/strict_wdl_boundary.rs:100 =====
+92:             ANALYSIS_RATE,
+93:             output.as_mut_ptr(),
+94:             1,
+95:         )
+96:     };
+97:     assert_eq!(too_many_channels, -1);
+98: 
+99:     let negative_frames = unsafe {
+100:         rpk_wdl_resample_all(
+101:             input.as_ptr(),
+102:             -1,
+103:             1,
+104:             48_000.0,
+105:             ANALYSIS_RATE,
+106:             output.as_mut_ptr(),
+107:             1,
+108:         )

@@ -1,0 +1,315 @@
+{
+  "sample_rate": 48000,
+  "channels": 2,
+  "h25": 1200,
+  "h100": 4800,
+  "h500": 24000,
+  "w400": 19200,
+  "w3s": 144000,
+  "cases": {
+    "zero_len_000000": {
+      "frames": 0,
+      "bytes": 0
+    },
+    "zero_len_000001": {
+      "frames": 1,
+      "bytes": 4
+    },
+    "zero_len_001199": {
+      "frames": 1199,
+      "bytes": 4796
+    },
+    "zero_len_001200": {
+      "frames": 1200,
+      "bytes": 4800
+    },
+    "zero_len_001201": {
+      "frames": 1201,
+      "bytes": 4804
+    },
+    "zero_len_004799": {
+      "frames": 4799,
+      "bytes": 19196
+    },
+    "zero_len_004800": {
+      "frames": 4800,
+      "bytes": 19200
+    },
+    "zero_len_004801": {
+      "frames": 4801,
+      "bytes": 19204
+    },
+    "zero_len_019199": {
+      "frames": 19199,
+      "bytes": 76796
+    },
+    "zero_len_019200": {
+      "frames": 19200,
+      "bytes": 76800
+    },
+    "zero_len_019201": {
+      "frames": 19201,
+      "bytes": 76804
+    },
+    "zero_len_020399": {
+      "frames": 20399,
+      "bytes": 81596
+    },
+    "zero_len_020400": {
+      "frames": 20400,
+      "bytes": 81600
+    },
+    "zero_len_020401": {
+      "frames": 20401,
+      "bytes": 81604
+    },
+    "zero_len_023999": {
+      "frames": 23999,
+      "bytes": 95996
+    },
+    "zero_len_024000": {
+      "frames": 24000,
+      "bytes": 96000
+    },
+    "zero_len_024001": {
+      "frames": 24001,
+      "bytes": 96004
+    },
+    "zero_len_143999": {
+      "frames": 143999,
+      "bytes": 575996
+    },
+    "zero_len_144000": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "zero_len_144001": {
+      "frames": 144001,
+      "bytes": 576004
+    },
+    "zero_len_167999": {
+      "frames": 167999,
+      "bytes": 671996
+    },
+    "zero_len_168000": {
+      "frames": 168000,
+      "bytes": 672000
+    },
+    "zero_len_168001": {
+      "frames": 168001,
+      "bytes": 672004
+    },
+    "impulse_at_000000": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_000001": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_001199": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_001200": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_001201": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_004799": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_004800": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_004801": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_019199": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_019200": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_019201": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_023999": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_024000": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_024001": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_047999": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_048000": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_048001": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_143999": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_144000": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_144001": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_191998": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "impulse_at_191999": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "step_at_047999": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "step_at_048000": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "step_at_048001": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "step_at_049199": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "step_at_049200": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "step_at_049201": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "tone_eof_019199": {
+      "frames": 19199,
+      "bytes": 76796
+    },
+    "tone_eof_019199_pad400": {
+      "frames": 38399,
+      "bytes": 153596
+    },
+    "tone_eof_019199_pad3s": {
+      "frames": 163199,
+      "bytes": 652796
+    },
+    "tone_eof_019200": {
+      "frames": 19200,
+      "bytes": 76800
+    },
+    "tone_eof_019200_pad400": {
+      "frames": 38400,
+      "bytes": 153600
+    },
+    "tone_eof_019200_pad3s": {
+      "frames": 163200,
+      "bytes": 652800
+    },
+    "tone_eof_019201": {
+      "frames": 19201,
+      "bytes": 76804
+    },
+    "tone_eof_019201_pad400": {
+      "frames": 38401,
+      "bytes": 153604
+    },
+    "tone_eof_019201_pad3s": {
+      "frames": 163201,
+      "bytes": 652804
+    },
+    "tone_eof_020399": {
+      "frames": 20399,
+      "bytes": 81596
+    },
+    "tone_eof_020399_pad400": {
+      "frames": 39599,
+      "bytes": 158396
+    },
+    "tone_eof_020399_pad3s": {
+      "frames": 164399,
+      "bytes": 657596
+    },
+    "tone_eof_020400": {
+      "frames": 20400,
+      "bytes": 81600
+    },
+    "tone_eof_020400_pad400": {
+      "frames": 39600,
+      "bytes": 158400
+    },
+    "tone_eof_020400_pad3s": {
+      "frames": 164400,
+      "bytes": 657600
+    },
+    "tone_eof_020401": {
+      "frames": 20401,
+      "bytes": 81604
+    },
+    "tone_eof_020401_pad400": {
+      "frames": 39601,
+      "bytes": 158404
+    },
+    "tone_eof_020401_pad3s": {
+      "frames": 164401,
+      "bytes": 657604
+    },
+    "tone_1s_head": {
+      "frames": 48000,
+      "bytes": 192000
+    },
+    "silence2s_tone1s": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "tone1s_silence2s": {
+      "frames": 144000,
+      "bytes": 576000
+    },
+    "silence1s_tone1s_silence2s": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "two_bursts_one_file": {
+      "frames": 192000,
+      "bytes": 768000
+    },
+    "periodic_100ms_30s": {
+      "frames": 1440000,
+      "bytes": 5760000
+    },
+    "dc_three_levels": {
+      "frames": 144000,
+      "bytes": 576000
+    }
+  }
+}

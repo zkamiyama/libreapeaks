@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..4fd93cd 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -362,7 +362,7 @@ fn build_fine_spectral_f64_impl(
+     } else {
+         0.0
+     };
+-    let window: Vec<f32> = if nwin <= 1 {
++    let window: Vec<f32> = if nwin < 1 {
+         vec![1.0]
+     } else {
+         // REAPER 7.79 stores only floor(N/2)+1 Hann coefficients. It

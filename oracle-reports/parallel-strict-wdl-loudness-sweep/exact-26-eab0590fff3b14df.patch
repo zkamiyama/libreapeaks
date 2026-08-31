@@ -1,0 +1,13 @@
+diff --git a/src/strict_wdl.cpp b/src/strict_wdl.cpp
+index 7e1f11e..a82a28c 100644
+--- a/src/strict_wdl.cpp
++++ b/src/strict_wdl.cpp
+@@ -114,7 +114,7 @@ long long rpk_wdl_resample_all(
+         // therefore the frame count is divided by the channel count.
+         const int block_frames = std::max(1, 2048 / channels);
+ 
+-        while (in_pos < input_frames && out_pos < output_capacity_frames) {
++        while (in_pos <= input_frames && out_pos < output_capacity_frames) {
+             WDL_ResampleSample *inbuf = nullptr;
+             const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
+             if (wanted <= 0 || !inbuf) return kProcessingFailure;

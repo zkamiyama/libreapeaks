@@ -1,0 +1,13 @@
+diff --git a/src/loudness.rs b/src/loudness.rs
+index a42397e..f542478 100644
+--- a/src/loudness.rs
++++ b/src/loudness.rs
+@@ -2,7 +2,7 @@ use crate::error::{ReaPeaksError, Result};
+ use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+ use std::f64::consts::PI;
+ 
+-const MOMENTARY_BLOCKS_100MS: usize = 4;
++const MOMENTARY_BLOCKS_100MS: usize = 131072;
+ const SHORT_TERM_BLOCKS_100MS: usize = 30;
+ 
+ #[derive(Debug, Clone, Copy)]

@@ -15,12 +15,7 @@ pub fn fnv64(codes: impl IntoIterator<Item = u32>) -> u64 {
     hash
 }
 
-pub fn generate_i16(
-    pcm: &[i16],
-    sample_rate: u32,
-    channels: usize,
-    divisions: &[u32],
-) -> Vec<u32> {
+pub fn generate_i16(pcm: &[i16], sample_rate: u32, channels: usize, divisions: &[u32]) -> Vec<u32> {
     let options = GenerateOptions {
         sample_rate,
         channels,

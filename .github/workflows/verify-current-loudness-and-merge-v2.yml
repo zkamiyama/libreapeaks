@@ -1,0 +1,244 @@
+name: verify-current-loudness-and-merge-v2
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/verify-current-loudness-and-merge-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: verify-current-loudness-and-merge-v2
+  cancel-in-progress: false
+
+jobs:
+  converge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg gdb binutils jq
+          rustup toolchain install nightly --profile minimal --component rust-src || true
+      - name: Wait for primary hypothesis workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflows=(strict-wdl-denormal-mode-oracle-v2.yml parallel-strict-wdl-loudness-sweep.yml strict-wdl-compiler-semantics-sweep.yml sweep-loudness-source-mutations.yml)
+          mkdir -p /tmp/converge/results
+          : >/tmp/converge/results/upstream.tsv
+          for workflow in "${workflows[@]}"; do
+            run_id=0
+            for attempt in $(seq 1 180); do
+              run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=hardening-reapeaks-cache-ffmpeg&per_page=100" --jq '[.workflow_runs[] | select(.path == ".github/workflows/'"$workflow"'") | .id] | max // 0')"
+              [ "$run_id" != 0 ] && break
+              sleep 2
+            done
+            if [ "$run_id" = 0 ];then printf '%s\tmissing\n' "$workflow" >>/tmp/converge/results/upstream.tsv;continue;fi
+            conclusion=''
+            for attempt in $(seq 1 2250);do
+              payload="$(gh api repos/${GITHUB_REPOSITORY}/actions/runs/${run_id})";status="$(jq -r .status <<<"$payload")";conclusion="$(jq -r '.conclusion // ""' <<<"$payload")"
+              [ "$status" = completed ] && break
+              sleep 4
+            done
+            printf '%s\t%s\t%s\n' "$workflow" "$run_id" "${conclusion:-timeout}" | tee -a /tmp/converge/results/upstream.tsv
+            gh run view "$run_id" --log-failed >/tmp/converge/results/${workflow%.yml}.failed.log 2>&1 || true
+          done
+      - name: Refresh to latest research head
+        id: head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin hardening-reapeaks-cache-ffmpeg --force
+          git reset --hard origin/hardening-reapeaks-cache-ffmpeg
+          git submodule update --init --recursive
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Download fixed known-failing exact corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/converge/input /tmp/converge/fixed-output
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" >/tmp/converge/artifact.zip
+          unzip -q /tmp/converge/artifact.zip -d /tmp/converge/input
+      - name: Require current HEAD to pass the fixed full-file oracle
+        id: exact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json,os,re,shutil,subprocess
+          root=Path('/tmp/converge');inputs=root/'input';out=root/'fixed-output';shutil.rmtree(out,ignore_errors=True);out.mkdir()
+          source=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text();names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',source)));dirs=[p for p in inputs.rglob('*') if p.is_dir()];peak=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*.reapeaks')));pcm=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le','.pcm','.raw','.wav','.m4a'}));env=os.environ.copy()
+          for name in names:
+            if any(x in name for x in ('OUT','RESULT','CANDIDATE','GENERATED')):value=out
+            elif any(x in name for x in ('PCM','DECODE','AUDIO','MEDIA','SOURCE')):value=pcm
+            else:value=peak
+            env[name]=str(value)
+          cp=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1200);text=(cp.stdout or '')+'\n'+(cp.stderr or '');(root/'results'/'fixed-exact.log').write_text(text);status={'returncode':cp.returncode,'zero_tests':'0 tests' in text.lower(),'tail':text[-10000:]};(root/'results'/'fixed-exact.json').write_text(json.dumps(status,indent=2)+'\n');exact=cp.returncode==0 and not status['zero_tests'];print(json.dumps(status,indent=2));open(os.environ['GITHUB_OUTPUT'],'a').write(f'exact={str(exact).lower()}\n')
+          PY
+      - name: Publish unresolved current head and stop
+        if: steps.exact.outputs.exact != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p oracle-reports/verify-current-loudness-v2
+          cp /tmp/converge/results/fixed-exact.json oracle-reports/verify-current-loudness-v2/
+          cp /tmp/converge/results/upstream.tsv oracle-reports/verify-current-loudness-v2/
+          cp /tmp/converge/results/*.failed.log oracle-reports/verify-current-loudness-v2/ 2>/dev/null || true
+          git add oracle-reports/verify-current-loudness-v2
+          if ! git diff --cached --quiet;then git config user.name github-actions[bot];git config user.email 41898282+github-actions[bot]@users.noreply.github.com;git commit -m 'record unresolved current loudness head';git push origin HEAD:hardening-reapeaks-cache-ffmpeg;fi
+          exit 1
+      - name: Run all local and strict-WDL boundary gates
+        if: steps.exact.outputs.exact == 'true'
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          python -m compileall -q examples tests tools
+          if find tests -type f -name 'test_*.py' -print -quit | grep -q .;then python -m unittest discover -s tests -p 'test_*.py';fi
+      - name: Address and undefined behavior sanitizers
+        if: steps.exact.outputs.exact == 'true'
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+          CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: cargo +nightly test --target x86_64-unknown-linux-gnu --all-features --lib --tests -- --test-threads=1
+      - name: Build fresh matched WAVE and ALAC signal corpus
+        if: steps.exact.outputs.exact == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/converge/fresh;mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o "$root/reaper.tar.xz"
+          sha256sum "$root/reaper.tar.xz">"$root/results/reaper.sha256";tar -xJf "$root/reaper.tar.xz" -C "$root/reaper";REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111|head -1)";test -n "$REAPER_BIN";echo "REAPER_BIN=$REAPER_BIN">>"$GITHUB_ENV"
+          python - <<'PY'
+          from pathlib import Path
+          import math,random,struct,wave
+          root=Path('/tmp/converge/fresh/media');sr=48000;frames=sr*4;random.seed(0x779)
+          def write(name,fn):
+            data=bytearray()
+            for i in range(frames):
+              l,r=fn(i);data+=struct.pack('<hh',max(-32768,min(32767,l)),max(-32768,min(32767,r)))
+            (root/f'{name}.s16le').write_bytes(data)
+            with wave.open(str(root/f'{name}.wav'),'wb') as w:w.setnchannels(2);w.setsampwidth(2);w.setframerate(sr);w.writeframes(data)
+          write('silence',lambda i:(0,0));write('sine_997',lambda i:(int(15000*math.sin(2*math.pi*997*i/sr)),int(13000*math.sin(2*math.pi*997*i/sr+.2))));write('step',lambda i:((0 if i<sr else 8192 if i<2*sr else 16384 if i<3*sr else -8192),)*2);positions={0,1199,1200,1201,4799,4800,4801,19199,19200,19201,sr,2*sr,frames-1};write('impulse',lambda i:((28000 if i in positions else 0),)*2);write('ramp_noise',lambda i:(int(-20000+40000*i/(frames-1)),random.randint(-16000,16000)));write('tone_burst',lambda i:((int(14000*math.sin(2*math.pi*1000*i/sr)) if sr<=i<sr+19201 else 0),)*2)
+          PY
+          for wav in "$root"/media/*.wav;do base="${wav%.wav}";ffmpeg -hide_banner -loglevel error -y -i "$wav" -map_metadata -1 -c:a alac "$base.m4a";ffmpeg -hide_banner -loglevel error -y -i "$base.m4a" -f s16le -acodec pcm_s16le "$base.decoded.s16le";cmp "$base.s16le" "$base.decoded.s16le";done
+      - name: Generate fresh REAPER native and FFmpeg peaks
+        if: steps.exact.outputs.exact == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json,os,subprocess,tempfile,time
+          root=Path('/tmp/converge/fresh');media=root/'media';results=root/'results';reaper=Path(os.environ['REAPER_BIN']);probe=Path('tools/reaper_oracle/build_probe.lua').resolve();display=':93';log=(results/'xvfb.log').open('wb');x=subprocess.Popen(['Xvfb',display,'-screen','0','1280x720x24','-nolisten','tcp'],stdout=log,stderr=subprocess.STDOUT);rows=[]
+          try:
+            time.sleep(.4)
+            for source in sorted(list(media.glob('*.wav'))+list(media.glob('*.m4a'))):
+              peak=Path(str(source)+'.reapeaks');peak.unlink(missing_ok=True);case=Path(tempfile.mkdtemp());cfg=case/'reaper.ini';cfg.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n');status=case/'status';env=os.environ.copy();env.update(DISPLAY=display,REAPEAKS_MEDIA=str(source.resolve()),REAPEAKS_RESULT=str(status));cp=subprocess.run([str(reaper),'-newinst','-cfgfile',str(cfg),'-new','-nosplash',str(probe)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT,timeout=120);text=status.read_text(errors='replace') if status.exists() else '';row={'source':source.name,'rc':cp.returncode,'status':text,'peak':peak.exists()};rows.append(row)
+              if cp.returncode or 'OK loops=' not in text or not peak.exists():raise SystemExit(row)
+          finally:
+            x.terminate();x.wait(timeout=3);log.close()
+          (results/'runs.json').write_text(json.dumps(rows,indent=2)+'\n')
+          PY
+      - name: Compare native and FFmpeg REAPER paths plus fresh libreapeaks output
+        if: steps.exact.outputs.exact == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,re,shutil,subprocess
+          media=Path('/tmp/converge/fresh/media');rows=[]
+          for wav in sorted(media.glob('*.wav')):
+            a=Path(str(wav)+'.reapeaks').read_bytes();b=Path(str(wav.with_suffix('.m4a'))+'.reapeaks').read_bytes();na=a[:8]+b'\0'*8+a[16:];nb=b[:8]+b'\0'*8+b[16:];rows.append({'case':wav.stem,'equal':na==nb,'sha_wave':hashlib.sha256(na).hexdigest(),'sha_video':hashlib.sha256(nb).hexdigest()})
+            if na!=nb:raise SystemExit(f'native/FFmpeg mismatch {wav.stem}')
+          Path('/tmp/converge/fresh/results/path-equivalence.json').write_text(json.dumps(rows,indent=2)+'\n')
+          source=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text();names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',source)));out=Path('/tmp/converge/fresh/candidate');shutil.rmtree(out,ignore_errors=True);out.mkdir();env=os.environ.copy()
+          for name in names:
+            if any(x in name for x in ('OUT','RESULT','CANDIDATE','GENERATED')):value=out
+            else:value=media
+            env[name]=str(value)
+          cp=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1800);text=(cp.stdout or '')+'\n'+(cp.stderr or '');Path('/tmp/converge/fresh/results/fresh-exact.log').write_text(text)
+          if cp.returncode or '0 tests' in text.lower():raise SystemExit('fresh exact comparison failed')
+          PY
+      - name: Directly prove FFmpeg calls for fresh ALAC and absence for WAVE
+        if: steps.exact.outputs.exact == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os,re,subprocess,tempfile,time
+          root=Path('/tmp/converge/fresh');media=root/'media';results=root/'results';reaper=Path(os.environ['REAPER_BIN']);probe=Path('tools/reaper_oracle/build_probe.lua').resolve();display=':92'
+          script='''set pagination off\nset confirm off\nset breakpoint pending on\nset $a=0\nset $o=0\nset $r=0\nset $s=0\nset $v=0\nbreak avio_alloc_context\ncommands\nsilent\nset $a=$a+1\nif $a==1\nbt 8\nend\ncontinue\nend\nbreak avformat_open_input\ncommands\nsilent\nset $o=$o+1\ncontinue\nend\nbreak av_read_frame\ncommands\nsilent\nset $r=$r+1\ncontinue\nend\nbreak avcodec_send_packet\ncommands\nsilent\nset $s=$s+1\nif $s==1\nbt 8\nend\ncontinue\nend\nbreak avcodec_receive_frame\ncommands\nsilent\nset $v=$v+1\ncontinue\nend\nrun\nprintf "FFTRACE_SUMMARY avio=%d open=%d read=%d send=%d receive=%d\\n",$a,$o,$r,$s,$v\nquit\n'''
+          def trace(tag,path):
+            case=Path(tempfile.mkdtemp());cfg=case/'reaper.ini';cfg.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n');status=case/'status';g=case/'trace.gdb';g.write_text(script);log=results/f'{tag}.gdb.log';env=os.environ.copy();env.update(DISPLAY=display,REAPEAKS_MEDIA=str(path.resolve()),REAPEAKS_RESULT=str(status))
+            with log.open('wb') as f:cp=subprocess.run(['gdb','-q','--batch','-x',str(g),'--args',str(reaper),'-newinst','-cfgfile',str(cfg),'-new','-nosplash',str(probe)],env=env,stdout=f,stderr=subprocess.STDOUT,timeout=180)
+            text=log.read_text(errors='replace');m=re.search(r'FFTRACE_SUMMARY avio=(\d+) open=(\d+) read=(\d+) send=(\d+) receive=(\d+)',text)
+            if not m:raise SystemExit(f'missing trace {tag}')
+            return tuple(map(int,m.groups())),text
+          xlog=(results/'trace-xvfb.log').open('wb');x=subprocess.Popen(['Xvfb',display,'-screen','0','1280x720x24','-nolisten','tcp'],stdout=xlog,stderr=subprocess.STDOUT)
+          try:time.sleep(.4);w=trace('wave',media/'step.wav');a=trace('alac',media/'step.m4a')
+          finally:x.terminate();x.wait(timeout=3);xlog.close()
+          if w[0]!=(0,0,0,0,0):raise SystemExit(f'WAVE FFmpeg calls {w[0]}')
+          if not all(n>0 for n in a[0]) or 'reaper_video.so' not in a[1] or 'libavformat.so' not in a[1] or 'libavcodec.so' not in a[1]:raise SystemExit(f'ALAC provenance failed {a[0]}')
+          (results/'provenance.txt').write_text(f'wave={w[0]}\nalac={a[0]}\n')
+          PY
+      - name: Merge immutable latest verified HEAD
+        if: steps.exact.outputs.exact == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ steps.head.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIED_SHA"
+          test "$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .head.sha)" = "$VERIFIED_SHA"
+          test "$(gh api repos/${GITHUB_REPOSITORY}/pulls/2 --jq .state)" = open
+          response="$(gh api -X PUT repos/${GITHUB_REPOSITORY}/pulls/2/merge -f merge_method=merge -f sha="$VERIFIED_SHA")";echo "$response">/tmp/converge/results/merge.json;test "$(jq -r .merged <<<"$response")" = true;echo "$(jq -r .sha <<<"$response")">/tmp/converge/results/merge-sha.txt
+      - name: Verify main tree and rerun post-merge tests
+        if: steps.exact.outputs.exact == 'true'
+        env:
+          VERIFIED_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --force
+          merge_sha="$(cat /tmp/converge/results/merge-sha.txt)"
+          test "$(git rev-parse origin/main)" = "$merge_sha"
+          test "$(git rev-parse "$VERIFIED_SHA^{tree}")" = "$(git rev-parse "$merge_sha^{tree}")"
+          git checkout --detach "$merge_sha";git submodule update --init --recursive
+          cargo fmt --all -- --check;cargo test --all-features;cargo clippy --all-targets --all-features -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-current-loudness-and-merge-v2-${{ github.sha }}
+          path: |
+            /tmp/converge/results
+            /tmp/converge/fresh/results
+          if-no-files-found: warn
+          retention-days: 30

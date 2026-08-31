@@ -1,0 +1,94 @@
+name: reaper-ffmpeg-oracle-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-ffmpeg-oracle-probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install REAPER runtime and media tools
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate deterministic compressed-media corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ffmpeg-oracle-media
+          ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=997:sample_rate=48000:duration=2.75' \
+            -f lavfi -i 'sine=frequency=3137:sample_rate=48000:duration=2.75' \
+            -filter_complex '[0:a]volume=0.57[a0];[1:a]volume=0.19[a1];[a0][a1]amerge=inputs=2[a]' \
+            -map '[a]' -c:a pcm_s16le /tmp/ffmpeg-oracle-media/reference.wav
+          cd /tmp/ffmpeg-oracle-media
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a aac -b:a 192k aac.m4a
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a libmp3lame -q:a 2 mp3.mp3
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a libvorbis -q:a 6 vorbis.ogg
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a libopus -b:a 160k opus.opus
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a ac3 -b:a 192k ac3.ac3
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a eac3 -b:a 192k eac3.eac3
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a wmav2 -b:a 192k wma.wma
+          ffmpeg -hide_banner -loglevel error -y -i reference.wav -c:a alac alac.m4a
+          ls -lh
+      - name: Probe actual REAPER source type and generated peak layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib, shutil, struct, subprocess, tempfile, time
+
+          reaper = pathlib.Path(os.environ['REAPER_BIN'])
+          root = pathlib.Path('/tmp/ffmpeg-oracle-media')
+          script = pathlib.Path('tools/reaper_oracle/build_probe.lua').resolve()
+          media = [p for p in sorted(root.iterdir()) if p.name != 'reference.wav']
+          display = ':98'
+          xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'])
+          try:
+              time.sleep(.35)
+              print('name\ttype\tmagic\tsr\tch\tlayers\tsize')
+              for idx, src in enumerate(media):
+                  for old in root.rglob(src.name + '.reapeaks'):
+                      old.unlink()
+                  case = pathlib.Path(tempfile.mkdtemp(prefix=f'reaper-probe-{idx}-'))
+                  config = case / 'reaper.ini'
+                  config.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n', encoding='utf-8')
+                  result = case / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(DISPLAY=display, REAPEAKS_MEDIA=str(src.resolve()), REAPEAKS_RESULT=str(result))
+                  cp = subprocess.run([str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
+                  status = result.read_text(encoding='utf-8') if result.exists() else ''
+                  typ = next((line[5:] for line in status.splitlines() if line.startswith('TYPE=')), 'UNKNOWN')
+                  if cp.returncode != 0 or 'OK loops=' not in status:
+                      print(f'{src.name}\t{typ}\tBUILD_FAILED\tstatus={status!r}')
+                      continue
+                  peaks = list(root.rglob(src.name + '.reapeaks'))
+                  if len(peaks) != 1:
+                      print(f'{src.name}\t{typ}\tPEAK_COUNT_{len(peaks)}\t{peaks}')
+                      continue
+                  data = peaks[0].read_bytes()
+                  magic = data[:4].decode('ascii', 'replace')
+                  ch = data[4]
+                  count = data[5]
+                  sr = struct.unpack_from('<I', data, 6)[0]
+                  headers = [struct.unpack_from('<iI', data, 18 + 8*i) for i in range(count)]
+                  layers = ','.join(f'{d}:{n}' for d,n in headers)
+                  print(f'{src.name}\t{typ}\t{magic}\t{sr}\t{ch}\t{layers}\t{len(data)}')
+          finally:
+              xvfb.terminate()
+              try: xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired: xvfb.kill()
+          PY

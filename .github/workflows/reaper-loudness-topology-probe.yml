@@ -1,0 +1,163 @@
+name: reaper-loudness-topology-probe
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-loudness-topology-probe.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-loudness-topology
+          mkdir -p "$root/reaper" "$root/results" "$root/media"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          sha256sum "$root/reaper779_linux_x86_64.tar.xz" | tee "$root/results/reaper.sha256"
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create deterministic topology fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-loudness-topology/media')
+          rates = [22050, 22051, 32000, 44100, 48000, 96000]
+          for sr in rates:
+              frames = sr * 3
+              cases = {
+                  'step': lambda n, sr=sr: 0 if n < sr else 8192 if n < 2 * sr else 16384,
+                  'impulse': lambda n, sr=sr: 32767 if n in (0, max(1, round(sr * 0.025)), max(1, round(sr * 0.8)), 2 * sr) else 0,
+              }
+              for name, sample in cases.items():
+                  path = root / f'{name}-{sr}.wav'
+                  with wave.open(str(path), 'wb') as out:
+                      out.setnchannels(2)
+                      out.setsampwidth(2)
+                      out.setframerate(sr)
+                      payload = bytearray()
+                      for frame in range(frames):
+                          value = sample(frame)
+                          payload += struct.pack('<hh', value, value)
+                      out.writeframes(payload)
+          PY
+      - name: Build REAPER mode-3 caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          media_root = Path('/tmp/reaper-loudness-topology/media')
+          results = Path('/tmp/reaper-loudness-topology/results')
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], stdout=xvfb_log, stderr=subprocess.STDOUT)
+          try:
+              time.sleep(0.35)
+              for index, media in enumerate(sorted(media_root.glob('*.wav'))):
+                  case = Path(tempfile.mkdtemp(prefix=f'reaper-topology-{index:02d}-'))
+                  config = case / 'reaper.ini'
+                  config.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n', encoding='utf-8')
+                  status_path = case / 'status.txt'
+                  env = os.environ.copy()
+                  env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status_path))
+                  log_path = results / f'{media.stem}.reaper.log'
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run([str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=90, check=False)
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{media.stem}.status.txt').write_text(status, encoding='utf-8')
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{media.name}: REAPER failed rc={completed.returncode}, status={status!r}')
+                  write_path = next((line[len('PEAK_WRITE='):] for line in status.splitlines() if line.startswith('PEAK_WRITE=')), '')
+                  candidates = []
+                  if write_path:
+                      candidates.append(Path(write_path))
+                  candidates.extend(media_root.rglob(media.name + '.reapeaks'))
+                  peak = next((candidate for candidate in candidates if candidate.exists()), None)
+                  if peak is None:
+                      raise SystemExit(f'{media.name}: peak file missing; write_path={write_path!r}; status={status!r}')
+                  shutil.copy2(peak, results / f'{media.stem}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Dump loudness layers as exact f32 bits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import struct
+
+          root = Path('/tmp/reaper-loudness-topology/results')
+          report = {}
+          for path in sorted(root.glob('*.reaper.reapeaks')):
+              data = path.read_bytes()
+              channels = data[4]
+              layer_count = data[5]
+              sample_rate = struct.unpack_from('<I', data, 6)[0]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  if division > 0 or division in (-115, -114):
+                      size = count * channels * 4
+                  elif division == -103:
+                      size = count * channels * 192
+                  else:
+                      raise SystemExit(f'unknown layer token {division}')
+                  payload = data[offset:offset + size]
+                  if division == -114:
+                      words = [struct.unpack_from('<I', payload, i)[0] for i in range(0, len(payload), 4)]
+                      layers.append({'division': division, 'count': count, 'sha256': hashlib.sha256(payload).hexdigest(), 'u32': words})
+                  offset += size
+              report[path.stem.removesuffix('.reaper')] = {'sample_rate': sample_rate, 'headers': headers, 'loudness': layers, 'file_sha256': hashlib.sha256(data).hexdigest()}
+          destination = root / 'topology-oracle.json'
+          destination.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          print(destination.read_text())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-loudness-topology-${{ github.sha }}
+          path: |
+            /tmp/reaper-loudness-topology/results
+            /tmp/reaper-loudness-topology/media/*.wav
+          if-no-files-found: error
+          retention-days: 3

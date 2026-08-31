@@ -1,0 +1,572 @@
+name: reaper-loudness-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-loudness-probe.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-loudness-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install REAPER runtime and media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-loudness
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          sha256sum "$root/reaper779_linux_x86_64.tar.xz" \
+            | tee "$root/results/reaper-tarball.sha256"
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+
+      - name: Generate boundary, state, EOF, and precision fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+          import json
+          import math
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-loudness/media')
+          root.mkdir(parents=True, exist_ok=True)
+          sample_rate = 48_000
+          hop = 2_400
+          momentary = 19_200
+          short_term = 144_000
+          metadata: list[dict[str, object]] = []
+
+          def clamp16(value: float | int) -> int:
+              return max(-32768, min(32767, int(round(value))))
+
+          def write_case(
+              name: str,
+              frames: int,
+              sample,
+              *,
+              channels: int = 1,
+              family: str,
+              event_samples: list[int] | None = None,
+              notes: str = '',
+          ) -> None:
+              if frames <= 0:
+                  raise ValueError(f'{name}: frames must be positive')
+              raw_path = root / f'{name}.s16le'
+              wav_path = root / f'{name}.wav'
+              payload = bytearray()
+              for frame in range(frames):
+                  values = sample(frame)
+                  if isinstance(values, int):
+                      values = (values,)
+                  if len(values) != channels:
+                      raise ValueError(f'{name}: expected {channels} channels, got {values!r}')
+                  for value in values:
+                      payload += struct.pack('<h', clamp16(value))
+              raw_path.write_bytes(payload)
+              with wave.open(str(wav_path), 'wb') as output:
+                  output.setnchannels(channels)
+                  output.setsampwidth(2)
+                  output.setframerate(sample_rate)
+                  output.writeframes(payload)
+              metadata.append({
+                  'name': name,
+                  'source': wav_path.name,
+                  'raw': raw_path.name,
+                  'source_kind': 'WAVE',
+                  'sample_rate': sample_rate,
+                  'channels': channels,
+                  'frames': frames,
+                  'family': family,
+                  'event_samples': event_samples or [],
+                  'notes': notes,
+              })
+
+          boundary_lengths = sorted({
+              1,
+              hop - 1, hop, hop + 1,
+              2 * hop - 1, 2 * hop, 2 * hop + 1,
+              momentary - 1, momentary, momentary + 1,
+              momentary + hop - 1, momentary + hop, momentary + hop + 1,
+              short_term - 1, short_term, short_term + 1,
+          })
+          for frames in boundary_lengths:
+              write_case(
+                  f'silence_n{frames}', frames, lambda _frame: 0,
+                  family='length-boundary',
+                  notes='silence around output/window/EOF boundaries',
+              )
+
+          event_positions = [
+              0, 1,
+              hop - 1, hop, hop + 1,
+              2 * hop - 1, 2 * hop, 2 * hop + 1,
+              momentary - 1, momentary, momentary + 1,
+          ]
+          event_total = momentary + 5 * hop + 17
+
+          for position in event_positions:
+              write_case(
+                  f'impulse_at_{position}', event_total,
+                  lambda frame, position=position: 32767 if frame == position else 0,
+                  family='impulse-boundary',
+                  event_samples=[position],
+                  notes='single impulse probes filter latency and moving-window inclusion',
+              )
+
+          for position in event_positions:
+              write_case(
+                  f'step_at_{position}', event_total,
+                  lambda frame, position=position: 8192 if frame >= position else 0,
+                  family='step-boundary',
+                  event_samples=[position],
+                  notes='DC step probes transient state and exact outgoing-sample behavior',
+              )
+
+          tone_lengths = [hop - 1, hop, hop + 1, momentary - 1, momentary, momentary + 1]
+          for tone_frames in tone_lengths:
+              def tone(frame: int, tone_frames=tone_frames) -> int:
+                  if frame >= tone_frames:
+                      return 0
+                  return clamp16(0.5 * 32767 * math.sin(2 * math.pi * 997 * frame / sample_rate))
+              write_case(
+                  f'tone_eof_n{tone_frames}', tone_frames, tone,
+                  family='eof-flush',
+                  event_samples=[0, tone_frames],
+                  notes='tone ends exactly at EOF',
+              )
+              write_case(
+                  f'tone_padded_n{tone_frames}', tone_frames + momentary, tone,
+                  family='eof-flush',
+                  event_samples=[0, tone_frames],
+                  notes='same tone prefix followed by an explicit 400 ms of zero PCM',
+              )
+
+          burst_start = 2 * hop
+          burst_len = 3 * hop
+          total = momentary + 8 * hop
+          def burst(frame: int, start: int) -> int:
+              if start <= frame < start + burst_len:
+                  phase = frame - start
+                  return clamp16(0.5 * 32767 * math.sin(2 * math.pi * 997 * phase / sample_rate))
+              return 0
+
+          write_case(
+              'tone_burst_no_preroll', total,
+              lambda frame: burst(frame, 0),
+              family='filter-state', event_samples=[0, burst_len],
+              notes='burst starts at source frame zero',
+          )
+          write_case(
+              'tone_burst_with_preroll', total,
+              lambda frame: burst(frame, burst_start),
+              family='filter-state', event_samples=[burst_start, burst_start + burst_len],
+              notes='identical burst after 100 ms of zero pre-roll',
+          )
+          second_start = momentary + 3 * hop
+          write_case(
+              'two_tone_bursts', second_start + burst_len + momentary,
+              lambda frame: burst(frame, burst_start) + burst(frame, second_start),
+              family='filter-state',
+              event_samples=[burst_start, burst_start + burst_len, second_start, second_start + burst_len],
+              notes='tests whether the same source retains state between separated bursts',
+          )
+
+          long_frames = short_term + 8 * hop
+          write_case(
+              'alternating_long', long_frames,
+              lambda frame: 8192 if frame & 1 else -8192,
+              family='numeric-stability',
+              notes='Nyquist alternating signal; every output block is identical',
+          )
+          write_case(
+              'sine_1000_long', long_frames,
+              lambda frame: clamp16(0.5 * 32767 * math.sin(2 * math.pi * 1000 * frame / sample_rate)),
+              family='numeric-stability',
+              notes='exactly 50 cycles per 50 ms output block',
+          )
+          write_case(
+              'dc_025_long', long_frames, lambda _frame: 8192,
+              family='numeric-stability',
+              notes='constant DC isolates K-weighting transient and cancellation residue',
+          )
+
+          write_case(
+              'stereo_asymmetric', short_term + 2 * hop,
+              lambda frame: (
+                  clamp16(0.5 * 32767 * math.sin(2 * math.pi * 997 * frame / sample_rate)),
+                  8192 if frame >= momentary else 0,
+              ),
+              channels=2, family='channel-layout', event_samples=[momentary],
+              notes='different deterministic signal in each channel',
+          )
+          write_case(
+              'stereo_swapped', short_term + 2 * hop,
+              lambda frame: (
+                  8192 if frame >= momentary else 0,
+                  clamp16(0.5 * 32767 * math.sin(2 * math.pi * 997 * frame / sample_rate)),
+              ),
+              channels=2, family='channel-layout', event_samples=[momentary],
+              notes='same channels as stereo_asymmetric in reversed order',
+          )
+
+          impulses = [0, hop // 2, 16 * hop, 40 * hop, short_term]
+          write_case(
+              'impulse_history', short_term + momentary + 4 * hop,
+              lambda frame: 32767 if frame in impulses else 0,
+              family='numeric-stability', event_samples=impulses,
+              notes='separated impulses expose persistent rolling-sum residue',
+          )
+
+          (root / 'fixtures.json').write_text(
+              json.dumps({
+                  'sample_rate': sample_rate,
+                  'hop': hop,
+                  'momentary_window': momentary,
+                  'short_term_window': short_term,
+                  'peakcachegenrs': 300,
+                  'cases': metadata,
+              }, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(f'generated {len(metadata)} deterministic fixtures')
+          PY
+
+          for name in step_at_4800 impulse_at_4800 impulse_history; do
+            ffmpeg -hide_banner -loglevel error -y \
+              -i "/tmp/reaper-loudness/media/$name.wav" \
+              -map_metadata -1 -c:a alac \
+              "/tmp/reaper-loudness/media/ffmpeg_$name.m4a"
+            ffmpeg -hide_banner -loglevel error -y \
+              -i "/tmp/reaper-loudness/media/ffmpeg_$name.m4a" \
+              -f s16le -acodec pcm_s16le \
+              "/tmp/reaper-loudness/media/ffmpeg_$name.decoded.s16le"
+            cmp "/tmp/reaper-loudness/media/$name.s16le" \
+                "/tmp/reaper-loudness/media/ffmpeg_$name.decoded.s16le"
+          done
+
+      - name: Build fresh REAPER mode-3 peaks, one process per source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+          import json
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          root = Path('/tmp/reaper-loudness')
+          media_root = root / 'media'
+          results = root / 'results'
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          fixture_doc = json.loads((media_root / 'fixtures.json').read_text(encoding='utf-8'))
+          sources = [media_root / case['source'] for case in fixture_doc['cases']]
+          sources += sorted(media_root.glob('ffmpeg_*.m4a'))
+          display = ':97'
+          outcomes: list[dict[str, object]] = []
+
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.35)
+              for index, media in enumerate(sources):
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case = Path(tempfile.mkdtemp(prefix=f'reaper-loudness-{index:03d}-'))
+                  config = case / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=64\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case / 'status.txt'
+                  log_path = results / f'{media.stem}.reaper.log'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  try:
+                      with log_path.open('wb') as log:
+                          completed = subprocess.run(
+                              [
+                                  str(reaper), '-newinst', '-cfgfile', str(config),
+                                  '-new', '-nosplash', str(script),
+                              ],
+                              env=env,
+                              stdout=log,
+                              stderr=subprocess.STDOUT,
+                              timeout=90,
+                              check=False,
+                          )
+                      returncode: int | None = completed.returncode
+                      timeout_error = ''
+                  except subprocess.TimeoutExpired as error:
+                      returncode = None
+                      timeout_error = str(error)
+                  status = status_path.read_text(errors='replace') if status_path.exists() else ''
+                  source_type = next(
+                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                      '',
+                  )
+                  peaks = list(media_root.rglob(peak_name))
+                  outcome: dict[str, object] = {
+                      'name': media.stem,
+                      'media': media.name,
+                      'source_type': source_type,
+                      'returncode': returncode,
+                      'status': status,
+                      'timeout_error': timeout_error,
+                      'peak_candidates': [str(path) for path in peaks],
+                  }
+                  if returncode == 0 and 'OK loops=' in status and len(peaks) == 1:
+                      output = results / f'{media.stem}.reapeaks'
+                      shutil.copy2(peaks[0], output)
+                      outcome['output'] = output.name
+                      outcome['ok'] = True
+                  else:
+                      outcome['ok'] = False
+                  outcomes.append(outcome)
+                  (results / f'{media.stem}.status.txt').write_text(status, encoding='utf-8')
+                  print(
+                      f"{media.name}: ok={outcome['ok']} type={source_type!r} "
+                      f"rc={returncode} peaks={len(peaks)}"
+                  )
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+
+          (results / 'outcomes.json').write_text(
+              json.dumps(outcomes, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          required = {'step_at_4800', 'impulse_at_4800', 'impulse_history', 'sine_1000_long'}
+          failed_required = sorted(
+              required - {str(item['name']) for item in outcomes if item.get('ok')}
+          )
+          if failed_required:
+              raise SystemExit(f'required REAPER fixtures failed: {failed_required}')
+          PY
+
+      - name: Decode every loudness record with exact float bits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+          import csv
+          import hashlib
+          import json
+          import math
+          import struct
+
+          root = Path('/tmp/reaper-loudness')
+          media_root = root / 'media'
+          results = root / 'results'
+          fixture_doc = json.loads((media_root / 'fixtures.json').read_text(encoding='utf-8'))
+          fixture_by_name = {case['name']: case for case in fixture_doc['cases']}
+          summaries: list[dict[str, object]] = []
+          rows: list[dict[str, object]] = []
+
+          def parse(path: Path):
+              data = path.read_bytes()
+              if len(data) < 18:
+                  raise ValueError(f'{path}: truncated header')
+              magic = data[:4].decode('ascii')
+              channels = data[4]
+              layer_count = data[5]
+              sample_rate, source_mtime, source_size = struct.unpack_from('<III', data, 6)
+              headers = [
+                  struct.unpack_from('<iI', data, 18 + 8 * index)
+                  for index in range(layer_count)
+              ]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for layer_index, (division, count) in enumerate(headers):
+                  if division > 0 or division in (-115, -114, -108):
+                      size = count * channels * 4
+                  elif division == -103:
+                      size = count * channels * 192
+                  else:
+                      raise ValueError(f'{path}: unknown token {division}')
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise ValueError(f'{path}: truncated layer {layer_index}')
+                  layers.append((layer_index, division, count, offset, payload))
+                  offset += size
+              if offset != len(data):
+                  raise ValueError(f'{path}: unconsumed bytes {offset} != {len(data)}')
+              return data, magic, channels, sample_rate, source_mtime, source_size, headers, layers
+
+          for path in sorted(results.glob('*.reapeaks')):
+              data, magic, channels, sample_rate, source_mtime, source_size, headers, layers = parse(path)
+              name = path.stem
+              base_name = name.removeprefix('ffmpeg_')
+              fixture = fixture_by_name.get(base_name, {})
+              summary: dict[str, object] = {
+                  'name': name,
+                  'base_name': base_name,
+                  'source_kind': 'VIDEO_FFMPEG' if name.startswith('ffmpeg_') else 'WAVE',
+                  'magic': magic,
+                  'channels': channels,
+                  'sample_rate': sample_rate,
+                  'source_mtime_low32': source_mtime,
+                  'source_size_low32': source_size,
+                  'bytes': len(data),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'headers': headers,
+                  'fixture': fixture,
+                  'loudness_layers': [],
+              }
+              for layer_index, division, count, offset, payload in layers:
+                  if division != -114:
+                      continue
+                  if count % 2:
+                      raise ValueError(f'{path}: odd -114 value count {count}')
+                  record_count = count // 2
+                  expected_values = record_count * channels * 2
+                  values = struct.unpack('<' + 'f' * expected_values, payload)
+                  layer_summary = {
+                      'layer_index': layer_index,
+                      'division': division,
+                      'value_count_per_channel': count,
+                      'record_count': record_count,
+                      'offset': offset,
+                      'bytes': len(payload),
+                      'sha256': hashlib.sha256(payload).hexdigest(),
+                  }
+                  summary['loudness_layers'].append(layer_summary)
+                  cursor = 0
+                  for record in range(record_count):
+                      for channel in range(channels):
+                          momentary = values[cursor]
+                          short_term = values[cursor + 1]
+                          cursor += 2
+                          momentary_bits = struct.unpack('<I', struct.pack('<f', momentary))[0]
+                          short_bits = struct.unpack('<I', struct.pack('<f', short_term))[0]
+                          rows.append({
+                              'name': name,
+                              'base_name': base_name,
+                              'source_kind': summary['source_kind'],
+                              'layer_index': layer_index,
+                              'record': record,
+                              'completed_frame_nominal': min(
+                                  int(fixture.get('frames', (record + 1) * 2400)),
+                                  (record + 1) * 2400,
+                              ),
+                              'channel': channel,
+                              'momentary': repr(momentary),
+                              'momentary_bits': f'{momentary_bits:08x}',
+                              'short_term': repr(short_term),
+                              'short_term_bits': f'{short_bits:08x}',
+                              'momentary_finite': math.isfinite(momentary),
+                              'short_term_finite': math.isfinite(short_term),
+                          })
+              summaries.append(summary)
+
+          (results / 'loudness-oracle.json').write_text(
+              json.dumps({
+                  'probe': {
+                      'reaper_version': '7.79',
+                      'platform': 'linux-x86_64',
+                      'peakcachegenmode': 3,
+                      'peakcachegenrs': 300,
+                      'sample_rate': 48_000,
+                      'nominal_base_loudness_division': 2_400,
+                      'nominal_momentary_window': 19_200,
+                      'nominal_short_term_window': 144_000,
+                  },
+                  'files': summaries,
+              }, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          with (results / 'loudness-records.tsv').open('w', newline='', encoding='utf-8') as output:
+              writer = csv.DictWriter(output, fieldnames=list(rows[0]), delimiter='\t')
+              writer.writeheader()
+              writer.writerows(rows)
+
+          print(f'parsed {len(summaries)} ReaPeaks files and {len(rows)} loudness rows')
+
+          for base_name in ('step_at_4800', 'impulse_at_4800', 'impulse_history'):
+              wave_path = results / f'{base_name}.reapeaks'
+              video_path = results / f'ffmpeg_{base_name}.reapeaks'
+              if not wave_path.exists() or not video_path.exists():
+                  raise SystemExit(f'missing decoder-equivalence pair for {base_name}')
+              wave_data = bytearray(wave_path.read_bytes())
+              video_data = bytearray(video_path.read_bytes())
+              wave_data[10:18] = b'\0' * 8
+              video_data[10:18] = b'\0' * 8
+              if wave_data != video_data:
+                  first = next(
+                      index for index, (left, right) in enumerate(zip(wave_data, video_data))
+                      if left != right
+                  )
+                  raise SystemExit(
+                      f'{base_name}: WAVE/FFmpeg REAPER payload mismatch at byte {first}'
+                  )
+              print(f'{base_name}: WAVE_AND_FFMPEG_PAYLOAD_IDENTICAL bytes={len(wave_data)}')
+          PY
+
+      - name: Upload exhaustive REAPER loudness oracle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-loudness-probe-${{ github.sha }}
+          path: |
+            /tmp/reaper-loudness/results
+            /tmp/reaper-loudness/media/fixtures.json
+            /tmp/reaper-loudness/media/*.s16le
+            /tmp/reaper-loudness/media/*.m4a
+          if-no-files-found: error
+          retention-days: 14

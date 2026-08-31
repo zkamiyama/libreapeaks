@@ -17,10 +17,18 @@ pub struct RpkBuffer {
 
 impl RpkBuffer {
     fn empty() -> Self {
-        Self { data: ptr::null_mut(), len: 0, capacity: 0 }
+        Self {
+            data: ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+        }
     }
     fn from_vec(mut v: Vec<u8>) -> Self {
-        let out = Self { data: v.as_mut_ptr(), len: v.len(), capacity: v.capacity() };
+        let out = Self {
+            data: v.as_mut_ptr(),
+            len: v.len(),
+            capacity: v.capacity(),
+        };
         std::mem::forget(v);
         out
     }
@@ -49,11 +57,19 @@ pub struct RpkViewPlan {
 
 #[no_mangle]
 pub unsafe extern "C" fn rpk_open(path: *const c_char, out: *mut *mut RpkHandle) -> i32 {
-    if path.is_null() || out.is_null() {
+    if out.is_null() {
         return -1;
     }
-    let Ok(s) = CStr::from_ptr(path).to_str() else { return -2 };
-    let Ok(file) = ReaPeaks::open(s) else { return -3 };
+    *out = ptr::null_mut();
+    if path.is_null() {
+        return -1;
+    }
+    let Ok(s) = CStr::from_ptr(path).to_str() else {
+        return -2;
+    };
+    let Ok(file) = ReaPeaks::open(s) else {
+        return -3;
+    };
     let pyramid = WavePyramid::from_reapeaks(&file, 4);
     *out = Box::into_raw(Box::new(RpkHandle { file, pyramid }));
     0
@@ -82,8 +98,12 @@ pub unsafe extern "C" fn rpk_get_level_info(
     index: usize,
     out: *mut RpkLevelInfo,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
-    let Some(l) = h.pyramid.levels.get(index) else { return -2 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
+    let Some(l) = h.pyramid.levels.get(index) else {
+        return -2;
+    };
     *out = RpkLevelInfo {
         division: l.division,
         peak_count: l.peak_count,
@@ -100,8 +120,12 @@ pub unsafe extern "C" fn rpk_plan_view(
     pixels: usize,
     out: *mut RpkViewPlan,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
-    let Some(p) = h.pyramid.choose_level(start, end, pixels) else { return -2 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
+    let Some(p) = h.pyramid.choose_level(start, end, pixels) else {
+        return -2;
+    };
     *out = RpkViewPlan {
         level_index: p.level_index,
         division: p.division,
@@ -134,17 +158,28 @@ pub unsafe extern "C" fn rpk_tile_texture_rgba8(
     out_height: *mut usize,
     out: *mut RpkBuffer,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
+    let Ok(level_index) = u16::try_from(level_index) else {
+        return -2;
+    };
     let Some(tile) = h.pyramid.tile(WaveTileKey {
-        level_index: level_index as u16,
+        level_index,
         tile_index,
     }) else {
         return -2;
     };
     let img = encode_wave_tile_rgba8(&tile, h.pyramid.channels);
-    if let Some(x) = out_first_peak.as_mut() { *x = tile.first_peak; }
-    if let Some(x) = out_width.as_mut() { *x = img.width; }
-    if let Some(x) = out_height.as_mut() { *x = img.height; }
+    if let Some(x) = out_first_peak.as_mut() {
+        *x = tile.first_peak;
+    }
+    if let Some(x) = out_width.as_mut() {
+        *x = img.width;
+    }
+    if let Some(x) = out_height.as_mut() {
+        *x = img.height;
+    }
     *out = RpkBuffer::from_vec(img.data);
     0
 }
@@ -157,19 +192,31 @@ pub unsafe extern "C" fn rpk_level_texture_rgba8(
     out_height: *mut usize,
     out: *mut RpkBuffer,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
-    let Some(meta) = h.pyramid.levels.get(level_index).copied() else { return -2 };
-    let Some(peaks) = h.pyramid.read_range(level_index, 0, meta.peak_count) else { return -3 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
+    let Some(meta) = h.pyramid.levels.get(level_index).copied() else {
+        return -2;
+    };
+    let Some(peaks) = h.pyramid.read_range(level_index, 0, meta.peak_count) else {
+        return -3;
+    };
     let img = encode_envelope_rgba8(&peaks, h.pyramid.channels);
-    if let Some(x) = out_width.as_mut() { *x = img.width; }
-    if let Some(x) = out_height.as_mut() { *x = img.height; }
+    if let Some(x) = out_width.as_mut() {
+        *x = img.width;
+    }
+    if let Some(x) = out_height.as_mut() {
+        *x = img.height;
+    }
     *out = RpkBuffer::from_vec(img.data);
     0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rpk_spectral_layer_count(h: *const RpkHandle) -> usize {
-    h.as_ref().map(|x| x.file.spectral_layers.len()).unwrap_or(0)
+    h.as_ref()
+        .map(|x| x.file.spectral_layers.len())
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -182,20 +229,37 @@ pub unsafe extern "C" fn rpk_spectral_tile_texture_rgba8(
     out_height: *mut usize,
     out: *mut RpkBuffer,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
-    let Some(layer) = h.file.spectral_layers.get(spectral_layer_index) else { return -2 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
+    let Some(layer) = h.file.spectral_layers.get(spectral_layer_index) else {
+        return -2;
+    };
     let ch = h.file.header.channels as usize;
     let n = if ch == 0 { 0 } else { layer.peaks.len() / ch };
     let tile = h.pyramid.tile_peaks.max(1);
-    let first = (tile_index as usize).saturating_mul(tile);
-    if first >= n { return -3; }
+    let Ok(tile_index) = usize::try_from(tile_index) else {
+        return -3;
+    };
+    let Some(first) = tile_index.checked_mul(tile) else {
+        return -3;
+    };
+    if first >= n {
+        return -3;
+    }
     let count = tile.min(n - first);
     let a = first * ch;
     let b = (first + count) * ch;
     let img = encode_spectral_rgba8(&layer.peaks[a..b], ch);
-    if let Some(x) = out_first_peak.as_mut() { *x = first; }
-    if let Some(x) = out_width.as_mut() { *x = img.width; }
-    if let Some(x) = out_height.as_mut() { *x = img.height; }
+    if let Some(x) = out_first_peak.as_mut() {
+        *x = first;
+    }
+    if let Some(x) = out_width.as_mut() {
+        *x = img.width;
+    }
+    if let Some(x) = out_height.as_mut() {
+        *x = img.height;
+    }
     *out = RpkBuffer::from_vec(img.data);
     0
 }
@@ -211,17 +275,7 @@ pub unsafe extern "C" fn rpk_render_rgba8(
     wave_rgba: u32,
     out: *mut RpkBuffer,
 ) -> i32 {
-    rpk_render_rgba8_scaled(
-        h,
-        width,
-        height,
-        start,
-        end,
-        1.0,
-        bg_rgba,
-        wave_rgba,
-        out,
-    )
+    rpk_render_rgba8_scaled(h, width, height, start, end, 1.0, bg_rgba, wave_rgba, out)
 }
 
 #[no_mangle]
@@ -236,7 +290,9 @@ pub unsafe extern "C" fn rpk_render_rgba8_scaled(
     wave_rgba: u32,
     out: *mut RpkBuffer,
 ) -> i32 {
-    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else { return -1 };
+    let (Some(h), Some(out)) = (h.as_ref(), out.as_mut()) else {
+        return -1;
+    };
     let unpack = |x: u32| x.to_le_bytes();
     let img = render_waveform_rgba8_scaled(
         &h.pyramid,
@@ -266,10 +322,21 @@ pub unsafe extern "C" fn rpk_generate_pcm16(
     out: *mut RpkBuffer,
 ) -> i32 {
     let Some(out) = out.as_mut() else { return -1 };
-    if pcm.is_null() || divisions.is_null() || channels == 0 {
+    if pcm.is_null()
+        || divisions.is_null()
+        || channels == 0
+        || channels > u8::MAX as usize
+        || sample_rate == 0
+        || division_count == 0
+        || division_count > u8::MAX as usize
+        || (spectral != 0 && division_count > (u8::MAX as usize / 2))
+    {
         return -1;
     }
-    let pcm = std::slice::from_raw_parts(pcm, frames.saturating_mul(channels));
+    let Some(sample_len) = frames.checked_mul(channels) else {
+        return -1;
+    };
+    let pcm = std::slice::from_raw_parts(pcm, sample_len);
     let divs = std::slice::from_raw_parts(divisions, division_count).to_vec();
     let opt = GenerateOptions {
         sample_rate,
@@ -306,10 +373,21 @@ pub unsafe extern "C" fn rpk_generate_f32(
     out: *mut RpkBuffer,
 ) -> i32 {
     let Some(out) = out.as_mut() else { return -1 };
-    if pcm.is_null() || divisions.is_null() || channels == 0 {
+    if pcm.is_null()
+        || divisions.is_null()
+        || channels == 0
+        || channels > u8::MAX as usize
+        || sample_rate == 0
+        || division_count == 0
+        || division_count > u8::MAX as usize
+        || (spectral != 0 && division_count > (u8::MAX as usize / 2))
+    {
         return -1;
     }
-    let pcm = std::slice::from_raw_parts(pcm, frames.saturating_mul(channels));
+    let Some(sample_len) = frames.checked_mul(channels) else {
+        return -1;
+    };
+    let pcm = std::slice::from_raw_parts(pcm, sample_len);
     let divs = std::slice::from_raw_parts(divisions, division_count).to_vec();
     let opt = GenerateOptions {
         sample_rate,

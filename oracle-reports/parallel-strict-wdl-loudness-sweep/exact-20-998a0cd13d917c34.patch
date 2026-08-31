@@ -1,0 +1,13 @@
+diff --git a/src/format.rs b/src/format.rs
+index 4591495..183fdd9 100644
+--- a/src/format.rs
++++ b/src/format.rs
+@@ -166,7 +166,7 @@ fn layer_payload_size(version: Version, h: LayerHeader, channels: usize) -> Opti
+         },
+         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
+         LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
+-        // The -'r' header count is the number of f32 values per channel. Each
++        // The -'r' header count is the number of f64 values per channel. Each
+         // time record stores momentary and short-term energy, so the count is
+         // twice the number of records.
+         LayerKind::Loudness => n.checked_mul(channels)?.checked_mul(4),

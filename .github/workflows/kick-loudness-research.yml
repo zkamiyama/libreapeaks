@@ -1,0 +1,24 @@
+name: kick-loudness-research
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/kick-loudness-research.yml'
+      - 'oracle-reports/loudness-research-status/trigger.txt'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  kick:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch the research orchestrator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run loudness-research-orchestrator.yml --ref hardening-reapeaks-cache-ffmpeg

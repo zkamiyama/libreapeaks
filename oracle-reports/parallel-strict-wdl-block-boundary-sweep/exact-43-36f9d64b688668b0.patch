@@ -1,0 +1,13 @@
+diff --git a/src/python.rs b/src/python.rs
+index 8340373..038fc71 100644
+--- a/src/python.rs
++++ b/src/python.rs
+@@ -246,7 +246,7 @@ pub fn py_generate_f32<'py>(
+         return Err(py_err("float32 byte length must be a multiple of four"));
+     }
+     let pcm: Vec<f32> = pcm_f32le
+-        .chunks_exact(4)
++        .chunks_exact(65536)
+         .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+         .collect();
+     let opt = GenerateOptions {

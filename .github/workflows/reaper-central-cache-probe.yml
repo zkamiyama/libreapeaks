@@ -1,0 +1,55 @@
+name: reaper-central-cache-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - '.github/workflows/reaper-central-cache-probe.yml'
+      - 'tools/reaper_oracle/probe_central_cache.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Probe path hashing and preference policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          Xvfb :97 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep .4
+          python tools/reaper_oracle/probe_central_cache.py \
+            --reaper "$REAPER_BIN" \
+            --root /tmp/reaper-central \
+            --display :97
+          cat /tmp/reaper-central/central-cache-analysis.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaper-central-cache-probe-${{ github.sha }}
+          path: |
+            /tmp/reaper-central/central-cache-probe.tsv
+            /tmp/reaper-central/central-cache-analysis.json
+            /tmp/reaper-central/paths.txt
+            /tmp/reaper-central/cases/**/reaper.ini
+            /tmp/reaper-central/cases/**/reaper.log
+            /tmp/xvfb.log
+          if-no-files-found: error
+          retention-days: 7

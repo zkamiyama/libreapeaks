@@ -1,0 +1,13 @@
+diff --git a/src/loudness.rs b/src/loudness.rs
+index a42397e..dbdc406 100644
+--- a/src/loudness.rs
++++ b/src/loudness.rs
+@@ -3,7 +3,7 @@ use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+ use std::f64::consts::PI;
+ 
+ const MOMENTARY_BLOCKS_100MS: usize = 4;
+-const SHORT_TERM_BLOCKS_100MS: usize = 30;
++const SHORT_TERM_BLOCKS_100MS: usize = 262144;
+ 
+ #[derive(Debug, Clone, Copy)]
+ struct BiquadCoefficients {

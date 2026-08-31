@@ -1,0 +1,231 @@
+name: loudness-research-orchestrator
+
+on:
+  workflow_run:
+    workflows:
+      - strict-wdl-float-model-sweep
+      - reaper-loudness-boundary-characterization
+      - analyze-reaper-byte-identical-artifact
+      - inventory-loudness-implementation
+      - sweep-loudness-source-mutations
+      - strict-wdl-compiler-semantics-sweep
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+
+concurrency:
+  group: loudness-research-orchestrator-hardening
+  cancel-in-progress: false
+
+jobs:
+  assess:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'hardening-reapeaks-cache-ffmpeg'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Download fixed exact-oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/loudness-orchestrator
+          mkdir -p "$root/input" "$root/results"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+
+      - name: Re-run the exact comparison against current branch HEAD
+        id: exact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+
+          root = Path('/tmp/loudness-orchestrator')
+          input_root = root / 'input'
+          results = root / 'results'
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+          dirs = [path for path in input_root.rglob('*') if path.is_dir()]
+          peak = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm = max(dirs or [input_root], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+          output = root / 'current-output'
+          shutil.rmtree(output, ignore_errors=True)
+          output.mkdir(parents=True)
+          env = os.environ.copy()
+          assignments = {}
+          for name in names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = output
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm
+              else:
+                  value = peak
+              env[name] = str(value)
+              assignments[name] = str(value)
+          completed = subprocess.run(
+              ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture'],
+              env=env,
+              text=True,
+              capture_output=True,
+              timeout=900,
+          )
+          text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+          (results / 'current-exact-test.log').write_text(text, encoding='utf-8')
+          exact_pass = completed.returncode == 0 and '0 tests' not in text.lower()
+          status = {
+              'head': subprocess.run(['git', 'rev-parse', 'HEAD'], text=True, capture_output=True, check=True).stdout.strip(),
+              'returncode': completed.returncode,
+              'exact_pass': exact_pass,
+              'environment': assignments,
+              'tail': text[-8000:],
+          }
+          (results / 'current-exact-status.json').write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output_file:
+              output_file.write(f'exact_pass={str(exact_pass).lower()}\n')
+          print(json.dumps(status, indent=2))
+          PY
+
+      - name: Aggregate all durable research reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import subprocess
+
+          result_root = Path('/tmp/loudness-orchestrator/results')
+          report_paths = {
+              'record_diff': Path('oracle-reports/reaper-byte-identical-record-diff/report.json'),
+              'source_inventory': Path('oracle-reports/loudness-source-inventory/inventory.json'),
+              'float_sweep': Path('oracle-reports/strict-wdl-float-model-sweep/sweep.json'),
+              'float_conclusion': Path('oracle-reports/strict-wdl-float-model-sweep/conclusion.json'),
+              'boundary_report': Path('oracle-reports/reaper-loudness-boundaries/boundary-report.json'),
+              'boundary_conclusion': Path('oracle-reports/reaper-loudness-boundaries/conclusion.json'),
+              'mutation_sweep': Path('oracle-reports/loudness-source-mutation-sweep/report.json'),
+              'compiler_sweep': Path('oracle-reports/strict-wdl-compiler-semantics/report.json'),
+          }
+          loaded = {}
+          for name, path in report_paths.items():
+              if path.exists():
+                  try:
+                      loaded[name] = json.loads(path.read_text(encoding='utf-8'))
+                  except Exception as error:
+                      loaded[name] = {'parse_error': f'{type(error).__name__}: {error}', 'path': str(path)}
+              else:
+                  loaded[name] = {'missing': True, 'path': str(path)}
+          exact = json.loads((result_root / 'current-exact-status.json').read_text(encoding='utf-8'))
+          compiler_winners = []
+          compiler = loaded.get('compiler_sweep', {})
+          if isinstance(compiler, dict):
+              compiler_winners = compiler.get('exact_winners', []) or [
+                  row.get('name') for row in compiler.get('rows', []) if row.get('exact_pass')
+              ]
+          mutation_winners = []
+          mutation = loaded.get('mutation_sweep', {})
+          if isinstance(mutation, dict):
+              mutation_winners = mutation.get('exact_passing_mutations', [])
+          aggregate = {
+              'schema': 1,
+              'branch': 'hardening-reapeaks-cache-ffmpeg',
+              'head': exact['head'],
+              'current_exact_pass': exact['exact_pass'],
+              'compiler_exact_winners': compiler_winners,
+              'source_mutation_exact_winners': mutation_winners,
+              'reports': loaded,
+          }
+          destination = Path('oracle-reports/loudness-research-status')
+          destination.mkdir(parents=True, exist_ok=True)
+          (destination / 'status.json').write_text(json.dumps(aggregate, indent=2) + '\n', encoding='utf-8')
+          summary = [
+              f"head={aggregate['head']}",
+              f"current_exact_pass={aggregate['current_exact_pass']}",
+              f"compiler_exact_winners={compiler_winners}",
+              f"source_mutation_exact_winners={mutation_winners}",
+              'available_reports=' + ','.join(name for name, value in loaded.items() if not value.get('missing')),
+              'missing_reports=' + ','.join(name for name, value in loaded.items() if value.get('missing')),
+          ]
+          (destination / 'status.txt').write_text('\n'.join(summary) + '\n', encoding='utf-8')
+          print('\n'.join(summary))
+          PY
+
+      - name: Dispatch missing/deferred research stages
+        if: steps.exact.outputs.exact_pass != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=oracle-reports/loudness-research-status/status.json
+          dispatch_if_missing() {
+            local report="$1"
+            local workflow="$2"
+            if [ ! -f "$report" ]; then
+              gh workflow run "$workflow" --ref hardening-reapeaks-cache-ffmpeg || true
+            fi
+          }
+          dispatch_if_missing oracle-reports/reaper-loudness-boundaries/boundary-report.json reaper-loudness-boundary-characterization.yml
+          dispatch_if_missing oracle-reports/reaper-byte-identical-record-diff/report.json analyze-reaper-byte-identical-artifact.yml
+          dispatch_if_missing oracle-reports/loudness-source-inventory/inventory.json inventory-loudness-implementation.yml
+          dispatch_if_missing oracle-reports/loudness-source-mutation-sweep/report.json sweep-loudness-source-mutations.yml
+          dispatch_if_missing oracle-reports/strict-wdl-compiler-semantics/report.json strict-wdl-compiler-semantics-sweep.yml
+          # Re-run classifiers explicitly because GITHUB_TOKEN-originated report commits do not emit push workflows.
+          if [ -f oracle-reports/strict-wdl-float-model-sweep/sweep.json ] && [ ! -f oracle-reports/strict-wdl-float-model-sweep/conclusion.json ]; then
+            gh workflow run classify-strict-wdl-float-sweep.yml --ref hardening-reapeaks-cache-ffmpeg || true
+          fi
+          if [ -f oracle-reports/reaper-loudness-boundaries/boundary-report.json ] && [ ! -f oracle-reports/reaper-loudness-boundaries/conclusion.json ]; then
+            gh workflow run classify-reaper-loudness-boundaries.yml --ref hardening-reapeaks-cache-ffmpeg || true
+          fi
+          if [ -f oracle-reports/loudness-source-mutation-sweep/report.json ]; then
+            gh workflow run apply-exact-loudness-mutation.yml --ref hardening-reapeaks-cache-ffmpeg || true
+          fi
+          if [ -f oracle-reports/strict-wdl-float-model-sweep/conclusion.json ]; then
+            gh workflow run apply-verified-strict-wdl-float-model.yml --ref hardening-reapeaks-cache-ffmpeg || true
+          fi
+
+      - name: Dispatch final merge gate only after exact pass
+        if: steps.exact.outputs.exact_pass == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh workflow view verified-loudness-final-merge.yml >/dev/null 2>&1; then
+            gh workflow run verified-loudness-final-merge.yml --ref hardening-reapeaks-cache-ffmpeg
+          else
+            echo 'verified-loudness-final-merge.yml is not installed yet; exact pass is recorded but merge is blocked' >&2
+          fi
+
+      - name: Commit the aggregate research status
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add oracle-reports/loudness-research-status
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'update fail-closed loudness research status'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

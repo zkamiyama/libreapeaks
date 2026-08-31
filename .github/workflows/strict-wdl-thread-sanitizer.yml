@@ -1,0 +1,58 @@
+name: strict-wdl-thread-sanitizer
+
+on:
+  push:
+    branches:
+      - main
+      - hardening-reapeaks-cache-ffmpeg
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+
+jobs:
+  strict-wdl-cxx-threads:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build strict-WDL C ABI harness with ThreadSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/strict-wdl-thread-sanitizer
+          g++ \
+            -std=c++17 -O1 -g \
+            -fsanitize=thread \
+            -fno-omit-frame-pointer \
+            -D_GLIBCXX_ASSERTIONS \
+            -DWDL_FFT_REALSIZE=8 \
+            -DWDL_DENORMAL_WANTS_SCOPED_FTZ \
+            -Wno-register \
+            -Ithird_party/WDL/WDL \
+            tests/strict_wdl_sanitizer_harness.cpp \
+            src/strict_wdl.cpp \
+            third_party/WDL/WDL/fft.c \
+            third_party/WDL/WDL/resample.cpp \
+            -pthread \
+            -o /tmp/strict-wdl-thread-sanitizer/strict-wdl-tsan
+
+      - name: Stress concurrent first-use and repeated C ABI calls
+        run: /tmp/strict-wdl-thread-sanitizer/strict-wdl-tsan --threads
+
+      - name: Assert thread-sanitizer build left sources untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" >&2
+            echo "thread-sanitizer build mutated the source tree" >&2
+            exit 1
+          fi

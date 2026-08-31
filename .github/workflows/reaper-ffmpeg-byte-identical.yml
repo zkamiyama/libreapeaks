@@ -1,0 +1,305 @@
+name: reaper-ffmpeg-byte-identical
+
+on:
+  push:
+    branches:
+      - main
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-ffmpeg-byte-identical.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+      - 'tools/reaper_oracle/**'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-ffmpeg-byte-identical.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+      - 'tools/reaper_oracle/**'
+      - 'vendor/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-ffmpeg-byte-identical-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install REAPER runtime and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/reaper-oracle/results /tmp/reaper-oracle/reaper
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o /tmp/reaper-oracle/reaper779_linux_x86_64.tar.xz
+          sha256sum /tmp/reaper-oracle/reaper779_linux_x86_64.tar.xz \
+            | tee /tmp/reaper-oracle/results/reaper-tarball.sha256
+          tar -xJf /tmp/reaper-oracle/reaper779_linux_x86_64.tar.xz \
+            -C /tmp/reaper-oracle/reaper
+          REAPER_BIN="$(find /tmp/reaper-oracle/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create deterministic PCM16 and lossless ALAC cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/reaper-oracle/media
+          python - <<'PY'
+          from pathlib import Path
+          import math
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-oracle/media')
+          sample_rate = 48_000
+          frames = sample_rate * 3
+
+          def clamp(value):
+              return max(-32_768, min(32_767, int(value)))
+
+          cases = {
+              'silence': lambda frame: (0, 0),
+              'sine_997': lambda frame: (
+                  clamp(round(0.5 * 32_767 * math.sin(2 * math.pi * 997 * frame / sample_rate))),
+                  clamp(round(0.25 * 32_767 * math.sin(2 * math.pi * 997 * frame / sample_rate))),
+              ),
+              'step': lambda frame: (
+                  (0 if frame < sample_rate else 8_192 if frame < 2 * sample_rate else 16_384),
+              ) * 2,
+              'impulse': lambda frame: (
+                  (32_767 if frame in (0, 1_200, 38_400, 96_000) else 0),
+              ) * 2,
+              'dc_tail': lambda frame: (8_192 if frame < sample_rate else 0,) * 2,
+              'low_level': lambda frame: (
+                  (1 if frame % 4 == 0 else -1 if frame % 4 == 2 else 0),
+                  (-1 if frame % 4 == 0 else 1 if frame % 4 == 2 else 0),
+              ),
+              'block_edge_impulse': lambda frame: (
+                  (32_767 if frame in (1_199, 1_200, 2_399, 2_400, 19_199, 19_200, frames - 1) else 0),
+              ) * 2,
+              'alternating': lambda frame: (
+                  (32_767 if frame % 2 == 0 else -32_768),
+                  (-32_768 if frame % 2 == 0 else 32_767),
+              ),
+          }
+
+          for name, sample in cases.items():
+              payload = bytearray()
+              for frame in range(frames):
+                  left, right = sample(frame)
+                  payload += struct.pack('<hh', left, right)
+              (root / f'{name}.s16le').write_bytes(payload)
+              with wave.open(str(root / f'{name}.wav'), 'wb') as output:
+                  output.setnchannels(2)
+                  output.setsampwidth(2)
+                  output.setframerate(sample_rate)
+                  output.writeframes(payload)
+          PY
+          for wav in /tmp/reaper-oracle/media/*.wav; do
+            base="${wav%.wav}"
+            ffmpeg -hide_banner -loglevel error -y \
+              -i "$wav" -map_metadata -1 -c:a alac "$base.m4a"
+            ffmpeg -hide_banner -loglevel error -y \
+              -i "$base.m4a" -f s16le -acodec pcm_s16le "$base.decoded.s16le"
+            cmp "$base.s16le" "$base.decoded.s16le"
+            ffprobe -v error -select_streams a:0 \
+              -show_entries stream=codec_name,sample_rate,channels \
+              -of default=noprint_wrappers=1 "$base.m4a"
+          done | tee /tmp/reaper-oracle/results/ffmpeg-media.txt
+      - name: Build fresh mode-3 caches with REAPER VIDEO source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          media_root = Path('/tmp/reaper-oracle/media')
+          results = Path('/tmp/reaper-oracle/results')
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.35)
+              for index, media in enumerate(sorted(media_root.glob('*.m4a'))):
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+
+                  case = Path(tempfile.mkdtemp(prefix=f'reaper-byte-oracle-{index:02d}-'))
+                  config = case / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=64\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case / 'result.txt'
+                  log_path = results / f'{media.stem}.reaper.log'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run(
+                          [
+                              str(reaper),
+                              '-newinst',
+                              '-cfgfile',
+                              str(config),
+                              '-new',
+                              '-nosplash',
+                              str(script),
+                          ],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{media.stem}.status.txt').write_text(status, encoding='utf-8')
+                  source_type = next(
+                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                      '',
+                  )
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(
+                          f'{media.name}: REAPER failed rc={completed.returncode}, status={status!r}'
+                      )
+                  if source_type != 'VIDEO':
+                      raise SystemExit(
+                          f'{media.name}: expected REAPER VIDEO/FFmpeg source, got {source_type!r}'
+                      )
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{media.name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{media.stem}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+          cat /tmp/reaper-oracle/results/*.status.txt
+      - name: Compare complete files against libreapeaks strict-WDL mode-3 output
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in silence sine_997 step impulse dc_tail low_level block_edge_impulse alternating; do
+            REAPEAKS_PCM16="/tmp/reaper-oracle/media/$name.decoded.s16le" \
+            REAPEAKS_SOURCE="/tmp/reaper-oracle/media/$name.m4a" \
+            REAPEAKS_ORACLE="/tmp/reaper-oracle/results/$name.reaper.reapeaks" \
+            LIBREAPEAKS_OUTPUT="/tmp/reaper-oracle/results/$name.libreapeaks.reapeaks" \
+              cargo test --release --features strict-wdl \
+                --test reaper_ffmpeg_byte_identical \
+                reaper779_video_alac_mode3_is_byte_identical \
+                -- --ignored --exact --nocapture \
+                | tee "/tmp/reaper-oracle/results/$name.test.txt"
+            cmp \
+              "/tmp/reaper-oracle/results/$name.reaper.reapeaks" \
+              "/tmp/reaper-oracle/results/$name.libreapeaks.reapeaks"
+          done
+      - name: Record whole-file and per-layer hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/reaper-oracle/results/byte-identical-report.txt
+          from pathlib import Path
+          import hashlib
+          import struct
+
+          root = Path('/tmp/reaper-oracle/results')
+
+          def parse(path):
+              data = path.read_bytes()
+              if len(data) < 18:
+                  raise ValueError(f'truncated {path}')
+              channels = data[4]
+              layer_count = data[5]
+              headers = [
+                  struct.unpack_from('<iI', data, 18 + 8 * index)
+                  for index in range(layer_count)
+              ]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  if division > 0 or division in (-115, -114):
+                      size = count * channels * 4
+                  elif division == -103:
+                      size = count * channels * 192
+                  else:
+                      raise ValueError(f'unsupported token {division} in {path}')
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise ValueError(f'truncated payload in {path}')
+                  layers.append((division, count, hashlib.sha256(payload).hexdigest()))
+                  offset += size
+              if offset != len(data):
+                  raise ValueError(f'layout mismatch {offset} != {len(data)} for {path}')
+              return data, headers, layers
+
+          for oracle_path in sorted(root.glob('*.reaper.reapeaks')):
+              name = oracle_path.name.removesuffix('.reaper.reapeaks')
+              generated_path = root / f'{name}.libreapeaks.reapeaks'
+              oracle, headers, layers = parse(oracle_path)
+              generated, generated_headers, generated_layers = parse(generated_path)
+              if oracle != generated:
+                  raise SystemExit(f'{name}: files differ after the Rust oracle test')
+              if headers != generated_headers or layers != generated_layers:
+                  raise SystemExit(f'{name}: parsed layout or payload hashes differ')
+              print(
+                  f'{name}: BYTE_IDENTICAL bytes={len(oracle)} '
+                  f'sha256={hashlib.sha256(oracle).hexdigest()} '
+                  f'headers={headers}'
+              )
+              for index, (division, count, digest) in enumerate(layers):
+                  print(f'  layer={index} division={division} count={count} sha256={digest}')
+          PY
+          cat /tmp/reaper-oracle/results/byte-identical-report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-ffmpeg-byte-identical-${{ github.sha }}
+          path: |
+            /tmp/reaper-oracle/results
+            /tmp/reaper-oracle/media/*.m4a
+            /tmp/reaper-oracle/media/*.decoded.s16le
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,96 @@
+name: inventory-loudness-implementation
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/inventory-loudness-implementation.yml'
+      - 'src/**'
+      - 'tests/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'native/**'
+      - 'include/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Build a machine-readable source inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+          import subprocess
+
+          roots = [Path('src'), Path('tests'), Path('native'), Path('include'), Path('examples')]
+          files = [Path('build.rs'), Path('Cargo.toml')]
+          for root in roots:
+              if root.exists():
+                  files.extend(path for path in root.rglob('*') if path.is_file() and path.suffix.lower() in {'.rs', '.c', '.cc', '.cpp', '.h', '.hpp', '.toml', '.py'})
+          pattern = re.compile(r'loudness|momentary|short.?term|strict.?wdl|wdl_|-114|-115|ebu|r128|k.?weight', re.I)
+          hits = []
+          functions = []
+          for path in sorted(set(files)):
+              try:
+                  lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+              except Exception:
+                  continue
+              for index, line in enumerate(lines, 1):
+                  if pattern.search(line):
+                      lo = max(1, index - 8)
+                      hi = min(len(lines), index + 8)
+                      hits.append({
+                          'path': str(path),
+                          'line': index,
+                          'text': line,
+                          'context_start': lo,
+                          'context_end': hi,
+                          'context': '\n'.join(f'{number}: {lines[number - 1]}' for number in range(lo, hi + 1)),
+                      })
+              text = '\n'.join(lines)
+              for match in re.finditer(r'(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?(?:extern\s+"C"\s+)?fn\s+([A-Za-z0-9_]+)[^{;]*', text):
+                  name = match.group(1)
+                  start_line = text.count('\n', 0, match.start()) + 1
+                  signature = match.group(0).strip()
+                  nearby = '\n'.join(lines[max(0, start_line - 2):min(len(lines), start_line + 50)])
+                  if pattern.search(name) or pattern.search(nearby):
+                      functions.append({'path': str(path), 'line': start_line, 'name': name, 'signature': signature})
+          metadata = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps'], text=True, capture_output=True)
+          report = {
+              'schema': 1,
+              'hit_count': len(hits),
+              'function_count': len(functions),
+              'hits': hits,
+              'functions': functions,
+              'cargo_metadata': json.loads(metadata.stdout) if metadata.returncode == 0 else {'error': metadata.stderr},
+          }
+          destination = Path('oracle-reports/loudness-source-inventory')
+          destination.mkdir(parents=True, exist_ok=True)
+          (destination / 'inventory.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          (destination / 'contexts.txt').write_text('\n\n'.join(
+              f"===== {hit['path']}:{hit['line']} =====\n{hit['context']}" for hit in hits
+          ) + '\n', encoding='utf-8')
+          print(f'hits={len(hits)} functions={len(functions)}')
+          PY
+          git add oracle-reports/loudness-source-inventory
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'record loudness implementation source inventory'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

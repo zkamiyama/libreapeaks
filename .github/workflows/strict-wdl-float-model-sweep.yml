@@ -1,0 +1,190 @@
+name: strict-wdl-float-model-sweep
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/strict-wdl-float-model-sweep.yml'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+      - 'build.rs'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: strict-wdl-float-model-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download a fixed failing oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/strict-wdl-float-sweep
+          mkdir -p "$root/input" "$root/results"
+          run_id=33395560284
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+          find "$root/input" -type f -printf '%P\t%s\n' | sort > "$root/results/artifact-manifest.tsv"
+
+      - name: Discover test inputs and sweep floating-point models
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          from pathlib import Path
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import time
+
+          root = Path('/tmp/strict-wdl-float-sweep')
+          inputs = root / 'input'
+          results = root / 'results'
+          source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', source)))
+
+          directories = [path for path in inputs.rglob('*') if path.is_dir()]
+          def count_ext(directory: Path, extensions: tuple[str, ...]) -> int:
+              return sum(1 for path in directory.rglob('*') if path.is_file() and path.name.lower().endswith(extensions))
+
+          peak_dirs = sorted(directories, key=lambda p: (count_ext(p, ('.reapeaks',)), len(str(p))), reverse=True)
+          pcm_dirs = sorted(directories, key=lambda p: (count_ext(p, ('.s16le', '.pcm', '.raw', '.wav', '.m4a')), len(str(p))), reverse=True)
+          all_dirs = sorted(directories, key=lambda p: (sum(1 for q in p.rglob('*') if q.is_file()), len(str(p))), reverse=True)
+
+          base_env = os.environ.copy()
+          discovered = {}
+          for name in names:
+              upper = name.upper()
+              if any(token in upper for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = root / 'candidate-output'
+                  value.mkdir(parents=True, exist_ok=True)
+              elif any(token in upper for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm_dirs[0] if pcm_dirs else inputs
+              elif any(token in upper for token in ('ORACLE', 'REAPER', 'PEAK', 'FIXTURE', 'CORPUS', 'ROOT', 'DIR')):
+                  value = peak_dirs[0] if peak_dirs else (all_dirs[0] if all_dirs else inputs)
+              else:
+                  value = inputs
+              discovered[name] = str(value)
+              base_env[name] = str(value)
+
+          # The test may use a single root variable. Try each artifact directory for that root
+          # and retain the first assignment that gets beyond a missing-input failure.
+          command = ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture']
+          probe_log = results / 'environment-probe.txt'
+          probe_candidates = [inputs] + all_dirs[:30]
+          best_env = dict(base_env)
+          best_score = -1
+          probe_chunks = []
+          for candidate in probe_candidates:
+              env = dict(base_env)
+              for name in names:
+                  if any(token in name for token in ('ROOT', 'DIR', 'CORPUS', 'FIXTURE', 'ORACLE')):
+                      env[name] = str(candidate)
+              completed = subprocess.run(command, env=env, text=True, capture_output=True, timeout=180)
+              text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+              lower = text.lower()
+              score = 0
+              score += 10 if 'missing environment' not in lower and 'not set' not in lower else 0
+              score += 10 if 'no such file or directory' not in lower else 0
+              score += 30 if 'byte' in lower or 'loudness' in lower or 'mismatch' in lower else 0
+              score += 100 if completed.returncode == 0 else 0
+              probe_chunks.append(f'=== {candidate} rc={completed.returncode} score={score} ===\n{text[-8000:]}\n')
+              if score > best_score:
+                  best_score = score
+                  best_env = env
+              if completed.returncode == 0 or score >= 30:
+                  break
+          probe_log.write_text('\n'.join(probe_chunks), encoding='utf-8')
+          (results / 'environment.json').write_text(json.dumps({
+              'env_names': names,
+              'initial_assignments': discovered,
+              'selected_assignments': {name: best_env.get(name) for name in names},
+              'probe_score': best_score,
+          }, indent=2), encoding='utf-8')
+
+          variants = [
+              ('baseline', '', ''),
+              ('no-contract', '-ffp-contract=off', ''),
+              ('no-vectorize', '-fno-tree-vectorize -fno-tree-slp-vectorize', ''),
+              ('strict-rounding', '-ffp-contract=off -frounding-math -fno-fast-math', ''),
+              ('sse-strict', '-msse2 -mfpmath=sse -ffp-contract=off -fno-fast-math', ''),
+              ('no-contract-no-vectorize', '-ffp-contract=off -fno-tree-vectorize -fno-tree-slp-vectorize', ''),
+              ('opt0-strict', '-O0 -ffp-contract=off -fno-fast-math', ''),
+              ('opt1-strict', '-O1 -ffp-contract=off -fno-fast-math', ''),
+              ('opt2-strict', '-O2 -ffp-contract=off -fno-fast-math', ''),
+              ('opt3-strict', '-O3 -ffp-contract=off -fno-fast-math', ''),
+              ('rust-no-fma', '', '-C target-feature=-fma'),
+              ('rust-strict', '', '-C target-feature=-fma -C llvm-args=-enable-unsafe-fp-math=false'),
+          ]
+          rows = []
+          for index, (name, cxxflags, rustflags) in enumerate(variants):
+              subprocess.run(['cargo', 'clean'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              out_dir = root / 'variant-output' / name
+              shutil.rmtree(out_dir, ignore_errors=True)
+              out_dir.mkdir(parents=True, exist_ok=True)
+              env = dict(best_env)
+              env['CXXFLAGS'] = cxxflags
+              env['CFLAGS'] = cxxflags
+              env['RUSTFLAGS'] = rustflags
+              for key in names:
+                  if any(token in key for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                      env[key] = str(out_dir)
+              start = time.monotonic()
+              try:
+                  completed = subprocess.run(command, env=env, text=True, capture_output=True, timeout=420)
+                  rc = completed.returncode
+                  text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+              except subprocess.TimeoutExpired as error:
+                  rc = 124
+                  text = ((error.stdout or '') if isinstance(error.stdout, str) else '') + '\n' + ((error.stderr or '') if isinstance(error.stderr, str) else '')
+              elapsed = time.monotonic() - start
+              (results / f'{index:02d}-{name}.log').write_text(text, encoding='utf-8')
+              rows.append({
+                  'name': name,
+                  'cxxflags': cxxflags,
+                  'rustflags': rustflags,
+                  'returncode': rc,
+                  'elapsed_seconds': elapsed,
+                  'mentions_loudness': 'loudness' in text.lower(),
+                  'mentions_mismatch': 'mismatch' in text.lower() or 'differ' in text.lower(),
+                  'tail': text[-4000:],
+              })
+          (results / 'sweep.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
+          passed = [row['name'] for row in rows if row['returncode'] == 0]
+          summary = [
+              f'passed={passed}',
+              f'probe_score={best_score}',
+              f'env_names={names}',
+          ]
+          (results / 'summary.txt').write_text('\n'.join(summary) + '\n', encoding='utf-8')
+          print('\n'.join(summary))
+          PY
+
+      - name: Upload sweep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strict-wdl-float-model-sweep-${{ github.sha }}
+          path: /tmp/strict-wdl-float-sweep/results
+          if-no-files-found: error
+          retention-days: 14

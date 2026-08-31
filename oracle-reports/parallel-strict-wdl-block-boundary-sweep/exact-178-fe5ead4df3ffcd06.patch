@@ -1,0 +1,13 @@
+diff --git a/src/python.rs b/src/python.rs
+index 8340373..ff35150 100644
+--- a/src/python.rs
++++ b/src/python.rs
+@@ -214,7 +214,7 @@ pub fn py_generate_pcm16<'py>(
+         return Err(py_err("PCM16 byte length must be even"));
+     }
+     let pcm: Vec<i16> = pcm16le
+-        .chunks_exact(2)
++        .chunks_exact(1200)
+         .map(|x| i16::from_le_bytes([x[0], x[1]]))
+         .collect();
+     let opt = GenerateOptions {

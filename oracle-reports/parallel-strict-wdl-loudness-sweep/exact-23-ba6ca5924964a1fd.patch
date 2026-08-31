@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..74a1061 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -330,7 +330,7 @@ fn build_fine_spectral_f64_impl(
+     if division == 0 || source_rate == 0 {
+         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+     }
+-    if source.len() < frames.saturating_mul(channels) {
++    if source.len() <= frames.saturating_mul(channels) {
+         return Err(ReaPeaksError::InvalidArgument(
+             "PCM buffer shorter than frames*channels",
+         ));

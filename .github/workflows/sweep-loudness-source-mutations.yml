@@ -1,0 +1,216 @@
+name: sweep-loudness-source-mutations
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/sweep-loudness-source-mutations.yml'
+      - 'src/**'
+      - 'native/**'
+      - 'build.rs'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: sweep-loudness-source-mutations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Download fixed failing oracle artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/loudness-source-mutations
+          mkdir -p "$root/input" "$root/results"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+
+      - name: Discover environment and test one semantic mutation at a time
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          from pathlib import Path
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+
+          root = Path('/tmp/loudness-source-mutations')
+          inputs = root / 'input'
+          results = root / 'results'
+          test_source = Path('tests/reaper_ffmpeg_byte_identical.rs').read_text(encoding='utf-8')
+          env_names = sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"', test_source)))
+          dirs = [path for path in inputs.rglob('*') if path.is_dir()]
+          peak_dir = max(dirs or [inputs], key=lambda p: sum(1 for q in p.rglob('*.reapeaks')))
+          pcm_dir = max(dirs or [inputs], key=lambda p: sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le', '.pcm', '.raw', '.wav', '.m4a'}))
+          base_env = os.environ.copy()
+          for name in env_names:
+              if any(token in name for token in ('OUT', 'RESULT', 'CANDIDATE', 'GENERATED')):
+                  value = root / 'candidate-output'; value.mkdir(parents=True, exist_ok=True)
+              elif any(token in name for token in ('PCM', 'DECODE', 'AUDIO', 'MEDIA', 'SOURCE')):
+                  value = pcm_dir
+              else:
+                  value = peak_dir
+              base_env[name] = str(value)
+
+          command = ['cargo', 'test', '--all-features', '--test', 'reaper_ffmpeg_byte_identical', '--', '--nocapture']
+          baseline = subprocess.run(command, env=base_env, text=True, capture_output=True, timeout=420)
+          baseline_text = (baseline.stdout or '') + '\n' + (baseline.stderr or '')
+          (results / 'baseline.log').write_text(baseline_text, encoding='utf-8')
+          if baseline.returncode == 0:
+              raise SystemExit('fixed oracle unexpectedly passes baseline; mutation sweep would be meaningless')
+          if not any(token in baseline_text.lower() for token in ('step', 'loudness', 'mismatch', 'differ')):
+              raise SystemExit('baseline failure did not reach the known exact-comparison mismatch')
+
+          relevant = re.compile(r'loudness|momentary|short.?term|strict.?wdl|wdl_|-114|ebu|r128|k.?weight', re.I)
+          file_paths = []
+          for root_path in (Path('src'), Path('native')):
+              if root_path.exists():
+                  file_paths.extend(path for path in root_path.rglob('*') if path.is_file() and path.suffix.lower() in {'.rs', '.c', '.cc', '.cpp', '.h', '.hpp'})
+          if Path('build.rs').exists():
+              file_paths.append(Path('build.rs'))
+
+          originals = {path: path.read_text(encoding='utf-8', errors='replace') for path in file_paths}
+          mutations = []
+          seen = set()
+
+          def add(path: Path, old: str, new: str, line: int, kind: str):
+              if old == new:
+                  return
+              key = (str(path), old, new, line, kind)
+              if key in seen:
+                  return
+              seen.add(key)
+              mutations.append({'path': path, 'old': old, 'new': new, 'line': line, 'kind': kind})
+
+          for path, text in originals.items():
+              lines = text.splitlines(keepends=True)
+              relevant_lines = {index for index, line in enumerate(lines) if relevant.search(line)}
+              expanded = set()
+              for index in relevant_lines:
+                  expanded.update(range(max(0, index - 24), min(len(lines), index + 25)))
+              for index in sorted(expanded):
+                  line = lines[index]
+                  for old, replacements in {
+                      '.round()': ('.floor()', '.trunc()', '.ceil()'),
+                      'roundf(': ('floorf(', 'truncf(', 'ceilf('),
+                      'std::round(': ('std::floor(', 'std::trunc(', 'std::ceil('),
+                      'lrint(': ('lround(',),
+                  }.items():
+                      if old in line:
+                          for replacement in replacements:
+                              add(path, line, line.replace(old, replacement, 1), index + 1, f'rounding:{old}->{replacement}')
+                  if re.search(r'\b(float|f32)\b', line) and any(word in line.lower() for word in ('accum', 'energy', 'sum', 'loud', 'mean', 'square', 'state')):
+                      replacement = re.sub(r'\bfloat\b', 'double', line, count=1)
+                      replacement = re.sub(r'\bf32\b', 'f64', replacement, count=1)
+                      add(path, line, replacement, index + 1, 'local-precision-to-64')
+                  if any(word in line.lower() for word in ('chunk', 'block', 'buffer', 'frames_per', 'hop')):
+                      for match in re.finditer(r'(?<![A-Za-z0-9_])(64|128|256|512|1024|2048|4096|8192|16384)(?![A-Za-z0-9_])', line):
+                          old_number = match.group(1)
+                          for new_number in ('64', '128', '256', '512', '1024', '2048', '4096', '8192', '16384'):
+                              if new_number == old_number:
+                                  continue
+                              new_line = line[:match.start()] + new_number + line[match.end():]
+                              add(path, line, new_line, index + 1, f'block-size:{old_number}->{new_number}')
+
+          # Keep runtime bounded and prioritize semantically direct mutations.
+          priority = {'rounding': 0, 'local-precision': 1, 'block-size': 2}
+          mutations.sort(key=lambda item: (priority.get(item['kind'].split(':', 1)[0], 9), str(item['path']), item['line'], item['kind']))
+          mutations = mutations[:48]
+          rows = []
+          for index, mutation in enumerate(mutations):
+              for path, text in originals.items():
+                  path.write_text(text, encoding='utf-8')
+              path = mutation['path']
+              current = path.read_text(encoding='utf-8')
+              old = mutation['old']
+              position = current.find(old)
+              if position < 0:
+                  rows.append({**{key: (str(value) if isinstance(value, Path) else value) for key, value in mutation.items()}, 'returncode': 125, 'reason': 'source occurrence not found'})
+                  continue
+              path.write_text(current[:position] + mutation['new'] + current[position + len(old):], encoding='utf-8')
+              start = time.monotonic()
+              try:
+                  completed = subprocess.run(command, env=base_env, text=True, capture_output=True, timeout=420)
+                  rc = completed.returncode
+                  text = (completed.stdout or '') + '\n' + (completed.stderr or '')
+              except subprocess.TimeoutExpired as error:
+                  rc = 124
+                  text = ((error.stdout or '') if isinstance(error.stdout, str) else '') + '\n' + ((error.stderr or '') if isinstance(error.stderr, str) else '')
+              elapsed = time.monotonic() - start
+              (results / f'{index:02d}.log').write_text(text, encoding='utf-8')
+              rows.append({
+                  'index': index,
+                  'path': str(path),
+                  'line': mutation['line'],
+                  'kind': mutation['kind'],
+                  'old': old.rstrip('\n'),
+                  'new': mutation['new'].rstrip('\n'),
+                  'returncode': rc,
+                  'elapsed_seconds': elapsed,
+                  'compiled': 'could not compile' not in text.lower(),
+                  'exact_pass': rc == 0 and '0 tests' not in text.lower(),
+                  'tail': text[-5000:],
+              })
+              if rows[-1]['exact_pass']:
+                  # Preserve an exact-passing diff for later independent verification.
+                  diff = subprocess.run(['git', 'diff', '--', str(path)], text=True, capture_output=True, check=True).stdout
+                  (results / f'exact-pass-{index:02d}.patch').write_text(diff, encoding='utf-8')
+
+          for path, text in originals.items():
+              path.write_text(text, encoding='utf-8')
+          report = {
+              'schema': 1,
+              'baseline_returncode': baseline.returncode,
+              'environment_names': env_names,
+              'mutation_count': len(mutations),
+              'exact_passing_mutations': [row['index'] for row in rows if row.get('exact_pass')],
+              'rows': rows,
+          }
+          (results / 'mutation-sweep.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps({
+              'mutation_count': len(mutations),
+              'exact_passing_mutations': report['exact_passing_mutations'],
+          }, indent=2))
+          PY
+
+      - name: Publish mutation report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination=oracle-reports/loudness-source-mutation-sweep
+          rm -rf "$destination"
+          mkdir -p "$destination"
+          cp /tmp/loudness-source-mutations/results/mutation-sweep.json "$destination/report.json"
+          cp /tmp/loudness-source-mutations/results/baseline.log "$destination/baseline.log"
+          find /tmp/loudness-source-mutations/results -maxdepth 1 -name 'exact-pass-*.patch' -exec cp {} "$destination"/ \;
+          git add "$destination"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'record exact-oracle loudness mutation sweep'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

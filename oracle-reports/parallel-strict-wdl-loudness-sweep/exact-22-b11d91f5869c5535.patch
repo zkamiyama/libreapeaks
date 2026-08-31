@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..68ad2bd 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -293,7 +293,7 @@ fn analyze_channel(
+ 
+     let frequency_hz = (0.5 + best_bin * ANALYSIS_RATE / FFT_N as f64)
+         .trunc()
+-        .clamp(0.0, 32767.0) as u16;
++        .clamp(0.0, 32768.0) as u16;
+ 
+     // Exact formula recovered from REAPER 7.79 x86_64 disassembly. The total
+     // magnitude remains f64, while each magnitude in the second moment is

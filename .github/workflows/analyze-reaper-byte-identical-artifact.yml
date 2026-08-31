@@ -1,0 +1,211 @@
+name: analyze-reaper-byte-identical-artifact
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/analyze-reaper-byte-identical-artifact.yml'
+      - 'tests/reaper_ffmpeg_byte_identical.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+
+      - name: Download a fixed failing comparison artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reapeaks-record-diff
+          mkdir -p "$root/input" "$root/results"
+          run_id=33395560284
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+
+      - name: Group pairs and classify byte-level record deltas
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import collections
+          import hashlib
+          import itertools
+          import json
+          import math
+          import re
+          import struct
+
+          root = Path('/tmp/reapeaks-record-diff')
+          input_root = root / 'input'
+          results = root / 'results'
+          peaks = sorted(path for path in input_root.rglob('*') if path.is_file() and path.suffix.lower() == '.reapeaks')
+
+          stop = {
+              'reapeaks', 'reaper', 'libreapeaks', 'oracle', 'candidate', 'generated',
+              'results', 'result', 'artifact', 'artifacts', 'output', 'outputs',
+              'tmp', 'home', 'runner', 'work', 'media', 'decoded',
+          }
+          def tokens(path: Path) -> set[str]:
+              text = re.sub(r'[^a-z0-9]+', ' ', str(path.relative_to(input_root)).lower())
+              return {token for token in text.split() if token not in stop}
+
+          pair_rows = []
+          for left, right in itertools.combinations(peaks, 2):
+              lt, rt = tokens(left), tokens(right)
+              overlap = len(lt & rt)
+              union = len(lt | rt) or 1
+              token_score = overlap / union
+              if token_score < 0.2:
+                  continue
+              a, b = left.read_bytes(), right.read_bytes()
+              common = min(len(a), len(b))
+              offsets = [index for index in range(common) if a[index] != b[index]]
+              offsets.extend(range(common, max(len(a), len(b))))
+              if not offsets:
+                  continue
+              regions = []
+              start = previous = offsets[0]
+              for offset in offsets[1:]:
+                  if offset == previous + 1:
+                      previous = offset
+                  else:
+                      regions.append([start, previous + 1])
+                      start = previous = offset
+              regions.append([start, previous + 1])
+
+              interpretations = {}
+              for width, fmt in ((2, '<h'), (4, '<i'), (4, '<f'), (8, '<q'), (8, '<d')):
+                  for alignment in range(width):
+                      record_offsets = sorted({
+                          alignment + ((offset - alignment) // width) * width
+                          for offset in offsets if offset >= alignment
+                      })
+                      deltas = []
+                      for offset in record_offsets:
+                          if offset < 0 or offset + width > common:
+                              continue
+                          x = struct.unpack_from(fmt, a, offset)[0]
+                          y = struct.unpack_from(fmt, b, offset)[0]
+                          if isinstance(x, float):
+                              if math.isfinite(x) and math.isfinite(y):
+                                  deltas.append(y - x)
+                          else:
+                              deltas.append(int(y) - int(x))
+                      if not deltas:
+                          continue
+                      key = f'{fmt}@{alignment}'
+                      if isinstance(deltas[0], float):
+                          interpretations[key] = {
+                              'count': len(deltas),
+                              'min': min(deltas),
+                              'max': max(deltas),
+                              'mean': sum(deltas) / len(deltas),
+                              'max_abs': max(abs(value) for value in deltas),
+                          }
+                      else:
+                          counter = collections.Counter(deltas)
+                          interpretations[key] = {
+                              'count': len(deltas),
+                              'min': min(deltas),
+                              'max': max(deltas),
+                              'small_delta_fraction': sum(1 for value in deltas if abs(value) <= 4) / len(deltas),
+                              'unit_delta_fraction': sum(1 for value in deltas if abs(value) <= 1) / len(deltas),
+                              'most_common': counter.most_common(20),
+                          }
+              pair_rows.append({
+                  'left': str(left.relative_to(input_root)),
+                  'right': str(right.relative_to(input_root)),
+                  'left_size': len(a),
+                  'right_size': len(b),
+                  'left_sha256': hashlib.sha256(a).hexdigest(),
+                  'right_sha256': hashlib.sha256(b).hexdigest(),
+                  'token_score': token_score,
+                  'diff_bytes': len(offsets),
+                  'first_difference': offsets[0],
+                  'last_difference': offsets[-1],
+                  'regions': regions,
+                  'interpretations': interpretations,
+                  'first_difference_left_hex': a[max(0, offsets[0] - 48):offsets[0] + 96].hex(),
+                  'first_difference_right_hex': b[max(0, offsets[0] - 48):offsets[0] + 96].hex(),
+              })
+
+          pair_rows.sort(key=lambda row: (
+              abs(row['diff_bytes'] - 184),
+              row['left_size'] != row['right_size'],
+              -row['token_score'],
+              row['diff_bytes'],
+          ))
+          selected = pair_rows[0] if pair_rows else None
+          best_integer = None
+          if selected:
+              for key, item in selected['interpretations'].items():
+                  if key.startswith(('<h@', '<i@', '<q@')):
+                      score = (item.get('unit_delta_fraction', 0.0), item.get('small_delta_fraction', 0.0), -item['count'])
+                      if best_integer is None or score > best_integer['score']:
+                          best_integer = {'format_alignment': key, 'score': score, **item}
+          if selected is None:
+              classification = 'no-differing-pair-found'
+          elif best_integer and best_integer['unit_delta_fraction'] >= 0.9:
+              classification = 'almost-entirely-unit-quantization-deltas'
+          elif best_integer and best_integer['small_delta_fraction'] >= 0.9:
+              classification = 'small-integer-record-deltas'
+          elif len(selected['regions']) <= 4 and selected['diff_bytes'] > 64:
+              classification = 'contiguous-structural-or-filter-region'
+          else:
+              classification = 'sparse-filter-or-floating-point-record-deltas'
+
+          report = {
+              'schema': 1,
+              'source_run_id': 33395560284,
+              'peak_file_count': len(peaks),
+              'selected_pair': selected,
+              'best_integer_interpretation': best_integer,
+              'classification': classification,
+              'all_pairs': pair_rows[:50],
+          }
+          (results / 'record-diff-report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps({
+              'peak_file_count': len(peaks),
+              'classification': classification,
+              'selected_pair': None if selected is None else {
+                  key: selected[key] for key in ('left', 'right', 'diff_bytes', 'first_difference', 'last_difference', 'regions')
+              },
+              'best_integer_interpretation': best_integer,
+          }, indent=2))
+          if selected is None:
+              raise SystemExit('artifact did not contain a usable differing pair')
+          PY
+
+      - name: Publish record-level analysis
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=/tmp/reapeaks-record-diff/results/record-diff-report.json
+          test -f "$source"
+          destination=oracle-reports/reaper-byte-identical-record-diff
+          mkdir -p "$destination"
+          cp "$source" "$destination/report.json"
+          git add "$destination/report.json"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'record REAPER loudness byte-diff classification'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

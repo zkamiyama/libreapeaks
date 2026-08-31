@@ -70,7 +70,13 @@ impl PyReaPeaks {
             .pyramid
             .choose_level(start_frame, end_frame, width)
             .ok_or_else(|| py_err("empty view"))?;
-        Ok((p.level_index, p.division, p.first_peak, p.peak_count, p.peaks_per_pixel))
+        Ok((
+            p.level_index,
+            p.division,
+            p.first_peak,
+            p.peak_count,
+            p.peaks_per_pixel,
+        ))
     }
 
     pub fn tiles_for_view(
@@ -98,9 +104,14 @@ impl PyReaPeaks {
         level_index: usize,
         tile_index: u64,
     ) -> PyResult<(usize, usize, usize, Bound<'py, PyBytes>)> {
+        let level_index =
+            u16::try_from(level_index).map_err(|_| py_err("level index out of range"))?;
         let tile = self
             .pyramid
-            .tile(WaveTileKey { level_index: level_index as u16, tile_index })
+            .tile(WaveTileKey {
+                level_index,
+                tile_index,
+            })
             .ok_or_else(|| py_err("tile out of range"))?;
         let first = tile.first_peak;
         let img = encode_wave_tile_rgba8(&tile, self.pyramid.channels);
@@ -142,7 +153,11 @@ impl PyReaPeaks {
         let ch = self.file.header.channels as usize;
         let n = if ch == 0 { 0 } else { layer.peaks.len() / ch };
         let tile = self.pyramid.tile_peaks.max(1);
-        let first = (tile_index as usize).saturating_mul(tile);
+        let tile_index =
+            usize::try_from(tile_index).map_err(|_| py_err("spectral tile out of range"))?;
+        let first = tile_index
+            .checked_mul(tile)
+            .ok_or_else(|| py_err("spectral tile out of range"))?;
         if first >= n {
             return Err(py_err("spectral tile out of range"));
         }

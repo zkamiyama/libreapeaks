@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..1642d0a 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -433,7 +433,7 @@ fn source_from_i16(pcm: &[i16], frames: usize, channels: usize) -> Result<Vec<f6
+             "PCM buffer shorter than frames*channels",
+         ))?
+         .iter()
+-        .map(|&v| v as f64 / 32768.0)
++        .map(|&v| v as f64 / 32767.0)
+         .collect())
+ }
+ 

@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "preferred_modes": [
+    "ftz",
+    "daz",
+    "both"
+  ],
+  "rows": [
+    {
+      "label": "ftz-relevant",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    },
+    {
+      "label": "ftz-all",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    },
+    {
+      "label": "daz-relevant",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    },
+    {
+      "label": "daz-all",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    },
+    {
+      "label": "both-relevant",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    },
+    {
+      "label": "both-all",
+      "exact_pass": false,
+      "reason": "nothing-instrumented"
+    }
+  ],
+  "winner": null
+}

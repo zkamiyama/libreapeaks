@@ -1,0 +1,112 @@
+name: reaper-central-cache-windows-probe
+
+on:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths: ['.github/workflows/reaper-central-cache-windows-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-windows-api-under-wine:
+    runs-on: ubuntu-latest
+    env:
+      WINEARCH: win64
+      WINEPREFIX: /tmp/libreapeaks-wine
+      WINEDEBUG: -all
+      WINEDLLOVERRIDES: mscoree,mshtml=
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Wine, Xvfb and 7-Zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wine64 xvfb p7zip-full
+      - name: Extract portable REAPER 7.79 x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_x64-install.exe -o /tmp/reaper-install.exe
+          rm -rf "$WINEPREFIX" /tmp/reaper-extracted /tmp/REAPER-portable
+          mkdir -p "$WINEPREFIX" /tmp/reaper-extracted /tmp/REAPER-portable
+          7z x -y /tmp/reaper-install.exe -o/tmp/reaper-extracted >/tmp/reaper-7z.log
+          reaper_exe="$(find /tmp/reaper-extracted -type f -iname reaper.exe | head -1)"
+          test -n "$reaper_exe"
+          cp -a "$(dirname "$reaper_exe")/." /tmp/REAPER-portable/
+          test -f /tmp/REAPER-portable/reaper.exe
+      - name: Query Windows central-cache paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/reaper-central-win
+          mkdir -p /tmp/reaper-central-win/cache /tmp/reaper-central-win/Media /tmp/REAPER-portable/Scripts
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('/tmp/reaper-central-win')
+          paths = [
+              r'Z:\tmp\reaper-central-win\Media\UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\upper.wav',
+              r'Z:\tmp\reaper-central-win\Media\ÄÖÜ.WAV',
+              r'Z:\tmp\reaper-central-win\Media\äöü.wav',
+              r'Z:\tmp\reaper-central-win\Media\I.WAV',
+              r'Z:\tmp\reaper-central-win\Media\i.wav',
+              r'Z:/tmp/reaper-central-win/Media/UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\.\UPPER.WAV',
+              r'Z:\tmp\reaper-central-win\Media\sub\..\UPPER.WAV',
+              r'relative\Path\Take.WAV',
+              r'C:\Users\Example\Audio\Take.WAV',
+              r'\\server\share\Folder\Take.WAV',
+          ]
+          (root / 'paths.txt').write_text('\n'.join(paths) + '\n', encoding='utf-8')
+          (Path('/tmp/REAPER-portable') / 'reaper.ini').write_text(
+              '[REAPER]\naltpeaks=1\n'
+              'altpeakspath=Z:\\tmp\\reaper-central-win\\cache\n'
+              'peakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n',
+              encoding='utf-8',
+          )
+          (Path('/tmp/REAPER-portable/Scripts') / '__startup.lua').write_text(r'''local started = io.open("Z:\\tmp\\reaper-central-win\\started.txt", "w")
+          if started then started:write("started\n"); started:close() end
+          local manifest = "Z:\\tmp\\reaper-central-win\\paths.txt"
+          local result = "Z:\\tmp\\reaper-central-win\\results.tsv"
+          local out = assert(io.open(result, "w"))
+          out:write("source\tread\twrite\tresource\n")
+          for fn in io.lines(manifest) do
+            local read = reaper.GetPeakFileNameEx(fn, "", false)
+            local write = reaper.GetPeakFileNameEx(fn, "", true)
+            out:write(fn, "\t", read, "\t", write, "\t", reaper.GetResourcePath(), "\n")
+          end
+          out:close()
+          reaper.defer(function() reaper.Main_OnCommand(40004, 0) end)
+          ''', encoding='utf-8')
+          PY
+          Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          export DISPLAY=:96
+          set +e
+          timeout 90s wine /tmp/REAPER-portable/reaper.exe -new -nosplash \
+            >/tmp/reaper-central-win/reaper.log 2>&1
+          rc=$?
+          set -e
+          ls -l /tmp/reaper-central-win || true
+          test -s /tmp/reaper-central-win/results.tsv || {
+            cat /tmp/reaper-central-win/reaper.log
+            exit "$rc"
+          }
+          cat /tmp/reaper-central-win/results.tsv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-central-cache-windows-probe-${{ github.sha }}
+          path: |
+            /tmp/reaper-central-win/results.tsv
+            /tmp/reaper-central-win/started.txt
+            /tmp/reaper-central-win/paths.txt
+            /tmp/reaper-central-win/reaper.log
+            /tmp/REAPER-portable/reaper.ini
+            /tmp/REAPER-portable/Scripts/__startup.lua
+            /tmp/reaper-7z.log
+            /tmp/xvfb-win.log
+          if-no-files-found: warn
+          retention-days: 7

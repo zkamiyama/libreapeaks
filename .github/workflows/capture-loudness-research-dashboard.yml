@@ -1,0 +1,122 @@
+name: capture-loudness-research-dashboard
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/capture-loudness-research-dashboard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          fetch-depth: 0
+
+      - name: Wait briefly for research runs and capture all outcomes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/loudness-dashboard
+          mkdir -p "$root/logs"
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import subprocess
+          import time
+
+          repo=os.environ['GITHUB_REPOSITORY']
+          workflows=[
+              'strict-wdl-float-model-sweep.yml',
+              'reaper-loudness-boundary-characterization.yml',
+              'analyze-reaper-byte-identical-artifact.yml',
+              'inventory-loudness-implementation.yml',
+              'sweep-loudness-source-mutations.yml',
+              'strict-wdl-compiler-semantics-sweep.yml',
+              'autonomous-loudness-fix-and-merge.yml',
+              'verified-loudness-automerge.yml',
+          ]
+          root=Path('/tmp/loudness-dashboard')
+          def api(path):
+              completed=subprocess.run(['gh','api',path],text=True,capture_output=True,check=True)
+              return json.loads(completed.stdout)
+          rows=[]
+          for workflow in workflows:
+              run=None
+              for _ in range(180):
+                  payload=api(f'repos/{repo}/actions/runs?branch=hardening-reapeaks-cache-ffmpeg&per_page=100')
+                  candidates=[item for item in payload['workflow_runs'] if item['path']==f'.github/workflows/{workflow}']
+                  if candidates:
+                      run=max(candidates,key=lambda item:item['id'])
+                      if run['status']=='completed' or workflow in ('autonomous-loudness-fix-and-merge.yml','verified-loudness-automerge.yml'):
+                          break
+                  time.sleep(2)
+              if run is None:
+                  rows.append({'workflow':workflow,'missing':True})
+                  continue
+              if run['status']!='completed' and workflow not in ('autonomous-loudness-fix-and-merge.yml','verified-loudness-automerge.yml'):
+                  for _ in range(600):
+                      run=api(f'repos/{repo}/actions/runs/{run["id"]}')
+                      if run['status']=='completed': break
+                      time.sleep(3)
+              jobs=api(f'repos/{repo}/actions/runs/{run["id"]}/jobs?per_page=100').get('jobs',[])
+              failed_steps=[]
+              for job in jobs:
+                  for step in job.get('steps',[]):
+                      if step.get('conclusion')=='failure':
+                          failed_steps.append({'job':job['name'],'step':step['name'],'number':step['number']})
+              log_path=root/'logs'/f'{workflow}.txt'
+              subprocess.run(['gh','run','view',str(run['id']),'--log-failed'],text=True,stdout=log_path.open('w'),stderr=subprocess.STDOUT,check=False)
+              text=log_path.read_text(errors='replace')
+              rows.append({
+                  'workflow':workflow,
+                  'run_id':run['id'],
+                  'head_sha':run['head_sha'],
+                  'event':run['event'],
+                  'status':run['status'],
+                  'conclusion':run.get('conclusion'),
+                  'failed_steps':failed_steps,
+                  'failure_tail':text[-12000:],
+                  'html_url':run['html_url'],
+              })
+          pr=api(f'repos/{repo}/pulls/2')
+          dashboard={
+              'schema':1,
+              'captured_at_epoch':int(time.time()),
+              'pr':{
+                  'state':pr['state'],
+                  'merged':pr['merged'],
+                  'head_sha':pr['head']['sha'],
+                  'base_sha':pr['base']['sha'],
+                  'merge_commit_sha':pr.get('merge_commit_sha'),
+              },
+              'runs':rows,
+          }
+          destination=Path('oracle-reports/loudness-research-dashboard')
+          destination.mkdir(parents=True,exist_ok=True)
+          (destination/'dashboard.json').write_text(json.dumps(dashboard,indent=2)+'\n',encoding='utf-8')
+          (destination/'summary.txt').write_text('\n'.join(
+              [f"pr_state={pr['state']} merged={pr['merged']} head={pr['head']['sha']}"]+
+              [f"{row['workflow']} status={row.get('status','missing')} conclusion={row.get('conclusion','missing')} sha={row.get('head_sha','')}" for row in rows]
+          )+'\n',encoding='utf-8')
+          PY
+          tar -C "$root/logs" -czf oracle-reports/loudness-research-dashboard/failed-logs.tar.gz .
+          git add oracle-reports/loudness-research-dashboard
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'capture loudness research workflow dashboard'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg

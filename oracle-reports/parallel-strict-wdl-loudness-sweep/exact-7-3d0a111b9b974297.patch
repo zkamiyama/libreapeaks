@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..4a9b27e 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -367,7 +367,7 @@ fn build_fine_spectral_f64_impl(
+     } else {
+         // REAPER 7.79 stores only floor(N/2)+1 Hann coefficients. It
+         // computes the angle increment once, advances the f64 phase with
+-        // repeated addition, converts each coefficient to f32, then reuses
++        // repeated addition, converts each coefficient to f64, then reuses
+         // the half table in reverse for the second half. This is subtly
+         // different from evaluating cos(2*pi*i/(N-1)) independently.
+         let half = nwin / 2;
