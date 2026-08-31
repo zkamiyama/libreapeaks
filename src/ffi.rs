@@ -5,6 +5,7 @@ use crate::texture::{
     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8,
     render_waveform_rgba8_scaled,
 };
+use crate::wave::default_divisions;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 
@@ -305,6 +306,20 @@ pub unsafe extern "C" fn rpk_render_rgba8_scaled(
         unpack(wave_rgba),
     );
     *out = RpkBuffer::from_vec(img.data);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rpk_default_divisions(
+    sample_rate: u32,
+    fine_peaks_per_second: u32,
+    out_divisions: *mut u32,
+) -> i32 {
+    if sample_rate == 0 || fine_peaks_per_second == 0 || out_divisions.is_null() {
+        return -1;
+    }
+    let divisions = default_divisions(sample_rate, fine_peaks_per_second);
+    std::ptr::copy_nonoverlapping(divisions.as_ptr(), out_divisions, divisions.len());
     0
 }
 
