@@ -22,6 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Snapshot the exact branch head used for central-cache reverse engineering.
           git rev-parse HEAD > /tmp/snapshot-commit.txt
           tar \
             --exclude='./.git' \
