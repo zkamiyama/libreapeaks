@@ -1,0 +1,57 @@
+name: publish-loudness-research-report
+
+on:
+  workflow_run:
+    workflows:
+      - strict-wdl-float-model-sweep
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Source strict-wdl-float-model-sweep run id
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'hardening-reapeaks-cache-ffmpeg'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+
+      - name: Download and publish the machine-readable report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$run_id" ]; then
+            run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/strict-wdl-float-model-sweep.yml/runs?branch=hardening-reapeaks-cache-ffmpeg&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          tmp="$(mktemp -d)"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$tmp/report.zip"
+          unzip -q "$tmp/report.zip" -d "$tmp/report"
+          destination="oracle-reports/strict-wdl-float-model-sweep"
+          rm -rf "$destination"
+          mkdir -p "$destination"
+          cp -a "$tmp/report"/. "$destination"/
+          printf '%s\n' "$run_id" > "$destination/source-run-id.txt"
+          git add "$destination"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "record strict-WDL floating-point sweep results"
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
