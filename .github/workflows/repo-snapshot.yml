@@ -1,0 +1,37 @@
+name: repo-snapshot
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/repo-snapshot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Record exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/libreapeaks-snapshot
+          git rev-parse HEAD > /tmp/libreapeaks-snapshot/HEAD.txt
+          git submodule status --recursive > /tmp/libreapeaks-snapshot/submodules.txt
+          git status --porcelain=v1 > /tmp/libreapeaks-snapshot/status.txt
+          tar --exclude=.git -czf /tmp/libreapeaks-snapshot/source.tar.gz .
+          test ! -s /tmp/libreapeaks-snapshot/status.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libreapeaks-source-${{ github.sha }}
+          path: /tmp/libreapeaks-snapshot
+          if-no-files-found: error
+          retention-days: 3
