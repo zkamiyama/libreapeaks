@@ -1,0 +1,213 @@
+name: strict-wdl-denormal-mode-oracle-v2
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/strict-wdl-denormal-mode-oracle-v2.yml'
+      - 'tests/no_global_fast_math.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: strict-wdl-denormal-mode-oracle-v2
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+          fetch-depth: 0
+      - name: Download fixed exact oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/denormal-v2;mkdir -p "$root/input" "$root/results" "$root/preload"
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[] | select(.expired == false) | .id' | head -1)"
+          test -n "$artifact_id"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$root/artifact.zip"
+          unzip -q "$root/artifact.zip" -d "$root/input"
+      - name: Build FTZ DAZ preload probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/denormal-v2/preload/fpenv.c <<'C'
+          #include <fenv.h>
+          #if defined(__x86_64__) || defined(__i386__)
+          #include <xmmintrin.h>
+          #endif
+          #ifndef BITS
+          #define BITS 0
+          #endif
+          #ifndef RMODE
+          #define RMODE FE_TONEAREST
+          #endif
+          __attribute__((constructor)) static void initialize_fp_mode(void) {
+          #if defined(__x86_64__) || defined(__i386__)
+            unsigned csr=_mm_getcsr();
+            csr &= ~((1u<<15)|(1u<<6));
+            csr |= BITS;
+            _mm_setcsr(csr);
+          #endif
+            fesetround(RMODE);
+          }
+          C
+          build(){ cc -shared -fPIC -O2 -DBITS="$2" -DRMODE="$3" /tmp/denormal-v2/preload/fpenv.c -lm -o "/tmp/denormal-v2/preload/$1.so"; }
+          build clear 0 FE_TONEAREST
+          build ftz 32768 FE_TONEAREST
+          build daz 64 FE_TONEAREST
+          build both 32832 FE_TONEAREST
+          build both-down 32832 FE_DOWNWARD
+          build both-up 32832 FE_UPWARD
+          build both-zero 32832 FE_TOWARDZERO
+      - name: Compare process floating-point modes
+        id: modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,re,shutil,subprocess,time
+          root=Path('/tmp/denormal-v2');inputs=root/'input';results=root/'results'
+          test=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text();names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',test)))
+          dirs=[p for p in inputs.rglob('*') if p.is_dir()];peak=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*.reapeaks')));pcm=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le','.pcm','.raw','.wav','.m4a'}))
+          oracle=[p for p in inputs.rglob('*.reapeaks') if not any(x in str(p).lower() for x in ('candidate','generated'))]
+          stop={'reapeaks','reaper','libreapeaks','oracle','candidate','generated','result','results','output','input','media'}
+          def toks(p):return {x for x in re.sub(r'[^a-z0-9]+',' ',str(p).lower()).split() if x not in stop}
+          def dist(out):
+              candidates=list(out.rglob('*.reapeaks'));total=0;used=0
+              for c in candidates:
+                  ranked=sorted(oracle,key=lambda o:(-len(toks(c)&toks(o)),abs(c.stat().st_size-o.stat().st_size)))
+                  if not ranked:continue
+                  a=ranked[0].read_bytes();b=c.read_bytes();n=min(len(a),len(b));total+=sum(x!=y for x,y in zip(a[:n],b[:n]))+abs(len(a)-len(b));used+=1
+              return total if used else None
+          rows=[]
+          for mode in ('baseline','clear','ftz','daz','both','both-down','both-up','both-zero'):
+              out=root/'outputs'/mode;shutil.rmtree(out,ignore_errors=True);out.mkdir(parents=True);env=os.environ.copy()
+              for name in names:
+                  if any(x in name for x in ('OUT','RESULT','CANDIDATE','GENERATED')):value=out
+                  elif any(x in name for x in ('PCM','DECODE','AUDIO','MEDIA','SOURCE')):value=pcm
+                  else:value=peak
+                  env[name]=str(value)
+              if mode!='baseline':env['LD_PRELOAD']=str(root/'preload'/f'{mode}.so')
+              start=time.monotonic();cp=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1200);text=(cp.stdout or '')+'\n'+(cp.stderr or '');(results/f'process-{mode}.log').write_text(text)
+              rows.append({'mode':mode,'returncode':cp.returncode,'exact_pass':cp.returncode==0 and '0 tests' not in text.lower(),'distance':dist(out),'elapsed':time.monotonic()-start,'tail':text[-5000:]})
+          report={'schema':2,'rows':rows,'exact_modes':[r['mode'] for r in rows if r['exact_pass']],'ranked':sorted([r for r in rows if r['distance'] is not None],key=lambda r:r['distance'])}
+          (results/'process-report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as f:f.write('modes='+json.dumps(report['exact_modes'],separators=(',',':'))+'\n')
+          PY
+      - name: Test explicit scoped guards at every compiled extern-C entry
+        id: scoped
+        shell: bash
+        env:
+          PROCESS_MODES: ${{ steps.modes.outputs.modes }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json,os,re,shutil,subprocess
+          root=Path('/tmp/denormal-v2');inputs=root/'input';results=root/'results';process=json.loads((results/'process-report.json').read_text())
+          preferred=[]
+          for name in json.loads(os.environ.get('PROCESS_MODES','[]'))+[r['mode'] for r in process['ranked'][:4]]:
+              base='both' if name.startswith('both') else name
+              if base in ('ftz','daz','both') and base not in preferred:preferred.append(base)
+          for base in ('ftz','daz','both'):
+              if base not in preferred:preferred.append(base)
+          cpp=[]
+          for base in (Path('native'),Path('src')):
+              if base.exists():cpp.extend(p for p in base.rglob('*') if p.is_file() and p.suffix.lower() in {'.cc','.cpp','.cxx'})
+          wrappers=[p for p in cpp if 'extern "C"' in p.read_text(encoding='utf-8',errors='replace')]
+          if not wrappers:raise SystemExit('no C++ extern-C wrappers were found')
+          originals={p:p.read_text(encoding='utf-8',errors='replace') for p in wrappers}
+          test=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text();names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',test)));dirs=[p for p in inputs.rglob('*') if p.is_dir()];peak=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*.reapeaks')));pcm=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le','.pcm','.raw','.wav','.m4a'}))
+          guard_template='''\n#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)\n#include <xmmintrin.h>\nclass LibreapeaksScopedFpGuard final {\n public:\n  explicit LibreapeaksScopedFpGuard(unsigned bits) noexcept : previous_(_mm_getcsr()) { _mm_setcsr(previous_ | bits); }\n  ~LibreapeaksScopedFpGuard() noexcept { _mm_setcsr(previous_); }\n  LibreapeaksScopedFpGuard(const LibreapeaksScopedFpGuard&) = delete;\n  LibreapeaksScopedFpGuard& operator=(const LibreapeaksScopedFpGuard&) = delete;\n private: unsigned previous_;\n};\n#else\nclass LibreapeaksScopedFpGuard final { public: explicit LibreapeaksScopedFpGuard(unsigned) noexcept {} };\n#endif\n'''
+          def restore():
+              for p,t in originals.items():p.write_text(t)
+          def instrument(bits,scope):
+              count=0
+              for path,original in originals.items():
+                  text=guard_template+original;positions=[];cursor=0
+                  while True:
+                      start=text.find('extern "C"',cursor)
+                      if start<0:break
+                      semicolon=text.find(';',start);brace=text.find('{',start)
+                      if brace<0:break
+                      if semicolon>=0 and semicolon<brace:cursor=semicolon+1;continue
+                      signature=text[start:brace+1]
+                      cursor=brace+1
+                      if '(' not in signature or ')' not in signature:continue
+                      if scope=='relevant' and not re.search(r'loud|wdl|r128|ebu|peak|generate',signature,re.I):continue
+                      positions.append(brace+1)
+                  for pos in reversed(positions):text=text[:pos]+f'\n  LibreapeaksScopedFpGuard libreapeaks_fp_guard({bits}u);'+text[pos:];count+=1
+                  path.write_text(text)
+              return count
+          def run(label):
+              out=root/'scoped-output'/label;shutil.rmtree(out,ignore_errors=True);out.mkdir(parents=True);env=os.environ.copy()
+              for name in names:
+                  if any(x in name for x in ('OUT','RESULT','CANDIDATE','GENERATED')):value=out
+                  elif any(x in name for x in ('PCM','DECODE','AUDIO','MEDIA','SOURCE')):value=pcm
+                  else:value=peak
+                  env[name]=str(value)
+              cp=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1200);text=(cp.stdout or '')+'\n'+(cp.stderr or '');(results/f'{label}.log').write_text(text);return {'label':label,'returncode':cp.returncode,'exact_pass':cp.returncode==0 and '0 tests' not in text.lower(),'tail':text[-5000:]}
+          bits={'ftz':32768,'daz':64,'both':32832};rows=[];winner=None
+          for mode in preferred:
+              for scope in ('relevant','all'):
+                  restore();count=instrument(bits[mode],scope)
+                  if not count:rows.append({'label':f'{mode}-{scope}','exact_pass':False,'reason':'nothing-instrumented'});continue
+                  subprocess.run(['cargo','clean'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False);row=run(f'{mode}-{scope}');row['instrumented']=count;rows.append(row)
+                  if row['exact_pass']:
+                      patch=subprocess.run(['git','diff','--',*[str(p) for p in wrappers]],text=True,capture_output=True,check=True).stdout;(results/'winner.patch').write_text(patch);winner=row['label'];break
+              if winner:break
+          restore()
+          if winner:
+              subprocess.run(['git','apply','--check',str(results/'winner.patch')],check=True);subprocess.run(['git','apply',str(results/'winner.patch')],check=True);verify=run('winner-reapplied');rows.append(verify)
+              if not verify['exact_pass']:raise SystemExit('scoped denormal winner was not reproducible')
+          report={'schema':2,'preferred_modes':preferred,'rows':rows,'winner':winner};(results/'scoped-report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as f:f.write(f'winner={winner or ""}\n')
+          PY
+      - name: Validate and commit an explicit scoped winner
+        if: steps.scoped.outputs.winner != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          mkdir -p oracle-reports/strict-wdl-denormal-mode-v2
+          cp /tmp/denormal-v2/results/process-report.json oracle-reports/strict-wdl-denormal-mode-v2/
+          cp /tmp/denormal-v2/results/scoped-report.json oracle-reports/strict-wdl-denormal-mode-v2/
+          cp /tmp/denormal-v2/results/winner.patch oracle-reports/strict-wdl-denormal-mode-v2/
+          git add native src oracle-reports/strict-wdl-denormal-mode-v2
+          git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'scope REAPER-compatible FTZ/DAZ to strict-WDL FFI calls'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
+      - name: Publish a fail-closed negative result
+        if: steps.scoped.outputs.winner == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p oracle-reports/strict-wdl-denormal-mode-v2
+          cp /tmp/denormal-v2/results/process-report.json oracle-reports/strict-wdl-denormal-mode-v2/
+          cp /tmp/denormal-v2/results/scoped-report.json oracle-reports/strict-wdl-denormal-mode-v2/
+          git add oracle-reports/strict-wdl-denormal-mode-v2
+          if git diff --cached --quiet;then exit 0;fi
+          git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'record scoped REAPER FTZ/DAZ oracle result'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strict-wdl-denormal-mode-v2-${{ github.sha }}
+          path: /tmp/denormal-v2/results
+          retention-days: 30
