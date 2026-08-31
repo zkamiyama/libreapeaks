@@ -159,7 +159,7 @@ replace_between(
     "src/loudness.rs",
     "#[derive(Debug, Clone)]\nstruct SlidingEnergy {",
     "#[derive(Debug, Clone)]\nstruct BlockEnergyRing {",
-    "#[derive(Debug, Clone)]\nstruct BlockEnergyRing {",
+    "",
 )
 replace_once(
     "src/loudness.rs",
