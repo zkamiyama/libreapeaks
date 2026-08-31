@@ -14,29 +14,33 @@ jobs:
   probe-windows-api-under-wine:
     runs-on: ubuntu-latest
     env:
+      WINEARCH: win64
       WINEPREFIX: /tmp/libreapeaks-wine
       WINEDEBUG: -all
       WINEDLLOVERRIDES: mscoree,mshtml=
     steps:
       - uses: actions/checkout@v4
-      - name: Install Wine and Xvfb
+      - name: Install Wine, Xvfb and 7-Zip
         run: |
           sudo apt-get update
-          sudo apt-get install -y wine64 xvfb
-      - name: Install portable REAPER 7.79 x64
+          sudo apt-get install -y wine64 xvfb p7zip-full
+      - name: Extract portable REAPER 7.79 x64
         shell: bash
         run: |
           set -euo pipefail
           curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_x64-install.exe -o /tmp/reaper-install.exe
-          rm -rf "$WINEPREFIX" /tmp/REAPER-portable
-          mkdir -p "$WINEPREFIX" /tmp/REAPER-portable
+          rm -rf "$WINEPREFIX" /tmp/reaper-extracted /tmp/REAPER-portable
+          mkdir -p "$WINEPREFIX" /tmp/reaper-extracted /tmp/REAPER-portable
+          7z x -y /tmp/reaper-install.exe -o/tmp/reaper-extracted >/tmp/reaper-7z.log
+          reaper_exe="$(find /tmp/reaper-extracted -type f -iname reaper.exe | head -1)"
+          test -n "$reaper_exe"
+          cp -a "$(dirname "$reaper_exe")/." /tmp/REAPER-portable/
+          test -f /tmp/REAPER-portable/reaper.exe
           Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb-win.log 2>&1 &
           xvfb_pid=$!
           trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
           export DISPLAY=:96
-          wineboot -u
-          wine /tmp/reaper-install.exe /S /PORTABLE '/D=Z:\tmp\REAPER-portable'
-          test -f /tmp/REAPER-portable/reaper.exe
+          wineboot -u || true
       - name: Query Windows central-cache paths
         shell: bash
         run: |
@@ -90,7 +94,7 @@ jobs:
           export REAPEAKS_MANIFEST='Z:\tmp\reaper-central-win\paths.txt'
           export REAPEAKS_RESULT='Z:\tmp\reaper-central-win\results.tsv'
           set +e
-          timeout 90s wine /tmp/REAPER-portable/reaper.exe \
+          timeout 90s wine64 /tmp/REAPER-portable/reaper.exe \
             -newinst \
             -cfgfile 'Z:\tmp\reaper-central-win\reaper.ini' \
             -new -nosplash \
@@ -112,6 +116,7 @@ jobs:
             /tmp/reaper-central-win/reaper.ini
             /tmp/reaper-central-win/paths.txt
             /tmp/reaper-central-win/reaper.log
+            /tmp/reaper-7z.log
             /tmp/xvfb-win.log
           if-no-files-found: warn
           retention-days: 7
