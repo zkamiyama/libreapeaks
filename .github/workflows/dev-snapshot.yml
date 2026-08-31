@@ -22,16 +22,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > snapshot-commit.txt
+          git rev-parse HEAD > /tmp/snapshot-commit.txt
           tar \
             --exclude='./.git' \
-            --exclude='./repo-snapshot.tar.gz' \
-            -czf repo-snapshot.tar.gz .
+            -czf /tmp/repo-snapshot.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: repo-snapshot-${{ github.sha }}
           path: |
-            repo-snapshot.tar.gz
-            snapshot-commit.txt
+            /tmp/repo-snapshot.tar.gz
+            /tmp/snapshot-commit.txt
           if-no-files-found: error
           retention-days: 3
