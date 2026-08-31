@@ -1,0 +1,422 @@
+name: reaper-loudness-boundary-characterization
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-loudness-boundary-characterization.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'src/**'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reaper-loudness-boundary-characterization-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  characterize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+
+      - name: Install REAPER runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libasound2t64
+
+      - name: Download pinned REAPER 7.79
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-loudness-boundaries
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          sha256sum "$root/reaper779_linux_x86_64.tar.xz" > "$root/results/reaper-tarball.sha256"
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+
+      - name: Generate exact-sample boundary fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import math
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-loudness-boundaries')
+          media = root / 'media'
+          sr = 48_000
+          channels = 2
+          h25 = sr // 40
+          h100 = sr // 10
+          h500 = sr // 2
+          w400 = sr * 2 // 5
+          w3s = sr * 3
+
+          cases: dict[str, list[int]] = {}
+
+          def stereo(values: list[int]) -> list[int]:
+              out: list[int] = []
+              for value in values:
+                  out.extend((value, value))
+              return out
+
+          def zeros(length: int) -> list[int]:
+              return stereo([0] * max(0, length))
+
+          def impulse(length: int, position: int, amplitude: int = 16_384) -> list[int]:
+              values = [0] * max(0, length)
+              if 0 <= position < len(values):
+                  values[position] = amplitude
+              return stereo(values)
+
+          def step(length: int, position: int, before: int = 0, after: int = 16_384) -> list[int]:
+              return stereo([before if index < position else after for index in range(max(0, length))])
+
+          def tone(length: int, frequency: float = 1_000.0, amplitude: int = 12_000, phase: float = 0.0) -> list[int]:
+              return stereo([
+                  int(round(amplitude * math.sin(2.0 * math.pi * frequency * index / sr + phase)))
+                  for index in range(max(0, length))
+              ])
+
+          # Silence establishes exact record-count and EOF rules without filter transients.
+          boundary_lengths = sorted({
+              0, 1,
+              h25 - 1, h25, h25 + 1,
+              h100 - 1, h100, h100 + 1,
+              w400 - 1, w400, w400 + 1,
+              w400 + h25 - 1, w400 + h25, w400 + h25 + 1,
+              w400 + h100 - 1, w400 + h100, w400 + h100 + 1,
+              h500 - 1, h500, h500 + 1,
+              w3s - 1, w3s, w3s + 1,
+              w3s + h500 - 1, w3s + h500, w3s + h500 + 1,
+          })
+          for length in boundary_lengths:
+              cases[f'zero_len_{length:06d}'] = zeros(length)
+
+          # One-sample shifts around all plausible reporting/window boundaries.
+          signal_length = sr * 4
+          positions = sorted({
+              0, 1,
+              h25 - 1, h25, h25 + 1,
+              h100 - 1, h100, h100 + 1,
+              w400 - 1, w400, w400 + 1,
+              h500 - 1, h500, h500 + 1,
+              sr - 1, sr, sr + 1,
+              w3s - 1, w3s, w3s + 1,
+              signal_length - 2, signal_length - 1,
+          })
+          for position in positions:
+              cases[f'impulse_at_{position:06d}'] = impulse(signal_length, position)
+
+          for position in (sr - 1, sr, sr + 1, sr + h25 - 1, sr + h25, sr + h25 + 1):
+              cases[f'step_at_{position:06d}'] = step(sr * 3, position)
+
+          # EOF versus explicit silence distinguishes discard, zero padding, and partial normalization.
+          burst_lengths = (w400 - 1, w400, w400 + 1, w400 + h25 - 1, w400 + h25, w400 + h25 + 1)
+          for length in burst_lengths:
+              raw = tone(length)
+              cases[f'tone_eof_{length:06d}'] = raw
+              cases[f'tone_eof_{length:06d}_pad400'] = raw + zeros(w400)
+              cases[f'tone_eof_{length:06d}_pad3s'] = raw + zeros(w3s)
+
+          # Warm-up, reset, tail, and rolling-accumulator probes.
+          cases['tone_1s_head'] = tone(sr)
+          cases['silence2s_tone1s'] = zeros(sr * 2) + tone(sr)
+          cases['tone1s_silence2s'] = tone(sr) + zeros(sr * 2)
+          cases['silence1s_tone1s_silence2s'] = zeros(sr) + tone(sr) + zeros(sr * 2)
+          cases['two_bursts_one_file'] = zeros(sr) + tone(sr // 2) + zeros(sr) + tone(sr // 2) + zeros(sr)
+          # Exactly 100 ms periodic at 48 kHz: 10 Hz tone, long enough to reveal drift.
+          cases['periodic_100ms_30s'] = tone(sr * 30, frequency=10.0, amplitude=10_000)
+          cases['dc_three_levels'] = stereo([0] * sr + [8_192] * sr + [16_384] * sr)
+
+          manifest = {
+              'sample_rate': sr,
+              'channels': channels,
+              'h25': h25,
+              'h100': h100,
+              'h500': h500,
+              'w400': w400,
+              'w3s': w3s,
+              'cases': {},
+          }
+          for name, interleaved in cases.items():
+              path = media / f'{name}.wav'
+              payload = struct.pack('<' + 'h' * len(interleaved), *interleaved) if interleaved else b''
+              with wave.open(str(path), 'wb') as output:
+                  output.setnchannels(channels)
+                  output.setsampwidth(2)
+                  output.setframerate(sr)
+                  output.writeframes(payload)
+              manifest['cases'][name] = {
+                  'frames': len(interleaved) // channels,
+                  'bytes': len(payload),
+              }
+          (root / 'results' / 'fixture-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          print(f'generated {len(cases)} fixtures')
+          PY
+
+      - name: Generate mode-3 ReaPeaks with isolated REAPER processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import subprocess
+          import tempfile
+          import time
+
+          root = Path('/tmp/reaper-loudness-boundaries')
+          media_root = root / 'media'
+          results = root / 'results'
+          reaper = Path(os.environ['REAPER_BIN'])
+          probe = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':96'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          rows = []
+          try:
+              time.sleep(0.4)
+              for media in sorted(media_root.glob('*.wav')):
+                  peak = Path(str(media) + '.reapeaks')
+                  peak.unlink(missing_ok=True)
+                  case = Path(tempfile.mkdtemp(prefix='reaper-loudness-boundary-'))
+                  config = case / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=64\n',
+                      encoding='utf-8',
+                  )
+                  status = case / 'status.txt'
+                  log_path = results / f'{media.stem}.reaper.log'
+                  env = os.environ.copy()
+                  env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status))
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(probe)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status_text = status.read_text(errors='replace') if status.exists() else ''
+                  rows.append({
+                      'case': media.stem,
+                      'returncode': completed.returncode,
+                      'status': status_text,
+                      'peak_exists': peak.exists(),
+                      'peak_size': peak.stat().st_size if peak.exists() else None,
+                  })
+                  if completed.returncode != 0 or 'OK loops=' not in status_text or not peak.exists():
+                      raise SystemExit(f'REAPER failed for {media.name}: {rows[-1]}')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          (results / 'reaper-runs.json').write_text(json.dumps(rows, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Build a parser-debug adapter and inspect every peak file
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+          import subprocess
+          import tomllib
+
+          root = Path('/tmp/reaper-loudness-boundaries')
+          results = root / 'results'
+          manifest = tomllib.loads(Path('Cargo.toml').read_text(encoding='utf-8'))
+          crate = manifest.get('lib', {}).get('name') or manifest['package']['name']
+          crate = crate.replace('-', '_')
+          sample = next((root / 'media').glob('*.reapeaks'))
+          candidates = [
+              f'{crate}::parse(&bytes)',
+              f'{crate}::parse_reapeaks(&bytes)',
+              f'{crate}::ReaPeaks::parse(&bytes)',
+              f'{crate}::Reapeaks::parse(&bytes)',
+              f'{crate}::ReaperPeaks::parse(&bytes)',
+          ]
+          example = Path('examples/__oracle_dump.rs')
+          selected = None
+          build_logs = []
+          for expression in candidates:
+              example.write_text(f'''use std::env;\nuse std::fs;\nfn main() {{\n    let path = env::args_os().nth(1).expect("path");\n    let bytes = fs::read(path).expect("read");\n    let parsed = ({expression}).expect("parse");\n    println!("{{:#?}}", parsed);\n}}\n''', encoding='utf-8')
+              completed = subprocess.run(
+                  ['cargo', 'run', '--quiet', '--all-features', '--example', '__oracle_dump', '--', str(sample)],
+                  text=True,
+                  capture_output=True,
+                  timeout=300,
+              )
+              build_logs.append({'expression': expression, 'returncode': completed.returncode, 'stderr': completed.stderr[-4000:]})
+              if completed.returncode == 0:
+                  selected = expression
+                  break
+          (results / 'parser-adapter-build.json').write_text(json.dumps(build_logs, indent=2) + '\n', encoding='utf-8')
+          if selected is None:
+              # Raw-token analysis below remains useful, but fail so the adapter is not silently skipped.
+              raise SystemExit('could not discover the public parser API')
+          for peak in sorted((root / 'media').glob('*.reapeaks')):
+              completed = subprocess.run(
+                  ['cargo', 'run', '--quiet', '--all-features', '--example', '__oracle_dump', '--', str(peak)],
+                  text=True,
+                  capture_output=True,
+                  timeout=120,
+                  check=True,
+              )
+              (results / f'{peak.name}.debug.txt').write_text(completed.stdout, encoding='utf-8')
+          (results / 'selected-parser-expression.txt').write_text(selected + '\n', encoding='utf-8')
+          example.unlink(missing_ok=True)
+          PY
+
+      - name: Derive record cadence, EOF behavior, and raw layer offsets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import re
+          import struct
+
+          root = Path('/tmp/reaper-loudness-boundaries')
+          media = root / 'media'
+          results = root / 'results'
+          fixture = json.loads((results / 'fixture-manifest.json').read_text(encoding='utf-8'))
+          rows = []
+          for peak in sorted(media.glob('*.reapeaks')):
+              data = peak.read_bytes()
+              debug_path = results / f'{peak.name}.debug.txt'
+              debug = debug_path.read_text(errors='replace') if debug_path.exists() else ''
+              divisions = [int(value) for value in re.findall(r'(?i)\b(?:division|div)\s*:\s*(-?\d+)', debug)]
+              token_rows = []
+              for token in (-115, -114):
+                  encoded = struct.pack('<i', token)
+                  start = 0
+                  while True:
+                      offset = data.find(encoded, start)
+                      if offset < 0:
+                          break
+                      before = data[max(0, offset - 16):offset]
+                      after = data[offset:min(len(data), offset + 64)]
+                      u32 = [struct.unpack_from('<I', after, pos)[0] for pos in range(0, len(after) - 3, 4)]
+                      i32 = [struct.unpack_from('<i', after, pos)[0] for pos in range(0, len(after) - 3, 4)]
+                      token_rows.append({
+                          'token': token,
+                          'offset': offset,
+                          'before_hex': before.hex(),
+                          'after_hex': after.hex(),
+                          'u32_words': u32,
+                          'i32_words': i32,
+                      })
+                      start = offset + 4
+              case = peak.name.removesuffix('.wav.reapeaks')
+              rows.append({
+                  'case': case,
+                  'frames': fixture['cases'].get(case, {}).get('frames'),
+                  'size': len(data),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'debug_divisions': divisions,
+                  'raw_negative_tokens': token_rows,
+              })
+          # Pair EOF files with explicit padding and compute common-prefix/suffix metrics.
+          eof_pairs = []
+          by_case = {row['case']: row for row in rows}
+          for case, row in sorted(by_case.items()):
+              if not case.startswith('tone_eof_') or case.endswith('_pad400') or case.endswith('_pad3s'):
+                  continue
+              for suffix in ('_pad400', '_pad3s'):
+                  other_name = case + suffix
+                  if other_name not in by_case:
+                      continue
+                  a = (media / f'{case}.wav.reapeaks').read_bytes()
+                  b = (media / f'{other_name}.wav.reapeaks').read_bytes()
+                  prefix = 0
+                  for x, y in zip(a, b):
+                      if x != y:
+                          break
+                      prefix += 1
+                  suffix_len = 0
+                  for x, y in zip(reversed(a), reversed(b)):
+                      if x != y:
+                          break
+                      suffix_len += 1
+                  eof_pairs.append({
+                      'short': case,
+                      'padded': other_name,
+                      'size_short': len(a),
+                      'size_padded': len(b),
+                      'common_prefix': prefix,
+                      'common_suffix': suffix_len,
+                  })
+          report = {
+              'schema': 1,
+              'reaper_version': '7.79 Linux x86_64',
+              'settings': {'peakcachegenmode': 3, 'peakcachegenrs': 300},
+              'constants': {key: fixture[key] for key in ('sample_rate', 'channels', 'h25', 'h100', 'h500', 'w400', 'w3s')},
+              'rows': rows,
+              'eof_pairs': eof_pairs,
+          }
+          (results / 'boundary-report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Publish characterization report on the branch
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination=oracle-reports/reaper-loudness-boundaries
+          rm -rf "$destination"
+          mkdir -p "$destination"
+          for file in \
+            fixture-manifest.json reaper-runs.json parser-adapter-build.json \
+            selected-parser-expression.txt boundary-report.json reaper-tarball.sha256; do
+            if [ -f "/tmp/reaper-loudness-boundaries/results/$file" ]; then
+              cp "/tmp/reaper-loudness-boundaries/results/$file" "$destination/$file"
+            fi
+          done
+          # Keep compressed raw/debug evidence without flooding the Git tree.
+          tar -C /tmp/reaper-loudness-boundaries/results -czf "$destination/debug-evidence.tar.gz" \
+            --wildcards '*.debug.txt' '*.reaper.log' 'xvfb.log' 2>/dev/null || true
+          git add "$destination"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'record REAPER loudness boundary characterization'
+          git push origin HEAD:hardening-reapeaks-cache-ffmpeg
