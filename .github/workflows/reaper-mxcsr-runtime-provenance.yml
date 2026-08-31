@@ -1,0 +1,123 @@
+name: reaper-mxcsr-runtime-provenance
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-mxcsr-runtime-provenance.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+      - name: Install tracing dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg gdb
+      - name: Build ALAC source and download REAPER
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-mxcsr;mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o "$root/reaper.tar.xz";tar -xJf "$root/reaper.tar.xz" -C "$root/reaper";REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111|head -1)";test -n "$REAPER_BIN";echo "REAPER_BIN=$REAPER_BIN">>"$GITHUB_ENV"
+          python - <<'PY'
+          from pathlib import Path
+          import struct,wave
+          root=Path('/tmp/reaper-mxcsr/media');sr=48000;data=bytearray()
+          for i in range(sr*3):
+            v=0 if i<sr else 8192 if i<2*sr else 16384;data+=struct.pack('<hh',v,v)
+          with wave.open(str(root/'step.wav'),'wb') as w:w.setnchannels(2);w.setsampwidth(2);w.setframerate(sr);w.writeframes(data)
+          PY
+          ffmpeg -hide_banner -loglevel error -y -i "$root/media/step.wav" -map_metadata -1 -c:a alac "$root/media/step.m4a"
+      - name: Trace MXCSR on actual FFmpeg demux decode calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json,os,re,subprocess,tempfile,time
+          root=Path('/tmp/reaper-mxcsr');results=root/'results';media=root/'media/step.m4a';reaper=Path(os.environ['REAPER_BIN']);probe=Path('tools/reaper_oracle/build_probe.lua').resolve();case=Path(tempfile.mkdtemp());cfg=case/'reaper.ini';cfg.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n');status=case/'status';script=case/'trace.gdb';display=':91'
+          script.write_text(r'''
+          set pagination off
+          set confirm off
+          set breakpoint pending on
+          set print thread-events off
+          handle SIGPIPE nostop noprint pass
+          set $read_hits=0
+          set $send_hits=0
+          set $receive_hits=0
+          break av_read_frame
+          commands
+            silent
+            set $read_hits=$read_hits+1
+            if $read_hits<=6
+              printf "MXCSR_READ hit=%d thread=",$read_hits
+              thread
+              p/x $mxcsr
+              bt 5
+            end
+            continue
+          end
+          break avcodec_send_packet
+          commands
+            silent
+            set $send_hits=$send_hits+1
+            if $send_hits<=6
+              printf "MXCSR_SEND hit=%d thread=",$send_hits
+              thread
+              p/x $mxcsr
+              bt 5
+            end
+            continue
+          end
+          break avcodec_receive_frame
+          commands
+            silent
+            set $receive_hits=$receive_hits+1
+            if $receive_hits<=12
+              printf "MXCSR_RECEIVE hit=%d thread=",$receive_hits
+              thread
+              p/x $mxcsr
+              bt 5
+            end
+            continue
+          end
+          run
+          printf "MXCSR_SUMMARY read=%d send=%d receive=%d\n",$read_hits,$send_hits,$receive_hits
+          quit
+          ''')
+          log=results/'gdb.txt';env=os.environ.copy();env.update(DISPLAY=display,REAPEAKS_MEDIA=str(media.resolve()),REAPEAKS_RESULT=str(status));xlog=(results/'xvfb.log').open('wb');x=subprocess.Popen(['Xvfb',display,'-screen','0','1280x720x24','-nolisten','tcp'],stdout=xlog,stderr=subprocess.STDOUT)
+          try:
+            time.sleep(.4)
+            with log.open('wb') as output:cp=subprocess.run(['gdb','-q','--batch','-x',str(script),'--args',str(reaper),'-newinst','-cfgfile',str(cfg),'-new','-nosplash',str(probe)],env=env,stdout=output,stderr=subprocess.STDOUT,timeout=180)
+          finally:x.terminate();x.wait(timeout=3);xlog.close()
+          text=log.read_text(errors='replace');values=[int(x,16) for x in re.findall(r'\$\d+ = (0x[0-9a-fA-F]+)',text)];summary=re.search(r'MXCSR_SUMMARY read=(\d+) send=(\d+) receive=(\d+)',text)
+          if not summary or not values:raise SystemExit('GDB did not expose MXCSR on FFmpeg calls')
+          rows=[{'raw':v,'ftz':bool(v&(1<<15)),'daz':bool(v&(1<<6)),'rounding_control':(v>>13)&3} for v in values]
+          report={'schema':1,'source':'REAPER 7.79 Linux ALAC/VIDEO FFmpeg worker call sites','call_counts':list(map(int,summary.groups())),'samples':rows,'all_ftz':all(r['ftz'] for r in rows),'all_daz':all(r['daz'] for r in rows),'unique_raw':sorted(set(values)),'status':status.read_text(errors='replace') if status.exists() else ''}
+          (results/'mxcsr-report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+          PY
+      - name: Publish runtime evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p oracle-reports/reaper-mxcsr-runtime
+          cp /tmp/reaper-mxcsr/results/mxcsr-report.json oracle-reports/reaper-mxcsr-runtime/ 2>/dev/null || true
+          cp /tmp/reaper-mxcsr/results/gdb.txt oracle-reports/reaper-mxcsr-runtime/ 2>/dev/null || true
+          git add oracle-reports/reaper-mxcsr-runtime
+          if git diff --cached --quiet;then exit 0;fi
+          git config user.name github-actions[bot];git config user.email 41898282+github-actions[bot]@users.noreply.github.com;git commit -m 'record REAPER FFmpeg worker MXCSR provenance';git push origin HEAD:hardening-reapeaks-cache-ffmpeg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-mxcsr-runtime-${{ github.sha }}
+          path: /tmp/reaper-mxcsr/results
+          retention-days: 30
