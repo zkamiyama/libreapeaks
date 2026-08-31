@@ -69,16 +69,34 @@ jobs:
             out:write(fn, "\t", read, "\t", write, "\t", reaper.GetResourcePath(), "\n")
           end
           out:close()
-          reaper.Main_OnCommand(40004, 0)
           '@ | Set-Content -LiteralPath (Join-Path $root 'query.lua') -Encoding utf8NoBOM
+          $result = Join-Path $root 'results.tsv'
           $env:REAPEAKS_MANIFEST = Join-Path $root 'paths.txt'
-          $env:REAPEAKS_RESULT = Join-Path $root 'results.tsv'
+          $env:REAPEAKS_RESULT = $result
           $process = Start-Process -FilePath $env:REAPER_BIN -ArgumentList @(
             '-newinst', '-cfgfile', (Join-Path $root 'reaper.ini'), '-new', '-nosplash', (Join-Path $root 'query.lua')
           ) -PassThru
-          Wait-Process -Id $process.Id -Timeout 120
-          if ($process.ExitCode -ne 0) { throw "REAPER failed: $($process.ExitCode)" }
-          Get-Content -LiteralPath (Join-Path $root 'results.tsv')
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(90)
+            while (-not (Test-Path $result)) {
+              if ($process.HasExited) { throw "REAPER exited before producing the probe: $($process.ExitCode)" }
+              if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for REAPER probe output' }
+              Start-Sleep -Milliseconds 250
+              $process.Refresh()
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+              $length1 = (Get-Item $result).Length
+              Start-Sleep -Milliseconds 250
+              $length2 = (Get-Item $result).Length
+            } while ($length1 -ne $length2 -and [DateTime]::UtcNow -lt $deadline)
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+          if (-not (Test-Path $result) -or (Get-Item $result).Length -eq 0) {
+            throw 'REAPER produced no central-cache probe output'
+          }
+          Get-Content -LiteralPath $result
       - uses: actions/upload-artifact@v4
         with:
           name: reaper-central-cache-windows-probe-${{ github.sha }}
