@@ -104,12 +104,35 @@ pub struct SpectralLayer {
     pub peaks: Vec<SpectralPeak>, // [peak][channel]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LoudnessPeak {
+    pub momentary_energy: f32,
+    pub short_term_energy: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoudnessLayer {
+    pub mirrored_division: u32,
+    pub peaks: Vec<LoudnessPeak>, // [peak][channel]
+}
+
+impl LoudnessLayer {
+    pub fn peak_count(&self, channels: usize) -> usize {
+        if channels == 0 {
+            0
+        } else {
+            self.peaks.len() / channels
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReaPeaks {
     pub header: Header,
     pub layer_headers: Vec<LayerHeader>,
     pub wave_layers: Vec<WaveLayer>,
     pub spectral_layers: Vec<SpectralLayer>,
+    pub loudness_layers: Vec<LoudnessLayer>,
     pub raw: Vec<u8>,
 }
 
@@ -143,10 +166,12 @@ fn layer_payload_size(version: Version, h: LayerHeader, channels: usize) -> Opti
         },
         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
         LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
-        // Official documentation says two floats (8 bytes), while REAPER 7.79
-        // fixtures encountered in this project use 4 bytes/sample for the final
-        // 'r' layers. Treat a terminal loudness layer as "consume remainder".
-        LayerKind::Loudness | LayerKind::LoudnessOld => None,
+        // The -'r' header count is the number of f32 values per channel. Each
+        // time record stores momentary and short-term energy, so the count is
+        // twice the number of records.
+        LayerKind::Loudness => n.checked_mul(channels)?.checked_mul(4),
+        // The legacy -'l' layout is not established.
+        LayerKind::LoudnessOld => None,
     }
 }
 
@@ -201,8 +226,10 @@ impl ReaPeaks {
             .filter_map(|h| (h.division > 0).then_some(h.division as u32))
             .collect();
         let mut spectral_index = 0usize;
+        let mut loudness_index = 0usize;
         let mut wave_layers = Vec::new();
         let mut spectral_layers = Vec::new();
+        let mut loudness_layers = Vec::new();
 
         for (idx, h) in hs.iter().copied().enumerate() {
             if !is_known_layer_division(h.division) {
@@ -287,19 +314,84 @@ impl ReaPeaks {
                     }
                     off = end;
                 }
-                LayerKind::Loudness | LayerKind::LoudnessOld => {
-                    // REAPER 7.79 fixtures use at least 4 bytes/channel/sample.
-                    // A final loudness layer may contain a larger opaque payload,
-                    // but it may not be shorter than the observed minimum.
-                    let size = (h.peak_count as usize)
-                        .checked_mul(channels_usize)
-                        .and_then(|x| x.checked_mul(4))
+                LayerKind::Loudness => {
+                    if h.peak_count % 2 != 0 {
+                        return Err(ReaPeaksError::InvalidHeader(
+                            "loudness value count must be even",
+                        ));
+                    }
+                    let wave_index =
+                        loudness_index
+                            .checked_add(1)
+                            .ok_or(ReaPeaksError::InvalidHeader(
+                                "loudness layer index overflow",
+                            ))?;
+                    let mirrored = hs
+                        .iter()
+                        .filter(|header| header.division > 0)
+                        .nth(wave_index)
+                        .copied()
+                        .ok_or(ReaPeaksError::InvalidHeader(
+                            "loudness layer without matching waveform layer",
+                        ))?;
+                    let expected_value_count =
+                        mirrored
+                            .peak_count
+                            .checked_mul(2)
+                            .ok_or(ReaPeaksError::InvalidHeader(
+                                "loudness value count overflow",
+                            ))?;
+                    if h.peak_count != expected_value_count {
+                        return Err(ReaPeaksError::InvalidHeader(
+                            "loudness count does not match waveform layer",
+                        ));
+                    }
+
+                    let record_count = h.peak_count as usize / 2;
+                    let sample_count = record_count.checked_mul(channels_usize).ok_or(
+                        ReaPeaksError::InvalidHeader("loudness sample count overflow"),
+                    )?;
+                    let size = sample_count
+                        .checked_mul(8)
                         .ok_or(ReaPeaksError::InvalidHeader("loudness size overflow"))?;
                     let end = checked_end(off, size)?;
                     if end > raw.len() {
                         return Err(ReaPeaksError::Truncated);
                     }
-                    off = if idx + 1 == hs.len() { raw.len() } else { end };
+                    let mut peaks = Vec::with_capacity(sample_count);
+                    for sample_index in 0..sample_count {
+                        let position = off + sample_index * 8;
+                        peaks.push(LoudnessPeak {
+                            momentary_energy: f32::from_le_bytes(get::<4>(&raw, position)?),
+                            short_term_energy: f32::from_le_bytes(get::<4>(&raw, position + 4)?),
+                        });
+                    }
+                    off = end;
+                    loudness_layers.push(LoudnessLayer {
+                        mirrored_division: mirrored.division as u32,
+                        peaks,
+                    });
+                    loudness_index += 1;
+                }
+                LayerKind::LoudnessOld => {
+                    // The legacy -'l' layout is unknown, so it can only be
+                    // retained as an opaque terminal payload.
+                    if idx + 1 != hs.len() {
+                        return Err(ReaPeaksError::Unsupported(
+                            "non-terminal legacy loudness layer",
+                        ));
+                    }
+                    let minimum_size = (h.peak_count as usize)
+                        .checked_mul(channels_usize)
+                        .and_then(|value| value.checked_mul(4))
+                        .ok_or(ReaPeaksError::InvalidHeader(
+                            "legacy loudness size overflow",
+                        ))?;
+                    let end = checked_end(off, minimum_size)?;
+                    if end > raw.len() {
+                        return Err(ReaPeaksError::Truncated);
+                    }
+                    off = raw.len();
                 }
             }
         }
@@ -313,6 +405,7 @@ impl ReaPeaks {
             layer_headers: hs,
             wave_layers,
             spectral_layers,
+            loudness_layers,
             raw,
         })
     }
@@ -347,6 +440,11 @@ pub fn encode(
     for layer in layers {
         if !is_known_layer_division(layer.header.division) {
             return Err(ReaPeaksError::InvalidArgument("unknown layer token"));
+        }
+        if layer.header.division == TOKEN_LOUDNESS && layer.header.peak_count % 2 != 0 {
+            return Err(ReaPeaksError::InvalidArgument(
+                "loudness value count must be even",
+            ));
         }
         if let Some(expected) = layer_payload_size(version, layer.header, channels as usize) {
             if expected != layer.bytes.len() {

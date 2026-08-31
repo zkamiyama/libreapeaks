@@ -140,11 +140,31 @@ pub fn decode_peak_code(encoding: WaveEncoding, code: i16) -> f32 {
 }
 
 pub fn default_divisions(sample_rate: u32, fine_peaks_per_second: u32) -> [u32; 3] {
-    let fine = (sample_rate / fine_peaks_per_second.max(1)).max(1);
-    // REAPER's exact rates are preference-dependent.  The second and third
-    // layers in the 7.79 oracle configuration mirror 20 peaks/s and 1 peak/s.
-    let mid = (sample_rate / 20).max(1);
-    [fine, mid, sample_rate.max(1)]
+    fn ceil_div(numerator: u64, denominator: u64) -> u64 {
+        numerator / denominator + u64::from(numerator % denominator != 0)
+    }
+
+    fn to_u32_saturating(value: u64) -> u32 {
+        value.min(u64::from(u32::MAX)) as u32
+    }
+
+    let sample_rate = u64::from(sample_rate.max(1));
+    let peak_rate = u64::from(fine_peaks_per_second.max(1));
+    let fine = (sample_rate / peak_rate).max(1);
+
+    // REAPER first chooses the finest integer frame division, then builds
+    // nested integer multiples that are no denser than 20 Hz and 1 Hz. Using
+    // ceiling factors is observable whenever the sample rate is not exactly
+    // divisible by the configured peak rate.
+    let mid_denominator = fine.saturating_mul(20).max(1);
+    let mid = fine.saturating_mul(ceil_div(sample_rate, mid_denominator).max(1));
+    let coarse = mid.saturating_mul(ceil_div(sample_rate, mid).max(1));
+
+    [
+        to_u32_saturating(fine),
+        to_u32_saturating(mid),
+        to_u32_saturating(coarse),
+    ]
 }
 
 pub fn build_wave_layers(
@@ -356,5 +376,37 @@ mod tests {
         assert_eq!(quantize_rpkl_f32(-256.0), -32768);
         assert_eq!(decode_rpkl_code(25600), 2.0);
         assert_eq!(decode_rpkl_code(-32768), -256.0);
+    }
+
+    #[test]
+    fn default_divisions_match_reaper779_preference_probe() {
+        let cases = [
+            (22_051, 100, [220, 1_320, 22_440]),
+            (44_100, 100, [441, 2_205, 44_100]),
+            (48_000, 100, [480, 2_400, 48_000]),
+            (22_051, 150, [147, 1_176, 22_344]),
+            (44_100, 150, [294, 2_352, 44_688]),
+            (48_000, 150, [320, 2_560, 48_640]),
+            (22_051, 200, [110, 1_210, 22_990]),
+            (44_100, 200, [220, 2_420, 45_980]),
+            (48_000, 200, [240, 2_400, 48_000]),
+            (22_051, 300, [73, 1_168, 22_192]),
+            (44_100, 300, [147, 2_205, 44_100]),
+            (48_000, 300, [160, 2_400, 48_000]),
+            (22_051, 500, [44, 1_144, 22_880]),
+            (44_100, 500, [88, 2_288, 45_760]),
+            (48_000, 500, [96, 2_400, 48_000]),
+            (22_051, 1_000, [22, 1_122, 22_440]),
+            (44_100, 1_000, [44, 2_244, 44_880]),
+            (48_000, 1_000, [48, 2_400, 48_000]),
+        ];
+
+        for (sample_rate, peak_rate, expected) in cases {
+            assert_eq!(
+                default_divisions(sample_rate, peak_rate),
+                expected,
+                "sample_rate={sample_rate} peak_rate={peak_rate}",
+            );
+        }
     }
 }
