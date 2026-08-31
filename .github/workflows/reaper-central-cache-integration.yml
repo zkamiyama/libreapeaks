@@ -1,0 +1,274 @@
+name: reaper-central-cache-integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [hardening-reapeaks-cache-ffmpeg]
+    paths:
+      - 'examples/reaper_config.py'
+      - 'examples/player_reaper_integration.py'
+      - 'examples/player_common.py'
+      - 'tools/reaper_oracle/make_cache_map.py'
+      - '.github/workflows/reaper-central-cache-integration.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  central-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb ffmpeg
+      - name: Build Python extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/libreapeaks-venv
+          . /tmp/libreapeaks-venv/bin/activate
+          python -m pip install --disable-pip-version-check maturin
+          maturin develop --release --features strict-wdl
+      - name: Download REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o /tmp/reaper.tar.xz
+          mkdir -p /tmp/reaper
+          tar -xJf /tmp/reaper.tar.xz -C /tmp/reaper
+          REAPER_BIN="$(find /tmp/reaper -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Verify external generation at canonical central paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/libreapeaks-venv/bin/activate
+          export PYTHONPATH="$PWD/examples${PYTHONPATH:+:$PYTHONPATH}"
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          trap 'kill "$XVFB_PID" 2>/dev/null || true' EXIT
+          sleep .4
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import math
+          import os
+          from pathlib import Path
+          import shutil
+          import struct
+          import subprocess
+          import wave
+
+          from player_common import ensure_reapeaks
+          from player_reaper_integration import resolve_player_peak_policy
+          from reaper_config import (
+              build_reaper_cache_map,
+              query_reaper_peak_paths,
+              write_reaper_cache_map,
+          )
+
+          root = Path('/tmp/libreapeaks-central-integration')
+          shutil.rmtree(root, ignore_errors=True)
+          media_a = root / 'media-a' / 'same-name.wav'
+          media_b = root / 'media-b' / 'same-name.wav'
+          compressed = root / 'media-c' / 'ffmpeg-source.ac3'
+          central = root / 'central peaks'
+          for path in (media_a, media_b, compressed):
+              path.parent.mkdir(parents=True, exist_ok=True)
+          central.mkdir(parents=True, exist_ok=True)
+
+          def write_wav(path: Path, frequency: float) -> None:
+              sample_rate = 48_000
+              frames = sample_rate * 2
+              with wave.open(str(path), 'wb') as out:
+                  out.setnchannels(2)
+                  out.setsampwidth(2)
+                  out.setframerate(sample_rate)
+                  payload = bytearray()
+                  for frame in range(frames):
+                      left = round(19_000 * math.sin(2 * math.pi * frequency * frame / sample_rate))
+                      right = round(7_000 * math.sin(2 * math.pi * 3137 * frame / sample_rate))
+                      payload += struct.pack('<hh', left, right)
+                  out.writeframes(payload)
+
+          write_wav(media_a, 997)
+          write_wav(media_b, 1231)
+          subprocess.run(
+              [
+                  'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+                  '-i', str(media_a), '-c:a', 'ac3', '-b:a', '192k', str(compressed),
+              ],
+              check=True,
+          )
+
+          selected_ini = None
+          selected_paths = None
+          selected_flags = None
+          for flags in range(16):
+              ini = root / f'reaper-{flags}.ini'
+              ini.write_text(
+                  '[REAPER]\n'
+                  'peakcachegenmode=3\n'
+                  'peakcachegenrs=500\n'
+                  f'altpeaks={flags}\n'
+                  f'altpeakspath={central}\n',
+                  encoding='utf-8',
+              )
+              paths = query_reaper_peak_paths(
+                  media_a,
+                  reaper_executable=os.environ['REAPER_BIN'],
+                  reaper_ini=ini,
+                  timeout=60,
+              )
+              try:
+                  inside = os.path.commonpath(
+                      [str(paths.write.resolve()), str(central.resolve())]
+                  ) == str(central.resolve())
+              except ValueError:
+                  inside = False
+              if inside:
+                  selected_ini = ini
+                  selected_paths = paths
+                  selected_flags = flags
+                  break
+          if selected_ini is None or selected_paths is None:
+              raise SystemExit('no tested altpeaks value selected altpeakspath')
+
+          path_a = resolve_player_peak_policy(
+              media_a,
+              cache_mode='central',
+              reaper_ini=selected_ini,
+              reaper_executable=os.environ['REAPER_BIN'],
+          )
+          path_b = resolve_player_peak_policy(
+              media_b,
+              cache_mode='central',
+              reaper_ini=selected_ini,
+              reaper_executable=os.environ['REAPER_BIN'],
+          )
+          if path_a.peak_rate != 500 or path_b.peak_rate != 500:
+              raise SystemExit('peakcachegenrs was not loaded from REAPER.ini')
+          if path_a.peaks_path == path_b.peaks_path:
+              raise SystemExit('central cache collides for equal basenames')
+
+          payload = build_reaper_cache_map(
+              [media_a, media_b, compressed],
+              reaper_executable=os.environ['REAPER_BIN'],
+              reaper_ini=selected_ini,
+              timeout=60,
+          )
+          map_path = write_reaper_cache_map(root / 'cache-map.json', payload)
+          mapped = resolve_player_peak_policy(
+              media_a,
+              cache_mode='central',
+              reaper_ini=selected_ini,
+              reaper_cache_map=map_path,
+          )
+          if mapped.peaks_path != path_a.peaks_path:
+              raise SystemExit('cache map changed canonical target')
+
+          compressed_policy = resolve_player_peak_policy(
+              compressed,
+              cache_mode='central',
+              reaper_ini=selected_ini,
+              reaper_executable=os.environ['REAPER_BIN'],
+          )
+          assert compressed_policy.canonical_paths is not None
+          source_type = compressed_policy.canonical_paths.source_type.upper()
+          if not any(token in source_type for token in ('VIDEO', 'FFMPEG', 'AVFORMAT')):
+              raise SystemExit(
+                  f'compressed oracle did not prove an FFmpeg-backed REAPER source: {source_type!r}'
+              )
+
+          generated_path, generated = ensure_reapeaks(
+              compressed,
+              compressed_policy.peaks_path,
+              rebuild=True,
+              spectral=True,
+              decoder='ffmpeg',
+              cache_mode='sidecar',
+              fine_peaks_per_second=compressed_policy.peak_rate,
+          )
+          if not generated or generated_path != compressed_policy.peaks_path:
+              raise SystemExit('external generator did not publish canonical central target')
+          external_bytes = generated_path.read_bytes()
+          external_sha = hashlib.sha256(external_bytes).hexdigest()
+
+          generated_path.unlink()
+          result = root / 'reaper-build-result.txt'
+          env = os.environ.copy()
+          env.update(
+              REAPEAKS_MEDIA=str(compressed.resolve()),
+              REAPEAKS_RESULT=str(result),
+          )
+          completed = subprocess.run(
+              [
+                  os.environ['REAPER_BIN'],
+                  '-newinst',
+                  '-cfgfile', str(selected_ini),
+                  '-new',
+                  '-nosplash',
+                  str(Path('tools/reaper_oracle/build_probe.lua').resolve()),
+              ],
+              env=env,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              timeout=120,
+              check=False,
+          )
+          status = result.read_text(encoding='utf-8') if result.is_file() else ''
+          if completed.returncode != 0 or 'OK loops=' not in status:
+              raise SystemExit(
+                  f'REAPER build failed: rc={completed.returncode}, '
+                  f'status={status!r}, output={completed.stdout[-8000:]!r}'
+              )
+          if not generated_path.is_file():
+              raise SystemExit(
+                  f'REAPER did not write the canonical target: {generated_path}'
+              )
+          reaper_bytes = generated_path.read_bytes()
+          if external_bytes != reaper_bytes:
+              limit = min(len(external_bytes), len(reaper_bytes))
+              first = next(
+                  (index for index in range(limit)
+                   if external_bytes[index] != reaper_bytes[index]),
+                  limit,
+              )
+              raise SystemExit(
+                  'external and REAPER central caches differ: '
+                  f'external_size={len(external_bytes)} '
+                  f'reaper_size={len(reaper_bytes)} first_difference={first} '
+                  f'external_sha256={external_sha} '
+                  f'reaper_sha256={hashlib.sha256(reaper_bytes).hexdigest()}'
+              )
+
+          evidence = {
+              'altpeaks': selected_flags,
+              'peakcachegenrs': 500,
+              'same_basename_distinct': True,
+              'map_round_trip': True,
+              'reaper_source_type': compressed_policy.canonical_paths.source_type,
+              'external_generation': True,
+              'complete_file_byte_identity': True,
+              'sha256': external_sha,
+              'size': len(external_bytes),
+              'canonical_path': str(generated_path),
+          }
+          Path('reaper-central-cache-integration.json').write_text(
+              json.dumps(evidence, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reaper-central-cache-integration-${{ github.sha }}
+          path: reaper-central-cache-integration.json
+          if-no-files-found: error
+          retention-days: 14
