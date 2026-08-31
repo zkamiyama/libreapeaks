@@ -35,3 +35,5 @@ jobs:
           path: /tmp/libreapeaks-snapshot
           if-no-files-found: error
           retention-days: 3
+
+# Manual diagnostic snapshot trigger; remove before merge.
