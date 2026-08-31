@@ -1,0 +1,42 @@
+name: strict-wdl-sanitizers
+
+on:
+  push:
+    branches:
+      - main
+      - hardening-reapeaks-cache-ffmpeg
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+  CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS
+  RUSTFLAGS: -C link-arg=-fsanitize=address -C link-arg=-fsanitize=undefined
+
+jobs:
+  strict-wdl-cxx:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run strict-WDL release suite with C++ sanitizers
+        run: cargo test --release --all-targets --features strict-wdl
+
+      - name: Assert sanitizer build left sources untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" >&2
+            echo "sanitizer build mutated the source tree" >&2
+            exit 1
+          fi
