@@ -1,0 +1,138 @@
+name: parallel-strict-wdl-block-boundary-sweep
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/parallel-strict-wdl-block-boundary-sweep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+      - id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64,json,os,re
+          paths=[]
+          for root in (Path('src'),Path('native'),Path('include')):
+            if root.exists():paths.extend(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.rs','.c','.cc','.cpp','.h','.hpp'})
+          sizes=[1,2,4,8,16,32,64,128,256,512,1024,1200,2048,4096,4800,8192,16384,19200,24000,32768,48000,65536,131072,262144]
+          relevant=re.compile(r'chunk|block|buffer|frames_per|frame_count|process.*sample|sample.*process|batch|read.*frames|write.*frames',re.I)
+          rows=[];seen=set()
+          def add(path,start,end,replacement,description):
+            key=(str(path),start,end,replacement)
+            if key in seen:return
+            seen.add(key);rows.append({'id':len(rows),'path':str(path),'start':start,'end':end,'replacement':replacement,'description':description})
+          for path in sorted(set(paths)):
+            text=path.read_text(encoding='utf-8',errors='replace');lines=text.splitlines(keepends=True);cursor=0
+            for number,line in enumerate(lines,1):
+              start=cursor;cursor+=len(line)
+              if not relevant.search(line):continue
+              for match in re.finditer(r'(?<![A-Za-z0-9_])(\d{1,9})(?![A-Za-z0-9_])',line):
+                old=int(match.group(1))
+                if old==0:continue
+                for size in sizes:
+                  if size==old:continue
+                  add(path,start+match.start(),start+match.end(),str(size),f'{path}:{number}:{old}->{size}')
+              # Rust chunks with named constants: replace the call argument by a literal without changing surrounding logic.
+              for match in re.finditer(r'\.(chunks|chunks_exact|rchunks|rchunks_exact)\(\s*([^\)]+)\)',line):
+                arg_start=start+match.start(2);arg_end=start+match.end(2)
+                for size in sizes:add(path,arg_start,arg_end,str(size),f'{path}:{number}:{match.group(1)}->{size}')
+          rows=rows[:180]
+          for i,row in enumerate(rows):row['id']=i
+          matrix={'include':rows};encoded=json.dumps(matrix,separators=(',',':'))
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as f:f.write('matrix='+encoded+'\n')
+          Path('/tmp/block-matrix.json').write_text(json.dumps(matrix,indent=2)+'\n');print(f'block hypotheses={len(rows)}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: block-matrix-${{ github.sha }}
+          path: /tmp/block-matrix.json
+  test:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          submodules: recursive
+      - name: Download fixed oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/block/input /tmp/block/output /tmp/block/result
+          id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/33395560284/artifacts" --jq '.artifacts[]|select(.expired==false)|.id'|head -1)";test -n "$id";gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id/zip">/tmp/block/a.zip;unzip -q /tmp/block/a.zip -d /tmp/block/input
+      - name: Apply one block mutation and run exact oracle
+        env:
+          H: ${{ toJSON(matrix) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json,os,re,subprocess,time
+          h=json.loads(os.environ['H']);path=Path(h['path']);text=path.read_text(encoding='utf-8',errors='replace');path.write_text(text[:h['start']]+h['replacement']+text[h['end']:])
+          root=Path('/tmp/block');inputs=root/'input';out=root/'output';source=Path('tests/reaper_ffmpeg_byte_identical.rs').read_text();names=sorted(set(re.findall(r'(?:std::)?env::var(?:_os)?\(\s*"([A-Z0-9_]+)"',source)));dirs=[p for p in inputs.rglob('*') if p.is_dir()];peak=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*.reapeaks')));pcm=max(dirs or [inputs],key=lambda p:sum(1 for q in p.rglob('*') if q.suffix.lower() in {'.s16le','.pcm','.raw','.wav','.m4a'}));env=os.environ.copy()
+          for name in names:
+            if any(x in name for x in ('OUT','RESULT','CANDIDATE','GENERATED')):value=out
+            elif any(x in name for x in ('PCM','DECODE','AUDIO','MEDIA','SOURCE')):value=pcm
+            else:value=peak
+            env[name]=str(value)
+          t=time.monotonic();cp=subprocess.run(['cargo','test','--all-features','--test','reaper_ffmpeg_byte_identical','--','--nocapture'],env=env,text=True,capture_output=True,timeout=1200);log=(cp.stdout or '')+'\n'+(cp.stderr or '');exact=cp.returncode==0 and '0 tests' not in log.lower();patch=subprocess.run(['git','diff'],text=True,capture_output=True).stdout
+          result=Path('/tmp/block/result');(result/'status.json').write_text(json.dumps({'id':h['id'],'description':h['description'],'returncode':cp.returncode,'exact_pass':exact,'elapsed':time.monotonic()-t,'tail':log[-6000:]},indent=2)+'\n');(result/'test.log').write_text(log)
+          if exact:(result/'exact.patch').write_text(patch)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: block-hypothesis-${{ matrix.id }}
+          path: /tmp/block/result
+          retention-days: 14
+  collect:
+    needs: [prepare,test]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening-reapeaks-cache-ffmpeg
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: block-hypothesis-*
+          path: /tmp/block-results
+      - name: Publish exact block-boundary findings
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,shutil
+          root=Path('/tmp/block-results');statuses=[json.loads(p.read_text()) for p in root.rglob('status.json')];statuses.sort(key=lambda r:(not r['exact_pass'],r['id']));patches={}
+          for p in root.rglob('exact.patch'):patches.setdefault(hashlib.sha256(p.read_bytes()).hexdigest(),p)
+          dest=Path('oracle-reports/parallel-strict-wdl-block-boundary-sweep');dest.mkdir(parents=True,exist_ok=True);(dest/'report.json').write_text(json.dumps({'schema':1,'count':len(statuses),'exact':[r for r in statuses if r['exact_pass']],'unique_patches':len(patches),'rows':statuses},indent=2)+'\n')
+          for i,(digest,p) in enumerate(sorted(patches.items())):shutil.copy2(p,dest/f'exact-{i}-{digest[:16]}.patch')
+          PY
+          git add oracle-reports/parallel-strict-wdl-block-boundary-sweep
+          if git diff --cached --quiet;then exit 0;fi
+          git config user.name github-actions[bot];git config user.email 41898282+github-actions[bot]@users.noreply.github.com;git commit -m 'record strict-WDL block-boundary sweep';git push origin HEAD:hardening-reapeaks-cache-ffmpeg
