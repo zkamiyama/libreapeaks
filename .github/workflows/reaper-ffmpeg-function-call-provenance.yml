@@ -1,0 +1,318 @@
+name: reaper-ffmpeg-function-call-provenance
+
+on:
+  push:
+    branches:
+      - hardening-reapeaks-cache-ffmpeg
+    paths:
+      - '.github/workflows/reaper-ffmpeg-function-call-provenance.yml'
+      - 'tools/reaper_oracle/build_probe.lua'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-ffmpeg-function-call-provenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg, GDB, and REAPER runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg gdb binutils
+          ffmpeg -version | head -1
+          gdb --version | head -1
+          if command -v vlc >/dev/null 2>&1; then
+            echo 'VLC executable is unexpectedly present' >&2
+            exit 1
+          fi
+          if ldconfig -p | grep -Eiq 'libvlc|libvlccore'; then
+            echo 'VLC runtime libraries are unexpectedly present' >&2
+            exit 1
+          fi
+          AVFORMAT="$(ldconfig -p | awk '/libavformat\.so\.60/{print $NF; exit}')"
+          AVCODEC="$(ldconfig -p | awk '/libavcodec\.so\.60/{print $NF; exit}')"
+          test -n "$AVFORMAT"
+          test -n "$AVCODEC"
+          for symbol in avio_alloc_context avformat_open_input av_read_frame; do
+            nm -D "$AVFORMAT" | grep -E " ${symbol}(@@|$)"
+          done
+          for symbol in avcodec_send_packet avcodec_receive_frame; do
+            nm -D "$AVCODEC" | grep -E " ${symbol}(@@|$)"
+          done
+          echo "AVFORMAT=$AVFORMAT" >> "$GITHUB_ENV"
+          echo "AVCODEC=$AVCODEC" >> "$GITHUB_ENV"
+
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-ffmpeg-call-proof
+          mkdir -p "$root/results" "$root/reaper"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          sha256sum "$root/reaper779_linux_x86_64.tar.xz" \
+            | tee "$root/results/reaper-tarball.sha256"
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+
+      - name: Create matched WAVE and ALAC/M4A sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-ffmpeg-call-proof
+          mkdir -p "$root/media"
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+          import wave
+
+          root = Path('/tmp/reaper-ffmpeg-call-proof/media')
+          sample_rate = 48_000
+          frames = sample_rate * 3
+          payload = bytearray()
+          for frame in range(frames):
+              value = 0 if frame < sample_rate else 8_192 if frame < 2 * sample_rate else 16_384
+              payload += struct.pack('<hh', value, value)
+          (root / 'step.s16le').write_bytes(payload)
+          with wave.open(str(root / 'step.wav'), 'wb') as output:
+              output.setnchannels(2)
+              output.setsampwidth(2)
+              output.setframerate(sample_rate)
+              output.writeframes(payload)
+          PY
+          ffmpeg -hide_banner -loglevel error -y \
+            -i "$root/media/step.wav" -map_metadata -1 -c:a alac \
+            "$root/media/step.m4a"
+          ffmpeg -hide_banner -loglevel error -y \
+            -i "$root/media/step.m4a" -f s16le -acodec pcm_s16le \
+            "$root/media/step.decoded.s16le"
+          cmp "$root/media/step.s16le" "$root/media/step.decoded.s16le"
+          sha256sum "$root/media/step.s16le" "$root/media/step.decoded.s16le" \
+            | tee "$root/results/source-pcm.sha256"
+          ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name,sample_rate,channels,duration \
+            -of default=noprint_wrappers=1 "$root/media/step.m4a" \
+            | tee "$root/results/source-ffprobe.txt"
+
+      - name: Trace isolated REAPER WAVE and ALAC processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          import tempfile
+          import time
+
+          reaper = Path(os.environ['REAPER_BIN'])
+          root = Path('/tmp/reaper-ffmpeg-call-proof')
+          media_root = root / 'media'
+          results = root / 'results'
+          probe = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':97'
+
+          commands = r'''
+          set pagination off
+          set confirm off
+          set breakpoint pending on
+          set debuginfod enabled off
+          set print thread-events off
+          handle SIGPIPE nostop noprint pass
+          handle SIGUSR1 nostop noprint pass
+          handle SIGUSR2 nostop noprint pass
+          set $avio_hits = 0
+          set $open_hits = 0
+          set $read_hits = 0
+          set $send_hits = 0
+          set $receive_hits = 0
+
+          break avio_alloc_context
+          commands
+            silent
+            set $avio_hits = $avio_hits + 1
+            if $avio_hits == 1
+              printf "FFTRACE_AVIO first-hit\n"
+              bt 8
+            end
+            continue
+          end
+          break avformat_open_input
+          commands
+            silent
+            set $open_hits = $open_hits + 1
+            if $open_hits == 1
+              printf "FFTRACE_OPEN first-hit\n"
+              info sharedlibrary libavformat
+              bt 8
+            end
+            continue
+          end
+          break av_read_frame
+          commands
+            silent
+            set $read_hits = $read_hits + 1
+            if $read_hits == 1
+              printf "FFTRACE_READ first-hit\n"
+              bt 8
+            end
+            continue
+          end
+          break avcodec_send_packet
+          commands
+            silent
+            set $send_hits = $send_hits + 1
+            if $send_hits == 1
+              printf "FFTRACE_SEND first-hit\n"
+              info sharedlibrary libavcodec
+              bt 8
+            end
+            continue
+          end
+          break avcodec_receive_frame
+          commands
+            silent
+            set $receive_hits = $receive_hits + 1
+            if $receive_hits == 1
+              printf "FFTRACE_RECEIVE first-hit\n"
+              bt 8
+            end
+            continue
+          end
+          run
+          printf "FFTRACE_SUMMARY avio=%d open=%d read=%d send=%d receive=%d\n", $avio_hits, $open_hits, $read_hits, $send_hits, $receive_hits
+          quit
+          '''
+
+          def trace(tag: str, media: Path) -> dict[str, object]:
+              peak = Path(str(media) + '.reapeaks')
+              if peak.exists():
+                  peak.unlink()
+              case = Path(tempfile.mkdtemp(prefix=f'reaper-ffmpeg-proof-{tag}-'))
+              config = case / 'reaper.ini'
+              config.write_text(
+                  '[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=64\n',
+                  encoding='utf-8',
+              )
+              status_path = case / 'status.txt'
+              command_path = case / 'trace.gdb'
+              command_path.write_text(commands, encoding='utf-8')
+              trace_path = results / f'{tag}.gdb.txt'
+              env = os.environ.copy()
+              env.update(
+                  DISPLAY=display,
+                  REAPEAKS_MEDIA=str(media.resolve()),
+                  REAPEAKS_RESULT=str(status_path),
+              )
+              with trace_path.open('wb') as output:
+                  completed = subprocess.run(
+                      [
+                          'gdb', '-q', '--batch', '-x', str(command_path), '--args',
+                          str(reaper), '-newinst', '-cfgfile', str(config),
+                          '-new', '-nosplash', str(probe),
+                      ],
+                      env=env,
+                      stdout=output,
+                      stderr=subprocess.STDOUT,
+                      timeout=150,
+                      check=False,
+                  )
+              trace_text = trace_path.read_text(errors='replace')
+              status = status_path.read_text(errors='replace') if status_path.exists() else ''
+              (results / f'{tag}.status.txt').write_text(status, encoding='utf-8')
+              match = re.search(
+                  r'FFTRACE_SUMMARY avio=(\d+) open=(\d+) read=(\d+) send=(\d+) receive=(\d+)',
+                  trace_text,
+              )
+              if not match:
+                  raise SystemExit(
+                      f'{tag}: no trace summary, rc={completed.returncode}; tail={trace_text[-4000:]}'
+                  )
+              return {
+                  'returncode': completed.returncode,
+                  'status': status,
+                  'type': next(
+                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                      '',
+                  ),
+                  'counts': tuple(int(value) for value in match.groups()),
+                  'trace': trace_text,
+              }
+
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.35)
+              wave = trace('native-wave', media_root / 'step.wav')
+              alac = trace('video-alac', media_root / 'step.m4a')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+
+          if wave['type'] != 'WAVE' or 'LENGTH=3.0;' not in wave['status'] or 'OK loops=' not in wave['status']:
+              raise SystemExit(f'invalid native-WAVE control: {wave!r}')
+          if alac['type'] != 'VIDEO' or 'LENGTH=3.0;' not in alac['status'] or 'OK loops=' not in alac['status']:
+              raise SystemExit(f'invalid ALAC/VIDEO case: {alac!r}')
+          if any(wave['counts']):
+              raise SystemExit(f'WAVE control executed FFmpeg calls: {wave["counts"]}')
+          if not all(value > 0 for value in alac['counts']):
+              raise SystemExit(f'ALAC did not execute the full FFmpeg chain: {alac["counts"]}')
+          if 'reaper_video.so' not in alac['trace']:
+              raise SystemExit('FFmpeg call stacks did not originate in reaper_video.so')
+          if 'libavformat.so.60' not in alac['trace'] or 'libavcodec.so.60' not in alac['trace']:
+              raise SystemExit('FFmpeg shared-library identities were not present in the trace')
+
+          report = '\n'.join([
+              'REAPER_FFMPEG_FUNCTION_CALL_PROVENANCE=confirmed',
+              f'native_media={(media_root / "step.wav").resolve()}',
+              f'native_source_type={wave["type"]}',
+              f'native_ffmpeg_counts_avio_open_read_send_receive={wave["counts"]}',
+              f'video_media={(media_root / "step.m4a").resolve()}',
+              f'video_source_type={alac["type"]}',
+              f'video_ffmpeg_counts_avio_open_read_send_receive={alac["counts"]}',
+              f'system_avformat={os.environ["AVFORMAT"]}',
+              f'system_avcodec={os.environ["AVCODEC"]}',
+              'call_origin=reaper_video.so',
+              'vlc_runtime_present=false',
+              'proof=isolated ALAC/M4A processing executed FFmpeg AVIO, demux, packet-send, and frame-receive functions; isolated WAVE processing executed none',
+          ]) + '\n'
+          (results / 'function-call-provenance-report.txt').write_text(report, encoding='utf-8')
+          print(report, end='')
+          PY
+          cat /tmp/reaper-ffmpeg-call-proof/results/function-call-provenance-report.txt \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload direct provenance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-ffmpeg-function-call-provenance-${{ github.sha }}
+          path: |
+            /tmp/reaper-ffmpeg-call-proof/results
+            /tmp/reaper-ffmpeg-call-proof/media/*.wav
+            /tmp/reaper-ffmpeg-call-proof/media/*.m4a
+            /tmp/reaper-ffmpeg-call-proof/media/*.s16le
+          if-no-files-found: error
+          retention-days: 14
