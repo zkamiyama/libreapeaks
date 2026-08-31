@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..2c6d6ab 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -342,7 +342,7 @@ fn build_fine_spectral_f64_impl(
+     let expected = match expected_override {
+         Some(expected) => expected,
+         None => {
+-            if frames <= 1024 {
++            if frames < 1024 {
+                 return Ok(Vec::new());
+             }
+             (frames - 1024) / division as usize

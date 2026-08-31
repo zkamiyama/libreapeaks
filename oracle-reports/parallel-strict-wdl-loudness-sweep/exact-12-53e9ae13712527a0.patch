@@ -1,0 +1,13 @@
+diff --git a/src/wave.rs b/src/wave.rs
+index 54549ff..489fd00 100644
+--- a/src/wave.rs
++++ b/src/wave.rs
+@@ -54,7 +54,7 @@ pub fn quantize_rpkn_f32(v: f32) -> i16 {
+     }
+     let x = v.clamp(-1.0, 1.0) as f64;
+     if x >= 0.0 {
+-        (x.mul_add(32767.0, 0.5).floor() as i32).clamp(0, 32767) as i16
++        (x.mul_add(32768.0, 0.5).floor() as i32).clamp(0, 32767) as i16
+     } else {
+         -((-x).mul_add(32768.0, 0.5).floor() as i32).clamp(0, 32768) as i16
+     }

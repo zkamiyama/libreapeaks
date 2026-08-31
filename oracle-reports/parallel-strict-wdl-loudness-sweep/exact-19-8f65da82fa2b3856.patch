@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..35ea5b0 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -116,7 +116,7 @@ fn apply_wdl_iir(interleaved: &mut [f64], frames: usize, channels: usize, ratio:
+     if ratio <= 1.0 || frames == 0 {
+         return;
+     }
+-    // WDL_Resampler defaults are float constants, even when audio samples are
++    // WDL_Resampler defaults are double constants, even when audio samples are
+     // double. Preserve that precision here.
+     let fpos2 = 0.693f32 as f64;
+     let q = 0.707f32 as f64;

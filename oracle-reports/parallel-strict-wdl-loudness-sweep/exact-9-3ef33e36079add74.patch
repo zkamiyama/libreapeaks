@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..244509b 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -113,7 +113,7 @@ fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+ 
+ #[cfg(not(feature = "strict-wdl"))]
+ fn apply_wdl_iir(interleaved: &mut [f64], frames: usize, channels: usize, ratio: f64) {
+-    if ratio <= 1.0 || frames == 0 {
++    if ratio < 1.0 || frames == 0 {
+         return;
+     }
+     // WDL_Resampler defaults are float constants, even when audio samples are

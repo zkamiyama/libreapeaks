@@ -1,0 +1,13 @@
+diff --git a/src/strict_wdl.cpp b/src/strict_wdl.cpp
+index 7e1f11e..1b02132 100644
+--- a/src/strict_wdl.cpp
++++ b/src/strict_wdl.cpp
+@@ -44,7 +44,7 @@ bool valid_interleaved_span(long long frames, int channels) noexcept {
+     const auto max_double_elements = static_cast<unsigned long long>(
+         std::numeric_limits<std::size_t>::max() / sizeof(double));
+ 
+-    return frame_count <= max_pointer_elements / channel_count &&
++    return frame_count < max_pointer_elements / channel_count &&
+            frame_count <= max_double_elements / channel_count;
+ }
+ 

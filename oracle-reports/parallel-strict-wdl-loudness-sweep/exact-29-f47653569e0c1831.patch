@@ -1,0 +1,13 @@
+diff --git a/src/loudness.rs b/src/loudness.rs
+index a42397e..71a167b 100644
+--- a/src/loudness.rs
++++ b/src/loudness.rs
+@@ -125,7 +125,7 @@ impl SlidingEnergy {
+ }
+ 
+ fn k_weighting_coefficients(sample_rate: u32) -> Result<(BiquadCoefficients, BiquadCoefficients)> {
+-    if sample_rate < 16 {
++    if sample_rate <= 16 {
+         return Err(ReaPeaksError::InvalidArgument(
+             "sample rate is too low for loudness filtering",
+         ));

@@ -1,0 +1,13 @@
+diff --git a/src/generate.rs b/src/generate.rs
+index c9adab3..7c8c6a9 100644
+--- a/src/generate.rs
++++ b/src/generate.rs
+@@ -64,7 +64,7 @@ fn validate(options: &GenerateOptions, sample_len: usize, loudness: bool) -> Res
+         .checked_add(spectral_count)
+         .and_then(|count| count.checked_add(loudness_count))
+         .ok_or(ReaPeaksError::InvalidArgument("too many layers"))?;
+-    if layer_count > u8::MAX as usize {
++    if layer_count >= u8::MAX as usize {
+         return Err(ReaPeaksError::InvalidArgument("too many layers"));
+     }
+     if sample_len % options.channels != 0 {

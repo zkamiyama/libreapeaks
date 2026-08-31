@@ -1,0 +1,13 @@
+diff --git a/src/spectral.rs b/src/spectral.rs
+index 744938c..04835f8 100644
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -204,7 +204,7 @@ fn resample_to_analysis(
+     let mut p = 0.0f64;
+     loop {
+         let i = p as usize;
+-        if i + 1 >= frames {
++        if i + 1 > frames {
+             break;
+         }
+         let frac = p - i as f64;

@@ -1,0 +1,13 @@
+diff --git a/src/spectral_strict.rs b/src/spectral_strict.rs
+index cc390e8..a65e90d 100644
+--- a/src/spectral_strict.rs
++++ b/src/spectral_strict.rs
+@@ -20,7 +20,7 @@ const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
+ 
+ #[inline]
+ fn low_rate_fine_count(frames: usize, division: u32) -> usize {
+-    if division == 0 || frames <= REAPER_SPECTRAL_HALF_WINDOW {
++    if division == 0 || frames < REAPER_SPECTRAL_HALF_WINDOW {
+         return 0;
+     }
+     let d = division as usize;

@@ -1,0 +1,13 @@
+diff --git a/src/spectral_strict.rs b/src/spectral_strict.rs
+index cc390e8..4e34f04 100644
+--- a/src/spectral_strict.rs
++++ b/src/spectral_strict.rs
+@@ -65,7 +65,7 @@ fn validate_source_len<T>(
+     if division == 0 || source_rate == 0 {
+         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+     }
+-    if pcm.len() < frames.saturating_mul(channels) {
++    if pcm.len() <= frames.saturating_mul(channels) {
+         return Err(ReaPeaksError::InvalidArgument(
+             "PCM buffer shorter than frames*channels",
+         ));
