@@ -20,3 +20,13 @@ pyo3 = { version = "0.29.2", optional = true, features = ["extension-module", "a
 
 [build-dependencies]
 cc = "1.2"
+
+[[test]]
+name = "spectral_corpus_diagnostic"
+path = "tests/spectral_corpus_diagnostic.rs"
+required-features = ["strict-wdl"]
+
+[[test]]
+name = "spectral_expanded_corpus"
+path = "tests/spectral_expanded_corpus.rs"
+required-features = ["strict-wdl"]
