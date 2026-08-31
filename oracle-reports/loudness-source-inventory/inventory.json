@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "hit_count": 260,
-  "function_count": 77,
+  "hit_count": 262,
+  "function_count": 78,
   "hits": [
     {
       "path": "Cargo.toml",
@@ -1724,6 +1724,22 @@
       "context": "61:     let mut raw = bare_header(1, 0, 48_000);\n62:     raw.push(0xaa);\n63:     assert!(ReaPeaks::parse(raw).is_err());\n64: }\n65: \n66: #[test]\n67: fn parser_rejects_truncated_terminal_loudness() {\n68:     let mut raw = bare_header(1, 1, 48_000);\n69:     raw.extend_from_slice(&TOKEN_LOUDNESS.to_le_bytes());\n70:     raw.extend_from_slice(&1u32.to_le_bytes());\n71:     assert!(ReaPeaks::parse(raw).is_err());\n72: }\n73: \n74: #[test]\n75: fn parser_rejects_spectral_layer_without_wave_partner() {\n76:     let mut raw = bare_header(1, 1, 48_000);\n77:     raw.extend_from_slice(&TOKEN_SPECTRAL.to_le_bytes());"
     },
     {
+      "path": "tests/no_global_fast_math.rs",
+      "line": 5,
+      "text": "fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut() {",
+      "context_start": 1,
+      "context_end": 13,
+      "context": "1: use std::fs;\n2: use std::path::PathBuf;\n3: \n4: #[test]\n5: fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut() {\n6:     let manifest = PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"));\n7:     let build_rs = fs::read_to_string(manifest.join(\"build.rs\")).expect(\"read build.rs\");\n8: \n9:     // These options alter NaN, infinity, signed-zero, reassociation, and reciprocal\n10:     // semantics globally.  A REAPER compatibility fix must instead reproduce the\n11:     // specific runtime floating-point environment or the exact local algorithm.\n12:     // Passing a finite oracle corpus is not sufficient justification for enabling\n13:     // any of these flags across the whole strict-WDL translation unit."
+    },
+    {
+      "path": "tests/no_global_fast_math.rs",
+      "line": 13,
+      "text": "    // any of these flags across the whole strict-WDL translation unit.",
+      "context_start": 5,
+      "context_end": 21,
+      "context": "5: fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut() {\n6:     let manifest = PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"));\n7:     let build_rs = fs::read_to_string(manifest.join(\"build.rs\")).expect(\"read build.rs\");\n8: \n9:     // These options alter NaN, infinity, signed-zero, reassociation, and reciprocal\n10:     // semantics globally.  A REAPER compatibility fix must instead reproduce the\n11:     // specific runtime floating-point environment or the exact local algorithm.\n12:     // Passing a finite oracle corpus is not sufficient justification for enabling\n13:     // any of these flags across the whole strict-WDL translation unit.\n14:     let forbidden = [\n15:         \"-ffast-math\",\n16:         \"-Ofast\",\n17:         \"-funsafe-math-optimizations\",\n18:         \"-fassociative-math\",\n19:         \"-ffinite-math-only\",\n20:         \"-freciprocal-math\",\n21:         \"/fp:fast\","
+    },
+    {
       "path": "tests/python/test_player_common.py",
       "line": 185,
       "text": "    def test_generate_reuse_and_stale_rebuild(self) -> None:",
@@ -2422,6 +2438,12 @@
       "signature": "fn parser_rejects_truncated_terminal_loudness()"
     },
     {
+      "path": "tests/no_global_fast_math.rs",
+      "line": 5,
+      "name": "strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut",
+      "signature": "fn strict_wdl_must_not_use_global_unsafe_fast_math_as_a_compatibility_shortcut()"
+    },
+    {
       "path": "tests/reaper779_compat.rs",
       "line": 53,
       "name": "golden",
@@ -2671,6 +2693,20 @@
             ],
             "name": "hardening",
             "src_path": "/home/runner/work/libreapeaks/libreapeaks/tests/hardening.rs",
+            "edition": "2021",
+            "doc": false,
+            "doctest": false,
+            "test": true
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "crate_types": [
+              "bin"
+            ],
+            "name": "no_global_fast_math",
+            "src_path": "/home/runner/work/libreapeaks/libreapeaks/tests/no_global_fast_math.rs",
             "edition": "2021",
             "doc": false,
             "doctest": false,
