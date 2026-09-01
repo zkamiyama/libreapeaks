@@ -83,12 +83,7 @@ impl PyGpuCacheView {
     ) -> PyResult<(usize, usize, usize, usize, Bound<'py, PyBytes>)> {
         let tile = self
             .view
-            .tile(
-                parse_kind(kind)?,
-                layer_index,
-                first_record,
-                record_count,
-            )
+            .tile(parse_kind(kind)?, layer_index, first_record, record_count)
             .map_err(py_err)?;
         Ok((
             tile.first_record,
