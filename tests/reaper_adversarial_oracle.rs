@@ -1,4 +1,8 @@
-use reapeaks::{generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version};
+use reapeaks::{
+    format::{TOKEN_LOUDNESS, TOKEN_SPECTROGRAM},
+    generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version,
+    SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,9 +41,149 @@ fn hex_window(bytes: &[u8], center: usize) -> String {
         .join("")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawLayer {
+    division: i32,
+    count: u32,
+    payload: Vec<u8>,
+}
+
+fn split_rpkn_layers(bytes: &[u8], parsed: &ReaPeaks) -> Vec<RawLayer> {
+    assert_eq!(parsed.header.version, Version::Rpkn);
+    let channels = usize::from(parsed.header.channels);
+    let table_bytes = parsed
+        .layer_headers
+        .len()
+        .checked_mul(8)
+        .expect("layer table byte count");
+    let mut offset = 18usize.checked_add(table_bytes).expect("layer table end");
+    let mut layers = Vec::with_capacity(parsed.layer_headers.len());
+
+    for header in &parsed.layer_headers {
+        // Every RPKN payload represented by the current parser uses four bytes
+        // for each header count unit and channel. For -'g' that count unit is a
+        // 32-bit word, not a 192-byte time frame.
+        let size = (header.peak_count as usize)
+            .checked_mul(channels)
+            .and_then(|value| value.checked_mul(4))
+            .expect("RPKN layer payload byte count");
+        let end = offset.checked_add(size).expect("RPKN layer payload end");
+        let payload = bytes
+            .get(offset..end)
+            .unwrap_or_else(|| panic!("truncated layer division={}", header.division))
+            .to_vec();
+        layers.push(RawLayer {
+            division: header.division,
+            count: header.peak_count,
+            payload,
+        });
+        offset = end;
+    }
+
+    assert_eq!(offset, bytes.len(), "unconsumed bytes after RPKN layers");
+    layers
+}
+
+fn assert_spectrogram_extension(
+    oracle: &[u8],
+    oracle_parsed: &ReaPeaks,
+    generated: &[u8],
+    generated_parsed: &ReaPeaks,
+) {
+    let channels = usize::from(oracle_parsed.header.channels);
+    let oracle_layers = split_rpkn_layers(oracle, oracle_parsed);
+    let generated_layers = split_rpkn_layers(generated, generated_parsed);
+    let oracle_without_spectrogram: Vec<RawLayer> = oracle_layers
+        .iter()
+        .filter(|layer| layer.division != TOKEN_SPECTROGRAM)
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        oracle_without_spectrogram, generated_layers,
+        "all pre-existing mode-3 layers must stay byte-identical when REAPER adds -'g'"
+    );
+
+    assert_eq!(oracle_parsed.header.version, generated_parsed.header.version);
+    assert_eq!(oracle_parsed.header.channels, generated_parsed.header.channels);
+    assert_eq!(
+        oracle_parsed.header.sample_rate,
+        generated_parsed.header.sample_rate
+    );
+    assert_eq!(
+        oracle_parsed.header.source_mtime_low32,
+        generated_parsed.header.source_mtime_low32
+    );
+    assert_eq!(
+        oracle_parsed.header.source_size_low32,
+        generated_parsed.header.source_size_low32
+    );
+
+    let positive_divisions: Vec<u32> = oracle_parsed
+        .layer_headers
+        .iter()
+        .filter_map(|header| (header.division > 0).then_some(header.division as u32))
+        .collect();
+    let spectrogram_headers: Vec<_> = oracle_parsed
+        .layer_headers
+        .iter()
+        .filter(|header| header.division == TOKEN_SPECTROGRAM)
+        .collect();
+    let loudness_headers: Vec<_> = oracle_parsed
+        .layer_headers
+        .iter()
+        .filter(|header| header.division == TOKEN_LOUDNESS)
+        .collect();
+
+    assert_eq!(spectrogram_headers.len(), 2, "REAPER 7.79 mode-3 -'g' layer count");
+    assert_eq!(
+        oracle_parsed.spectrogram_layers.len(),
+        spectrogram_headers.len()
+    );
+    assert_eq!(loudness_headers.len(), spectrogram_headers.len());
+    assert!(positive_divisions.len() >= spectrogram_headers.len() + 1);
+
+    for (index, header) in spectrogram_headers.iter().enumerate() {
+        let words = header.peak_count as usize;
+        assert_eq!(
+            words % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+            0,
+            "-'g' count must be an integral number of 48-word channel frames"
+        );
+        let time_frames = words / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME;
+        let layer = &oracle_parsed.spectrogram_layers[index];
+        assert_eq!(layer.frame_count(channels), time_frames);
+        assert_eq!(layer.mirrored_division, positive_divisions[index + 1]);
+
+        // Across the REAPER 7.79 adversarial matrix the -'g' scheduler emits
+        // one 48-word frame for every two -'r' count units. This relation also
+        // covers zero-length coarse layers and EOF +/- 1 cases.
+        assert_eq!(
+            u64::from(header.peak_count),
+            u64::from(loudness_headers[index].peak_count) * 24,
+            "-'g' word count must track the corresponding -'r' scheduler"
+        );
+    }
+
+    println!(
+        "ADVERSARIAL_SPECTROGRAM_EXTENSION_EXACT sample_rate={} channels={} old_layers={} g_layers={} g_words={:?}",
+        oracle_parsed.header.sample_rate,
+        channels,
+        generated_parsed.layer_headers.len(),
+        spectrogram_headers.len(),
+        spectrogram_headers
+            .iter()
+            .map(|header| header.peak_count)
+            .collect::<Vec<_>>(),
+    );
+}
+
 // The workflow feeds this test REAPER-generated cases spanning exact and
 // partial EOF buckets, non-48 kHz sample rates, peakcachegenrs variants, and
-// mono/multichannel inputs. Equality here is whole-file byte equality.
+// mono/multichannel inputs. With normal REAPER display flags equality is whole
+// file byte equality. With spectrogram display enabled, libreapeaks does not
+// generate -'g' yet, so this gate requires every existing layer to remain byte
+// exact and independently validates the observed REAPER -'g' structure.
 #[test]
 #[ignore = "requires pinned REAPER, Xvfb and FFmpeg"]
 fn reaper_mode3_pcm16_is_byte_identical_for_adversarial_case() {
@@ -92,6 +236,16 @@ fn reaper_mode3_pcm16_is_byte_identical_for_adversarial_case() {
     let generated = generate_pcm16_mode3(&pcm, &options).expect("generate mode-3 cache");
     fs::write(&output_path, &generated)
         .unwrap_or_else(|error| panic!("write {}: {error}", output_path.display()));
+    let generated_parsed = ReaPeaks::parse(generated.clone()).expect("parse generated mode-3 cache");
+
+    let has_spectrogram = parsed
+        .layer_headers
+        .iter()
+        .any(|header| header.division == TOKEN_SPECTROGRAM);
+    if has_spectrogram {
+        assert_spectrogram_extension(&oracle, &parsed, &generated, &generated_parsed);
+        return;
+    }
 
     if let Some(offset) = first_difference(&oracle, &generated) {
         panic!(
