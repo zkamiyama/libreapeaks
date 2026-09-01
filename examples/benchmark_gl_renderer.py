@@ -7,6 +7,7 @@ path plus measurements on the target GPU.
 from __future__ import annotations
 
 import array
+import faulthandler
 from pathlib import Path
 import sys
 import tempfile
@@ -16,6 +17,11 @@ from PySide6.QtWidgets import QApplication
 
 import reapeaks
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
+
+
+# Keep this enabled in CI: if a Qt/OpenGL binding crashes inside native code,
+# GitHub Actions still records the Python call site that entered the extension.
+faulthandler.enable(all_threads=True)
 
 
 def make_cache(path: Path, seconds: int = 4) -> int:
