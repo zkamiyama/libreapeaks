@@ -90,11 +90,13 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
     assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
 
+    // WDL_real_fft's forward real transform is exactly 2x the conventional
+    // DFT scale used by the recovered spectrogram amplitude calibration.
     let mut out = [C64::default(); FFT_BINS];
     for bin in 0..FFT_BINS {
         out[bin] = C64 {
-            re: re[bin],
-            im: im[bin],
+            re: re[bin] * 0.5,
+            im: im[bin] * 0.5,
         };
     }
     out
