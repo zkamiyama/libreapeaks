@@ -39,7 +39,7 @@ fn synthetic_file(first_g_count: u32, truncate: usize) -> Vec<u8> {
     // RPKN waveform payloads: peak_count * channels * 4 bytes.
     out.extend(std::iter::repeat_n(0u8, 4 * 2 * 4));
     out.extend(std::iter::repeat_n(0u8, 2 * 2 * 4));
-    out.extend(std::iter::repeat_n(0u8, 1 * 2 * 4));
+    out.extend(std::iter::repeat_n(0u8, 2 * 4));
 
     let first_time_frames = first_g_count as usize / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME;
     for frame_index in 0..first_time_frames {
