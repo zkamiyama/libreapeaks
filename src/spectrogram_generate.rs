@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(time_counts(2_608, &d48).unwrap(), vec![2, 0]);
         assert_eq!(time_counts(5_007, &d48).unwrap(), vec![2, 0]);
         assert_eq!(time_counts(5_008, &d48).unwrap(), vec![3, 0]);
-        assert_eq!(time_counts(45_807, &d48).unwrap(), vec![20, 0]);
+        assert_eq!(time_counts(45_807, &d48).unwrap(), vec![19, 0]);
         assert_eq!(time_counts(45_808, &d48).unwrap(), vec![20, 1]);
 
         let d441 = [147, 2_205, 44_100];
