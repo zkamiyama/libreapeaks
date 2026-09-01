@@ -30,28 +30,25 @@ fn pcm16_reaper_modes_have_only_observed_layer_shapes() {
     let opt = options(48_000, 2);
     let pcm = pcm16(96_137, 2);
 
-    let waveform = ReaPeaks::parse(
-        generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Waveform).unwrap(),
-    )
-    .unwrap();
+    let waveform =
+        ReaPeaks::parse(generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Waveform).unwrap())
+            .unwrap();
     assert_eq!(waveform.wave_layers.len(), 3);
     assert!(waveform.spectral_layers.is_empty());
     assert!(waveform.spectrogram_layers.is_empty());
     assert!(waveform.loudness_layers.is_empty());
 
-    let spectral = ReaPeaks::parse(
-        generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectral).unwrap(),
-    )
-    .unwrap();
+    let spectral =
+        ReaPeaks::parse(generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectral).unwrap())
+            .unwrap();
     assert_eq!(spectral.wave_layers.len(), 3);
     assert_eq!(spectral.spectral_layers.len(), 3);
     assert!(spectral.spectrogram_layers.is_empty());
     assert_eq!(spectral.loudness_layers.len(), 2);
 
-    let spectrogram = ReaPeaks::parse(
-        generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectrogram).unwrap(),
-    )
-    .unwrap();
+    let spectrogram =
+        ReaPeaks::parse(generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectrogram).unwrap())
+            .unwrap();
     assert_eq!(spectrogram.wave_layers.len(), 3);
     assert_eq!(spectrogram.spectral_layers.len(), 3);
     assert_eq!(spectrogram.spectrogram_layers.len(), 2);
@@ -64,17 +61,15 @@ fn mode_api_overrides_legacy_spectral_flag() {
     let pcm = pcm16(48_137, 1);
 
     opt.spectral = true;
-    let waveform = ReaPeaks::parse(
-        generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Waveform).unwrap(),
-    )
-    .unwrap();
+    let waveform =
+        ReaPeaks::parse(generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Waveform).unwrap())
+            .unwrap();
     assert!(waveform.spectral_layers.is_empty());
 
     opt.spectral = false;
-    let spectral = ReaPeaks::parse(
-        generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectral).unwrap(),
-    )
-    .unwrap();
+    let spectral =
+        ReaPeaks::parse(generate_pcm16_reaper(&pcm, &opt, ReaperPeakMode::Spectral).unwrap())
+            .unwrap();
     assert_eq!(spectral.spectral_layers.len(), 3);
     assert_eq!(spectral.loudness_layers.len(), 2);
 }
@@ -89,8 +84,14 @@ fn float_reaper_spectrogram_fails_closed() {
 
 #[test]
 fn reaper_peak_mode_u8_conversion_is_closed() {
-    assert_eq!(ReaperPeakMode::try_from(0).unwrap(), ReaperPeakMode::Waveform);
-    assert_eq!(ReaperPeakMode::try_from(1).unwrap(), ReaperPeakMode::Spectral);
+    assert_eq!(
+        ReaperPeakMode::try_from(0).unwrap(),
+        ReaperPeakMode::Waveform
+    );
+    assert_eq!(
+        ReaperPeakMode::try_from(1).unwrap(),
+        ReaperPeakMode::Spectral
+    );
     assert_eq!(
         ReaperPeakMode::try_from(2).unwrap(),
         ReaperPeakMode::Spectrogram
