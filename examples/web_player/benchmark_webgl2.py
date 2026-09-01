@@ -17,6 +17,21 @@ def upload_count(text: str) -> int:
     return int(match.group(1))
 
 
+def raw_resource_stats(driver) -> dict[str, float | int]:
+    return driver.execute_script(
+        """
+        const rows = performance.getEntriesByType('resource')
+          .filter(e => e.name.includes('/api/gpu-records'));
+        return {
+          requests: rows.length,
+          encoded_body_bytes: rows.reduce((n, e) => n + (e.encodedBodySize || 0), 0),
+          transferred_bytes: rows.reduce((n, e) => n + (e.transferSize || 0), 0),
+          duration_ms: rows.reduce((n, e) => n + (e.duration || 0), 0),
+        };
+        """
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url")
@@ -47,9 +62,18 @@ def main() -> int:
             lambda d: "WebGL2 packed"
             in d.find_element("id", "rendererInfo").text
         )
+        # Give the post-initial-render ResizeObserver callback one frame to fire.
+        # Identical resident windows must be reused rather than fetched again.
+        time.sleep(0.25)
 
         initial = driver.find_element("id", "rendererInfo").text
         initial_uploads = upload_count(initial)
+        initial_resources = raw_resource_stats(driver)
+        if initial_resources["requests"] != initial_uploads:
+            raise RuntimeError(
+                "duplicate initial raw requests detected: "
+                f"requests={initial_resources['requests']} uploads={initial_uploads}"
+            )
 
         # Uniform-only stress: gain, heatmap and vertical full-scale should not
         # cause raw record network traffic once the current windows are resident.
@@ -79,10 +103,16 @@ def main() -> int:
         time.sleep(0.2)
         uniform_diagnostics = driver.find_element("id", "rendererInfo").text
         uniform_uploads = upload_count(uniform_diagnostics)
+        uniform_resources = raw_resource_stats(driver)
         if uniform_uploads != initial_uploads:
             raise RuntimeError(
                 "uniform-only controls unexpectedly uploaded raw records: "
                 f"{initial_uploads} -> {uniform_uploads}"
+            )
+        if uniform_resources["requests"] != initial_resources["requests"]:
+            raise RuntimeError(
+                "uniform-only controls unexpectedly fetched raw records: "
+                f"{initial_resources['requests']} -> {uniform_resources['requests']}"
             )
 
         # Only count raw endpoint traffic caused by horizontal viewport changes.
@@ -109,18 +139,7 @@ def main() -> int:
         time.sleep(0.8)
 
         diagnostics = driver.find_element("id", "rendererInfo").text
-        resource_stats = driver.execute_script(
-            """
-            const rows = performance.getEntriesByType('resource')
-              .filter(e => e.name.includes('/api/gpu-records'));
-            return {
-              requests: rows.length,
-              encoded_body_bytes: rows.reduce((n, e) => n + (e.encodedBodySize || 0), 0),
-              transferred_bytes: rows.reduce((n, e) => n + (e.transferSize || 0), 0),
-              duration_ms: rows.reduce((n, e) => n + (e.duration || 0), 0),
-            };
-            """
-        )
+        resource_stats = raw_resource_stats(driver)
         info = driver.execute_script(
             """
             const canvas = document.getElementById('analysisGl');
@@ -151,8 +170,10 @@ def main() -> int:
             **info,
             "initial": initial,
             "initial_uploads": initial_uploads,
+            "initial_raw_resources": initial_resources,
             "uniform_diagnostics": uniform_diagnostics,
             "uniform_uploads": uniform_uploads,
+            "uniform_raw_resources": uniform_resources,
             "diagnostics": diagnostics,
             "uniform_stress_ms": uniform_seconds * 1000.0,
             "paged_stress_ms": paged_seconds * 1000.0,
