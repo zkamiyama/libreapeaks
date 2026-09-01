@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
 import reapeaks
@@ -51,6 +52,10 @@ def main() -> int:
         cache = Path(directory) / "fixture.reapeaks"
         total_frames = make_cache(cache)
         widget = ReaperGpuAnalysisCanvas(str(cache), total_frames)
+        # This benchmark creates a parentless top-level QOpenGLWidget. Ensure it
+        # and its GL context die while QApplication is still fully alive rather
+        # than leaving Qt to tear them down during Python interpreter shutdown.
+        widget.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         widget.resize(1280, 640)
         widget.show()
         for _ in range(8):
@@ -71,9 +76,14 @@ def main() -> int:
             widget.grabFramebuffer()
             app.processEvents()
 
-        print("GLSL_RENDER_BENCH " + widget.diagnostics)
+        print("GLSL_RENDER_BENCH " + widget.diagnostics, flush=True)
         widget.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+    app.quit()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
     return 0
 
 
