@@ -26,6 +26,50 @@ reproduce REAPER 7.79 `.reapeaks` files **byte-for-byte**, including:
 `generate_pcm16_mode3`. The established non-`g` mode-3 byte stream therefore
 remains unchanged unless the caller explicitly chooses spectrogram generation.
 
+## Native REAPER cache modes
+
+A dedicated live oracle enumerates REAPER 7.79's native `Peaks:` actions and
+then rebuilds the same deterministic PCM16 source in **71 fresh REAPER
+processes** with the resulting and neighboring `showpeaks` configurations.
+Only three distinct special-layer sets were observed:
+
+```text
+waveform mode:     waveform only
+spectral mode:     waveform + -'s' spectral + -'r' loudness
+spectrogram mode:  waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
+```
+
+Representative native actions produced:
+
+```text
+Peaks: Show normal peaks       -> www
+Peaks: Toggle spectral peaks   -> wwwsssrr
+Peaks: Toggle spectrogram      -> wwwsssggrr
+```
+
+The LUFS display actions also produced the `wwwsssrr` cache shape. Across the
+71-case sweep there was **no** `-'s'`-only, `-'g'`-only, or `-'r'`-only cache.
+For REAPER-oriented callers, libreapeaks therefore exposes the observed shapes
+as `ReaperPeakMode::{Waveform, Spectral, Spectrogram}` instead of arbitrary
+independent layer flags.
+
+Public one-call mode APIs are:
+
+```text
+Rust:   generate_pcm16_reaper / generate_f32_reaper
+Python: generate_pcm16_reaper / generate_f32_reaper
+C:      rpk_generate_pcm16_reaper / rpk_generate_f32_reaper
+```
+
+PCM16 supports all three modes. Float32 supports waveform and spectral modes;
+float32 spectrogram mode intentionally returns unsupported until exact float32
+`-'g'` generation is implemented.
+
+The older `generate_pcm16` / `generate_f32` and matching Python/C calls remain
+available for compatibility. Their optional `spectral` switch means waveform +
+optional `-'s'` only and should be treated as a lower-level/legacy writer shape,
+not as the canonical REAPER native-mode selector.
+
 ## Whole-file live REAPER gates
 
 ### FFmpeg-backed ALAC / M4A matrix
@@ -136,10 +180,11 @@ SPECTROGRAM_BINS
 SPECTROGRAM_BYTES_PER_CHANNEL_FRAME
 SPECTROGRAM_WORDS_PER_CHANNEL_FRAME
 generate_pcm16_mode3_with_spectrogram
+generate_pcm16_reaper(..., ReaperPeakMode::Spectrogram)
 ```
 
-Generation currently targets PCM16 RPKN mode-3. There is no public f32/C/Python
-complete-mode-3 `-'g'` generation entry point yet.
+Generation currently targets PCM16 RPKN for exact `-'g'`. The Python and C
+REAPER-mode APIs expose this PCM16 spectrogram path directly.
 
 ## Spectrogram implementation stress beyond the live oracle
 
@@ -265,18 +310,32 @@ REAPER 7.79 Linux configuration.
 
 ## API coverage versus implementation coverage
 
-Complete Rust mode-3 writers:
+Preferred REAPER-native writers:
+
+```text
+Rust:
+  generate_pcm16_reaper
+  generate_f32_reaper
+
+Python:
+  generate_pcm16_reaper
+  generate_f32_reaper
+
+C:
+  rpk_generate_pcm16_reaper
+  rpk_generate_f32_reaper
+```
+
+Lower-level Rust writers remain available:
 
 ```text
 generate_pcm16_mode3
 generate_f32_mode3
-generate_pcm16_mode3_with_spectrogram   # PCM16 + -'g'
+generate_pcm16_mode3_with_spectrogram
 ```
 
-C and Python generation currently expose waveform plus optional `-'s'` spectral
-layers, not complete `-'r'`/`-'g'` mode-3 writing. Parsing/GUI APIs have their
-own documented surfaces; use the current source/header as the API source of
-truth.
+Legacy waveform + optional `-'s'` writers also remain available in all three
+language surfaces for backward compatibility.
 
 ## Cache-path compatibility is separate
 
@@ -293,7 +352,6 @@ Outside the current compatibility claim:
 - Windows/macOS or non-x86_64 behavior without a dedicated oracle;
 - every lossy codec and decoder build;
 - f32/RPKL `-'g'` generation;
-- complete `-'g'`/mode-3 writer access through the current C/Python APIs;
 - legacy `-'l'` loudness payload parsing/generation;
 - RPKM compact waveform materialization through the current pyramid;
 - exact REAPER NaN/Inf/subnormal policy for arbitrary float media.
@@ -306,10 +364,14 @@ closed rather than panic or cross unsafe boundaries.
 
 Key permanent evidence is in:
 
+- `.github/workflows/reaper-individual-layer-oracle.yml`
 - `.github/workflows/reaper-spectrogram-byte-identical.yml`
 - `.github/workflows/reaper-spectrogram-stress-oracle.yml`
 - `.github/workflows/reaper-ffmpeg-byte-identical.yml`
 - `.github/workflows/reaper-adversarial-oracle.yml`
+- `tests/reaper_peak_modes.rs`
+- `tests/reaper_peak_modes_ffi.rs`
+- `tests/python/test_reaper_generation_modes.py`
 - `tests/reaper_spectrogram_exact.rs`
 - `tests/reaper_spectrogram_g_only.rs`
 - `tests/spectrogram_stress.rs`
