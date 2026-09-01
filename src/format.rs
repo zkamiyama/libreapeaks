@@ -322,18 +322,17 @@ impl ReaPeaks {
                         ));
                     }
                     let size = layer_payload_size(version, h, channels_usize)
-                        .ok_or(ReaPeaksError::InvalidHeader(
-                            "spectrogram size overflow",
-                        ))?;
+                        .ok_or(ReaPeaksError::InvalidHeader("spectrogram size overflow"))?;
                     let end = checked_end(off, size)?;
                     if end > raw.len() {
                         return Err(ReaPeaksError::Truncated);
                     }
-                    let wave_index = spectrogram_index
-                        .checked_add(1)
-                        .ok_or(ReaPeaksError::InvalidHeader(
-                            "spectrogram layer index overflow",
-                        ))?;
+                    let wave_index =
+                        spectrogram_index
+                            .checked_add(1)
+                            .ok_or(ReaPeaksError::InvalidHeader(
+                                "spectrogram layer index overflow",
+                            ))?;
                     let mirrored_division = positive_divs.get(wave_index).copied().ok_or(
                         ReaPeaksError::InvalidHeader(
                             "spectrogram layer without matching waveform layer",
