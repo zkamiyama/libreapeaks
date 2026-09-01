@@ -8,7 +8,10 @@ on:
       - '.github/workflows/reaper-spectrogram-stress-oracle.yml'
       - 'src/**'
       - 'tests/spectrogram_stress.rs'
+      - 'tests/spectrogram_structure_stress.rs'
+      - 'tests/spectrogram_toggle_stress.rs'
       - 'tests/reaper_spectrogram_exact.rs'
+      - 'tests/reaper_spectrogram_g_only.rs'
       - 'tools/reaper_oracle/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -19,7 +22,10 @@ on:
       - '.github/workflows/reaper-spectrogram-stress-oracle.yml'
       - 'src/**'
       - 'tests/spectrogram_stress.rs'
+      - 'tests/spectrogram_structure_stress.rs'
+      - 'tests/spectrogram_toggle_stress.rs'
       - 'tests/reaper_spectrogram_exact.rs'
+      - 'tests/reaper_spectrogram_g_only.rs'
       - 'tools/reaper_oracle/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +49,22 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
+      - name: Formatting gate before expensive oracle work
+        run: cargo fmt --all -- --check
+      - name: Default FFT spectrogram invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --test spectrogram_stress -- --nocapture
+          cargo test --release --test spectrogram_structure_stress -- --nocapture
+          cargo test --release --test spectrogram_toggle_stress -- --nocapture
       - name: Strict-WDL spectrogram invariants
-        run: cargo test --release --features strict-wdl --test spectrogram_stress -- --nocapture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --features strict-wdl --test spectrogram_stress -- --nocapture
+          cargo test --release --features strict-wdl --test spectrogram_structure_stress -- --nocapture
+          cargo test --release --features strict-wdl --test spectrogram_toggle_stress -- --nocapture
       - name: Install REAPER runtime
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Download pinned REAPER 7.79 Linux x86_64
@@ -63,14 +83,14 @@ jobs:
           echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
       - name: Generate adversarial PCM16 corpus
         run: python3 tools/reaper_oracle/spectrogram_stress_cases.py /tmp/spectrogram-stress/media
-      - name: Run fresh-process REAPER whole-file exact stress
+      - name: Run fresh-process REAPER whole-file and default-FFT stress
         run: python3 tools/reaper_oracle/spectrogram_stress_run.py /tmp/spectrogram-stress "$REAPER_BIN"
       - name: Publish stress summary
         if: always()
         shell: bash
         run: |
           if [ -f /tmp/spectrogram-stress/results/summary.txt ]; then
-            tail -160 /tmp/spectrogram-stress/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+            tail -200 /tmp/spectrogram-stress/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload stress evidence
         if: always()

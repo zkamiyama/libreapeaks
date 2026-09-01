@@ -53,8 +53,9 @@ fn spectrogram_toggle_does_not_change_preexisting_mode3_layers() {
         let source = pcm(frames, channels);
         let opts = options(sample_rate, peak_rate, channels);
         let plain = ReaPeaks::parse(generate_pcm16_mode3(&source, &opts).unwrap()).unwrap();
-        let with_g = ReaPeaks::parse(generate_pcm16_mode3_with_spectrogram(&source, &opts).unwrap())
-            .unwrap();
+        let with_g =
+            ReaPeaks::parse(generate_pcm16_mode3_with_spectrogram(&source, &opts).unwrap())
+                .unwrap();
 
         assert_eq!(plain.header.version, with_g.header.version);
         assert_eq!(plain.header.channels, with_g.header.channels);

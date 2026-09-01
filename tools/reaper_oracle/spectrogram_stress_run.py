@@ -78,9 +78,9 @@ finally:
         xvfb.kill()
     xvfb_log.close()
 
-failures = 0
 summary = []
-interesting = (
+strict_failures = 0
+strict_interesting = (
     "SPECTROGRAM_EXACT_STATS",
     "spectrogram mismatch",
     "layer header table differs",
@@ -94,7 +94,7 @@ for index, case in enumerate(cases):
     env.update(
         REAPEAKS_PCM16=str((media / f"{name}.s16le").resolve()),
         REAPEAKS_ORACLE=str((results / f"{name}.reaper.reapeaks").resolve()),
-        LIBREAPEAKS_OUTPUT=str((results / f"{name}.libreapeaks.reapeaks").resolve()),
+        LIBREAPEAKS_OUTPUT=str((results / f"{name}.strict.reapeaks").resolve()),
     )
     completed = subprocess.run(
         [
@@ -111,19 +111,88 @@ for index, case in enumerate(cases):
         timeout=180,
         check=False,
     )
-    (results / f"{name}.test.txt").write_text(completed.stdout, encoding="utf-8")
+    (results / f"{name}.strict.test.txt").write_text(completed.stdout, encoding="utf-8")
     if completed.returncode == 0:
         detail = next((line for line in completed.stdout.splitlines() if "SPECTROGRAM_BYTE_IDENTICAL" in line), "")
-        summary.append(f"PASS {name}\n{detail}" if detail else f"PASS {name}")
+        summary.append(f"STRICT_PASS {name}\n{detail}" if detail else f"STRICT_PASS {name}")
     else:
-        failures += 1
-        lines = [line for line in completed.stdout.splitlines() if any(key in line for key in interesting)]
-        summary.append(f"FAIL {name} rc={completed.returncode}\n" + "\n".join(lines[-30:]))
+        strict_failures += 1
+        lines = [
+            line
+            for line in completed.stdout.splitlines()
+            if any(key in line for key in strict_interesting)
+        ]
+        summary.append(
+            f"STRICT_FAIL {name} rc={completed.returncode}\n" + "\n".join(lines[-30:])
+        )
         print(summary[-1], flush=True)
     if (index + 1) % 20 == 0 or index + 1 == len(cases):
-        print(f"STRESS_COMPARE_PROGRESS={index + 1}/{len(cases)} failures={failures}", flush=True)
+        print(
+            f"STRICT_STRESS_PROGRESS={index + 1}/{len(cases)} failures={strict_failures}",
+            flush=True,
+        )
 
-summary.append(f"SPECTROGRAM_STRESS_TOTAL={len(cases)} FAILURES={failures}")
+default_g_failures = 0
+for index, case in enumerate(cases):
+    name = case["name"]
+    env = os.environ.copy()
+    env.update(
+        REAPEAKS_PCM16=str((media / f"{name}.s16le").resolve()),
+        REAPEAKS_ORACLE=str((results / f"{name}.reaper.reapeaks").resolve()),
+        LIBREAPEAKS_DEFAULT_OUTPUT=str((results / f"{name}.default.reapeaks").resolve()),
+    )
+    completed = subprocess.run(
+        [
+            "cargo", "test", "--release",
+            "--test", "reaper_spectrogram_g_only",
+            "reaper779_pcm16_default_fft_spectrogram_is_byte_identical",
+            "--", "--ignored", "--exact", "--nocapture",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    (results / f"{name}.default-g.test.txt").write_text(
+        completed.stdout, encoding="utf-8"
+    )
+    if completed.returncode == 0:
+        detail = next(
+            (
+                line
+                for line in completed.stdout.splitlines()
+                if "SPECTROGRAM_DEFAULT_G_BYTE_IDENTICAL" in line
+            ),
+            "",
+        )
+        summary.append(
+            f"DEFAULT_G_PASS {name}\n{detail}" if detail else f"DEFAULT_G_PASS {name}"
+        )
+    else:
+        default_g_failures += 1
+        lines = [
+            line
+            for line in completed.stdout.splitlines()
+            if "default-FFT" in line
+            or "spectrogram" in line.lower()
+            or "assertion" in line.lower()
+        ]
+        summary.append(
+            f"DEFAULT_G_FAIL {name} rc={completed.returncode}\n" + "\n".join(lines[-30:])
+        )
+        print(summary[-1], flush=True)
+    if (index + 1) % 20 == 0 or index + 1 == len(cases):
+        print(
+            f"DEFAULT_G_STRESS_PROGRESS={index + 1}/{len(cases)} failures={default_g_failures}",
+            flush=True,
+        )
+
+summary.append(
+    f"SPECTROGRAM_STRESS_TOTAL={len(cases)} STRICT_WHOLE_FILE_FAILURES={strict_failures} DEFAULT_G_FAILURES={default_g_failures}"
+)
 (results / "summary.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
 print(summary[-1], flush=True)
-raise SystemExit(min(failures, 125))
+raise SystemExit(min(strict_failures + default_g_failures, 125))
