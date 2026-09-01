@@ -10,7 +10,7 @@
   <header>
     <div>
       <h1>libreapeaks tiled web player</h1>
-      <p>Waveform and REAPER spectral-code textures are fetched per visible tile.</p>
+      <p>Native waveform and REAPER spectral-code tiles with REAPER-style viewport gestures.</p>
     </div>
     <div id="mediaInfo" class="pill">loading…</div>
   </header>
@@ -18,7 +18,7 @@
   <main>
     <section class="overview panel">
       <div class="panelTitle">CPU overview — <code>render_rgba()</code></div>
-      <div class="canvasStack overviewStack">
+      <div class="canvasStack overviewStack" title="Click to seek">
         <canvas id="overviewBase"></canvas>
         <canvas id="overviewOverlay" class="overlay"></canvas>
       </div>
@@ -28,7 +28,8 @@
       <div class="panelTitle">
         Tiled waveform — <code>plan_view()</code> → <code>tiles_for_view()</code> → <code>tile_texture()</code>
       </div>
-      <div class="canvasStack mainStack" id="waveStack">
+      <div class="canvasStack mainStack" id="waveStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
         <canvas id="waveBase"></canvas>
         <canvas id="waveOverlay" class="overlay"></canvas>
       </div>
@@ -38,7 +39,8 @@
       <div class="panelTitle">
         Tiled spectral codes — <code>spectral_tile_texture()</code> (frequency + density)
       </div>
-      <div class="canvasStack spectrumStack" id="spectrumStack">
+      <div class="canvasStack spectrumStack" id="spectrumStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
         <canvas id="spectrumBase"></canvas>
         <canvas id="spectrumOverlay" class="overlay"></canvas>
       </div>
@@ -53,10 +55,13 @@
         <button id="fullButton">Full</button>
         <label><input id="showTiles" type="checkbox" checked> show tile boundaries</label>
         <label><input id="followPlayhead" type="checkbox" checked> follow playhead</label>
-        <label>Vertical FS <input id="verticalScale" type="range" min="0.25" max="8" value="1" step="0.25"><span id="verticalValue">1.00</span></label>
+        <label>Vertical FS
+          <input id="verticalScale" type="range" min="0.1" max="32" value="1" step="0.05">
+          <output id="verticalValue" for="verticalScale">1.00</output>
+        </label>
         <span id="timeLabel">00:00.00 / 00:00.00</span>
       </div>
-      <input id="positionSlider" type="range" min="0" max="100000" value="0">
+      <input id="positionSlider" type="range" min="0" max="100000" value="0" aria-label="Playback position">
       <audio id="audio" preload="metadata" src="/audio"></audio>
     </section>
 
@@ -65,7 +70,10 @@
       <div><strong>Visible tiles:</strong> <span id="tileInfo"></span></div>
       <div><strong>Tile LRU:</strong> <span id="cacheInfo"></span></div>
       <div><strong>Other APIs exercised:</strong> <span id="apiInfo"></span></div>
-      <div class="hint">Mouse wheel = zoom around cursor · drag = pan · click = seek. Tile labels make cache granularity explicit.</div>
+      <div class="hint">
+        <kbd>Wheel</kbd> horizontal zoom at pointer · <kbd>Ctrl</kbd>+<kbd>Wheel</kbd> vertical waveform zoom · drag pan · click seek.
+        Precision-trackpad deltas stay continuous; tile requests are coalesced while the viewport moves.
+      </div>
     </section>
   </main>
 
