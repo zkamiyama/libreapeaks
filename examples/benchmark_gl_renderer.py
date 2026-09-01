@@ -1,4 +1,4 @@
-"""Headless-friendly smoke/telemetry benchmark for GpuAnalysisCanvas.
+"""Headless-friendly smoke/telemetry benchmark for the Demo Player GLSL path.
 
 Run under a real display or Xvfb/Mesa. The reported llvmpipe GPU time is only a
 regression signal; production recommendations should be based on the raw data
@@ -15,7 +15,7 @@ import time
 from PySide6.QtWidgets import QApplication
 
 import reapeaks
-from pyside6_gl_view import GpuAnalysisCanvas
+from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 
 
 def make_cache(path: Path, seconds: int = 4) -> int:
@@ -44,7 +44,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="libreapeaks-gl-bench-") as directory:
         cache = Path(directory) / "fixture.reapeaks"
         total_frames = make_cache(cache)
-        widget = GpuAnalysisCanvas(str(cache), total_frames)
+        widget = ReaperGpuAnalysisCanvas(str(cache), total_frames)
         widget.resize(1280, 640)
         widget.show()
         for _ in range(8):
