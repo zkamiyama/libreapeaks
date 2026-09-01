@@ -41,7 +41,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgl1-mesa-dri libegl1 mesa-utils
+          sudo apt-get install -y \
+            xvfb libgl1-mesa-dri libegl1 mesa-utils \
+            libxcb-cursor0 libxkbcommon-x11-0
           python -m pip install --upgrade pip maturin PySide6
       - name: Build and install libreapeaks Python wheel
         shell: bash
