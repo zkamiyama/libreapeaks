@@ -59,8 +59,14 @@ fn spectrogram_toggle_does_not_change_preexisting_mode3_layers() {
         assert_eq!(plain.header.version, with_g.header.version);
         assert_eq!(plain.header.channels, with_g.header.channels);
         assert_eq!(plain.header.sample_rate, with_g.header.sample_rate);
-        assert_eq!(plain.header.source_mtime_low32, with_g.header.source_mtime_low32);
-        assert_eq!(plain.header.source_size_low32, with_g.header.source_size_low32);
+        assert_eq!(
+            plain.header.source_mtime_low32,
+            with_g.header.source_mtime_low32
+        );
+        assert_eq!(
+            plain.header.source_size_low32,
+            with_g.header.source_size_low32
+        );
 
         assert_eq!(plain.wave_layers.len(), with_g.wave_layers.len());
         for (before, after) in plain.wave_layers.iter().zip(&with_g.wave_layers) {
@@ -120,10 +126,9 @@ fn exact_bin_spectrogram_code_is_monotone_over_pcm_amplitude() {
             let phase = 2.0 * PI * 6_000.0 * frame as f64 / sample_rate as f64;
             source.push((amplitude_code as f64 * phase.sin()).round() as i16);
         }
-        let parsed = ReaPeaks::parse(
-            generate_pcm16_mode3_with_spectrogram(&source, &opts).unwrap(),
-        )
-        .unwrap();
+        let parsed =
+            ReaPeaks::parse(generate_pcm16_mode3_with_spectrogram(&source, &opts).unwrap())
+                .unwrap();
         let layer = &parsed.spectrogram_layers[0];
         assert!(layer.frame_count(1) >= 2);
         let code = layer.frames[1].bins[31];
