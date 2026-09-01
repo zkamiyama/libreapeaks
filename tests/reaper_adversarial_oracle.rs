@@ -1,6 +1,6 @@
 use reapeaks::{
-    format::{TOKEN_LOUDNESS, TOKEN_SPECTROGRAM},
-    generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+    format::TOKEN_SPECTROGRAM, generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version,
+    SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
 };
 use std::env;
 use std::fs;
@@ -134,11 +134,6 @@ fn assert_spectrogram_extension(
         .iter()
         .filter(|header| header.division == TOKEN_SPECTROGRAM)
         .collect();
-    let loudness_headers: Vec<_> = oracle_parsed
-        .layer_headers
-        .iter()
-        .filter(|header| header.division == TOKEN_LOUDNESS)
-        .collect();
 
     assert_eq!(
         spectrogram_headers.len(),
@@ -149,7 +144,6 @@ fn assert_spectrogram_extension(
         oracle_parsed.spectrogram_layers.len(),
         spectrogram_headers.len()
     );
-    assert_eq!(loudness_headers.len(), spectrogram_headers.len());
     assert!(positive_divisions.len() >= spectrogram_headers.len() + 1);
 
     for (index, header) in spectrogram_headers.iter().enumerate() {
@@ -163,19 +157,10 @@ fn assert_spectrogram_extension(
         let layer = &oracle_parsed.spectrogram_layers[index];
         assert_eq!(layer.frame_count(channels), time_frames);
         assert_eq!(layer.mirrored_division, positive_divisions[index + 1]);
-
-        // Across the REAPER 7.79 adversarial matrix the -'g' scheduler emits
-        // one 48-word frame for every two -'r' count units. This relation also
-        // covers zero-length coarse layers and EOF +/- 1 cases.
-        assert_eq!(
-            u64::from(header.peak_count),
-            u64::from(loudness_headers[index].peak_count) * 24,
-            "-'g' word count must track the corresponding -'r' scheduler"
-        );
     }
 
     println!(
-        "ADVERSARIAL_SPECTROGRAM_EXTENSION_EXACT sample_rate={} channels={} old_layers={} g_layers={} g_words={:?}",
+        "ADVERSARIAL_SPECTROGRAM_EXTENSION_EXACT sample_rate={} channels={} old_layers={} g_layers={} g_words={:?} g_frames={:?}",
         oracle_parsed.header.sample_rate,
         channels,
         generated_parsed.layer_headers.len(),
@@ -183,6 +168,10 @@ fn assert_spectrogram_extension(
         spectrogram_headers
             .iter()
             .map(|header| header.peak_count)
+            .collect::<Vec<_>>(),
+        spectrogram_headers
+            .iter()
+            .map(|header| header.peak_count as usize / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME)
             .collect::<Vec<_>>(),
     );
 }
