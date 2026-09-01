@@ -63,10 +63,19 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
 
     verticalScaleChanged = Signal(float)
 
-    def initializeGL(self):  # noqa: N802 - Qt API
-        super().initializeGL()
-        if self._program is not None:
-            self._program = _UniformNameProxy(self._program)
+    def paintGL(self):  # noqa: N802 - Qt API
+        # Do not permanently replace the QObject-owned QOpenGLShaderProgram.
+        # PySide6 6.11 needs location-based scalar uniform dispatch, but keeping
+        # a Python proxy in ``self._program`` through QOpenGLWidget teardown can
+        # outlive the C++ QObject child and crash during QApplication shutdown.
+        program = self._program
+        if program is None:
+            return super().paintGL()
+        self._program = _UniformNameProxy(program)
+        try:
+            return super().paintGL()
+        finally:
+            self._program = program
 
     def set_vertical_full_scale(self, value: float):
         self.vertical_full_scale = max(0.1, min(32.0, float(value)))
