@@ -45,7 +45,12 @@ fn py_generate_pcm16_reaper<'py>(
         source_size_low32,
         spectral: false,
     };
-    let bytes = generate_pcm16_reaper(&pcm, &options, parse_mode(mode)?).map_err(py_err)?;
+    let mode = parse_mode(mode)?;
+    // Cache generation can be CPU-heavy. Detach from the Python interpreter so
+    // a Qt/worker-thread frontend can keep pumping UI events and progress.
+    let bytes = py
+        .detach(move || generate_pcm16_reaper(&pcm, &options, mode))
+        .map_err(py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }
 
@@ -77,8 +82,10 @@ fn py_generate_f32_reaper<'py>(
         source_size_low32,
         spectral: false,
     };
-    let bytes =
-        generate_f32_reaper(&pcm, &options, large_range, parse_mode(mode)?).map_err(py_err)?;
+    let mode = parse_mode(mode)?;
+    let bytes = py
+        .detach(move || generate_f32_reaper(&pcm, &options, large_range, mode))
+        .map_err(py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }
 
@@ -88,5 +95,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("REAPER_PEAK_MODE_SPECTROGRAM", "spectrogram")?;
     m.add_function(wrap_pyfunction!(py_generate_pcm16_reaper, m)?)?;
     m.add_function(wrap_pyfunction!(py_generate_f32_reaper, m)?)?;
+    crate::python_spectrogram_view::register(m)?;
     Ok(())
 }

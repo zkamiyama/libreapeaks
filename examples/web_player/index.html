@@ -3,42 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>libreapeaks tiled web player</title>
+  <title>libreapeaks REAPER-style web player</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
     <div>
-      <h1>libreapeaks tiled web player</h1>
-      <p>Waveform and REAPER spectral-code textures are fetched per visible tile.</p>
+      <h1>libreapeaks REAPER-style web player</h1>
+      <p>Direct packed .reapeaks → WebGL2, with the tiled Canvas2D renderer kept as a fallback and comparison path.</p>
     </div>
     <div id="mediaInfo" class="pill">loading…</div>
   </header>
 
   <main>
     <section class="overview panel">
-      <div class="panelTitle">CPU overview — <code>render_rgba()</code></div>
-      <div class="canvasStack overviewStack">
+      <div class="panelTitle">Overview — click to seek</div>
+      <div class="canvasStack overviewStack" title="Click to seek">
         <canvas id="overviewBase"></canvas>
         <canvas id="overviewOverlay" class="overlay"></canvas>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="webglPanel">
       <div class="panelTitle">
-        Tiled waveform — <code>plan_view()</code> → <code>tiles_for_view()</code> → <code>tile_texture()</code>
+        Packed WebGL2 composite — raw waveform + <code>-'s'</code> + packed 12-bit <code>-'g'</code> + <code>-'r'</code>
       </div>
-      <div class="canvasStack mainStack" id="waveStack">
+      <div class="canvasStack webglStack" id="webglStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
+        <canvas id="analysisGl"></canvas>
+      </div>
+    </section>
+
+    <section class="panel fallbackPanel" id="wavePanel">
+      <div class="panelTitle">
+        Canvas2D fallback waveform — <code>plan_view()</code> → tiled <code>tile_texture()</code>
+      </div>
+      <div class="canvasStack mainStack" id="waveStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
         <canvas id="waveBase"></canvas>
         <canvas id="waveOverlay" class="overlay"></canvas>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel fallbackPanel" id="spectrumPanel">
       <div class="panelTitle">
-        Tiled spectral codes — <code>spectral_tile_texture()</code> (frequency + density)
+        Canvas2D fallback spectral codes — <code>spectral_tile_texture()</code>
       </div>
-      <div class="canvasStack spectrumStack" id="spectrumStack">
+      <div class="canvasStack spectrumStack" id="spectrumStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
         <canvas id="spectrumBase"></canvas>
         <canvas id="spectrumOverlay" class="overlay"></canvas>
       </div>
@@ -51,21 +63,44 @@
         <button id="zoomInButton">Zoom +</button>
         <button id="zoomOutButton">Zoom −</button>
         <button id="fullButton">Full</button>
-        <label><input id="showTiles" type="checkbox" checked> show tile boundaries</label>
+        <label>Renderer
+          <select id="rendererSelect">
+            <option value="webgl2">WebGL2 packed</option>
+            <option value="canvas2d">Canvas2D tiled</option>
+          </select>
+        </label>
         <label><input id="followPlayhead" type="checkbox" checked> follow playhead</label>
-        <label>Vertical FS <input id="verticalScale" type="range" min="0.25" max="8" value="1" step="0.25"><span id="verticalValue">1.00</span></label>
+        <label>Vertical FS
+          <input id="verticalScale" type="range" min="0.1" max="32" value="1" step="0.05">
+          <output id="verticalValue" for="verticalScale">1.00</output>
+        </label>
         <span id="timeLabel">00:00.00 / 00:00.00</span>
       </div>
-      <input id="positionSlider" type="range" min="0" max="100000" value="0">
+      <div class="analysisRow">
+        <label>Spectrogram gain
+          <input id="spectrogramGain" type="range" min="0.05" max="8" value="1" step="0.05">
+          <output id="spectrogramGainValue" for="spectrogramGain">1.00×</output>
+        </label>
+        <label><input id="heatmap" type="checkbox" checked> heatmap</label>
+        <label><input id="showSpectral" type="checkbox" checked> <code>-'s'</code> overlay</label>
+        <label><input id="showLoudness" type="checkbox" checked> <code>-'r'</code> overlay</label>
+        <label><input id="showGpuTiles" type="checkbox" checked> GPU residency strip</label>
+        <label><input id="showTiles" type="checkbox" checked> Canvas tile boundaries</label>
+      </div>
+      <input id="positionSlider" type="range" min="0" max="100000" value="0" aria-label="Playback position">
       <audio id="audio" preload="metadata" src="/audio"></audio>
     </section>
 
     <section class="diagnostics panel">
+      <div><strong>Renderer:</strong> <span id="rendererInfo"></span></div>
       <div><strong>Viewport:</strong> <span id="viewportInfo"></span></div>
-      <div><strong>Visible tiles:</strong> <span id="tileInfo"></span></div>
-      <div><strong>Tile LRU:</strong> <span id="cacheInfo"></span></div>
-      <div><strong>Other APIs exercised:</strong> <span id="apiInfo"></span></div>
-      <div class="hint">Mouse wheel = zoom around cursor · drag = pan · click = seek. Tile labels make cache granularity explicit.</div>
+      <div><strong>Visible / resident:</strong> <span id="tileInfo"></span></div>
+      <div><strong>CPU tile LRU:</strong> <span id="cacheInfo"></span></div>
+      <div><strong>Cache/API:</strong> <span id="apiInfo"></span></div>
+      <div class="hint">
+        <kbd>Wheel</kbd> horizontal zoom at pointer · <kbd>Ctrl</kbd>+<kbd>Wheel</kbd> vertical waveform zoom · drag pan · click seek.
+        In WebGL2 mode gain/heatmap/playhead changes are uniform-only redraws; packed <code>-'g'</code> is never expanded to u16 on the CPU.
+      </div>
     </section>
   </main>
 

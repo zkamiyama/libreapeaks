@@ -14,7 +14,18 @@ const state = {
   showTiles: true,
   follow: true,
   verticalScale: 1,
+  spectrogramGain: 1,
+  heatmap: true,
+  showSpectral: true,
+  showLoudness: true,
+  showGpuTiles: true,
+  rendererMode: 'canvas2d',
+  webglRenderer: null,
+  webglError: '',
   renderSerial: 0,
+  renderRaf: 0,
+  overviewRaf: 0,
+  planAbortController: null,
 };
 
 class Lru {
@@ -24,7 +35,7 @@ class Lru {
     this.hits = 0;
     this.misses = 0;
   }
-  async get(key, loader) {
+  get(key, loader) {
     if (this.map.has(key)) {
       const value = this.map.get(key);
       this.map.delete(key);
@@ -32,9 +43,12 @@ class Lru {
       this.hits++;
       return value;
     }
-    const value = await loader();
-    this.map.set(key, value);
     this.misses++;
+    const value = Promise.resolve().then(loader).catch((error) => {
+      this.map.delete(key);
+      throw error;
+    });
+    this.map.set(key, value);
     while (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
     return value;
   }
@@ -62,6 +76,9 @@ function formatTime(seconds) {
   const s = seconds % 60;
   return h ? `${h}:${String(m).padStart(2,'0')}:${s.toFixed(2).padStart(5,'0')}`
            : `${String(m).padStart(2,'0')}:${s.toFixed(2).padStart(5,'0')}`;
+}
+function clamp(value, lo, hi) {
+  return Math.max(lo, Math.min(hi, value));
 }
 function frameToX(frame, width) {
   return (frame - state.viewStart) / Math.max(1, state.viewEnd - state.viewStart) * width;
@@ -99,8 +116,8 @@ function drawTileBand(ctx, x0, x1, h, label, odd) {
   ctx.fillText(label, x0 + 4, 14);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || `${response.status}`);
   return body;
@@ -130,13 +147,26 @@ async function renderOverview() {
   drawOverlays();
 }
 
-async function renderWave(serial) {
+function scheduleOverview() {
+  if (!state.meta || state.overviewRaf) return;
+  state.overviewRaf = requestAnimationFrame(() => {
+    state.overviewRaf = 0;
+    renderOverview().catch((error) => {
+      $('tileInfo').textContent = `overview: ${String(error)}`;
+    });
+  });
+}
+
+async function renderWave(serial, signal) {
   const canvas = $('waveBase');
   const [w, h] = resizeCanvas(canvas);
   resizeCanvas($('waveOverlay'));
   const ctx = canvas.getContext('2d');
   clearAndGrid(ctx, w, h, state.meta.channels);
-  const plan = await fetchJson(`/api/plan?start=${Math.floor(state.viewStart)}&end=${Math.ceil(state.viewEnd)}&width=${w}`);
+  const plan = await fetchJson(
+    `/api/plan?start=${Math.floor(state.viewStart)}&end=${Math.ceil(state.viewEnd)}&width=${w}`,
+    {signal},
+  );
   if (serial !== state.renderSerial) return;
   state.plan = plan;
   const textures = await Promise.all(plan.tiles.map(({level_index, tile_index}) =>
@@ -228,17 +258,78 @@ async function renderSpectrum(serial) {
   }
 }
 
-async function renderView() {
-  if (!state.meta) return;
-  const serial = ++state.renderSerial;
+function webglParams() {
+  return {
+    viewStart: state.viewStart,
+    viewEnd: state.viewEnd,
+    playhead: state.playhead,
+    totalFrames: state.meta.total_frames,
+    verticalScale: state.verticalScale,
+    spectrogramGain: state.spectrogramGain,
+    heatmap: state.heatmap,
+    showSpectral: state.showSpectral,
+    showLoudness: state.showLoudness,
+    tileDebug: state.showGpuTiles,
+  };
+}
+
+function lightweightRedraw() {
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    try {
+      state.webglRenderer.paint(webglParams());
+      updateDiagnostics();
+    } catch (error) {
+      state.webglError = String(error);
+      updateDiagnostics();
+    }
+  } else {
+    drawOverlays();
+  }
+}
+
+async function renderView(serial = state.renderSerial) {
+  if (!state.meta || serial !== state.renderSerial) return;
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    try {
+      await state.webglRenderer.render(webglParams());
+      if (serial === state.renderSerial) updateDiagnostics();
+    } catch (error) {
+      if (error?.name !== 'AbortError' && serial === state.renderSerial) {
+        state.webglError = String(error);
+        $('tileInfo').textContent = state.webglError;
+        updateDiagnostics();
+      }
+    }
+    drawOverlays();
+    return;
+  }
+
+  const controller = new AbortController();
+  state.planAbortController = controller;
   try {
-    await renderWave(serial);
+    await renderWave(serial, controller.signal);
+    if (serial !== state.renderSerial) return;
     await renderSpectrum(serial);
     if (serial === state.renderSerial) updateDiagnostics();
   } catch (error) {
-    $('tileInfo').textContent = String(error);
+    if (error?.name !== 'AbortError' && serial === state.renderSerial) {
+      $('tileInfo').textContent = String(error);
+    }
+  } finally {
+    if (state.planAbortController === controller) state.planAbortController = null;
+    drawOverlays();
   }
-  drawOverlays();
+}
+
+function scheduleRender() {
+  if (!state.meta) return;
+  state.renderSerial++;
+  state.planAbortController?.abort();
+  if (state.renderRaf) return;
+  state.renderRaf = requestAnimationFrame(() => {
+    state.renderRaf = 0;
+    renderView(state.renderSerial);
+  });
 }
 
 function drawOverlays() {
@@ -267,62 +358,137 @@ function setView(start, end, render = true) {
   let span = Math.max(minSpan, end - start);
   span = Math.min(span, state.meta.total_frames);
   start = Math.max(0, Math.min(start, state.meta.total_frames - span));
+  const nextEnd = start + span;
+  if (Math.abs(start - state.viewStart) < 0.01 && Math.abs(nextEnd - state.viewEnd) < 0.01) return;
   state.viewStart = start;
-  state.viewEnd = start + span;
-  if (render) renderView();
-  else drawOverlays();
+  state.viewEnd = nextEnd;
+  drawOverlays();
+  if (render) scheduleRender();
+}
+function zoomWindow(start, end, factor, anchor = 0.5) {
+  anchor = clamp(anchor, 0, 1);
+  const span = end - start;
+  const target = start + span * anchor;
+  const newSpan = span * factor;
+  return [target - newSpan * anchor, target + newSpan * (1 - anchor)];
 }
 function zoom(factor, anchor = 0.5) {
-  const span = state.viewEnd - state.viewStart;
-  const target = state.viewStart + span * anchor;
-  const newSpan = span * factor;
-  setView(target - newSpan * anchor, target + newSpan * (1-anchor));
+  const [start, end] = zoomWindow(state.viewStart, state.viewEnd, factor, anchor);
+  setView(start, end);
+}
+function verticalScaleFromWheel(current, steps) {
+  return clamp(current * (1.15 ** (-steps)), 0.1, 32);
+}
+function setVerticalScale(value) {
+  const next = clamp(Number(value), 0.1, 32);
+  if (!Number.isFinite(next) || Math.abs(next - state.verticalScale) < 1e-6) return;
+  state.verticalScale = next;
+  $('verticalScale').value = String(next);
+  $('verticalValue').textContent = next.toFixed(2);
+  if (state.rendererMode === 'webgl2') lightweightRedraw(); else scheduleRender();
+}
+function setSpectrogramGain(value) {
+  const next = clamp(Number(value), 0.05, 8);
+  if (!Number.isFinite(next) || Math.abs(next - state.spectrogramGain) < 1e-6) return;
+  state.spectrogramGain = next;
+  $('spectrogramGain').value = String(next);
+  $('spectrogramGainValue').textContent = `${next.toFixed(2)}×`;
+  lightweightRedraw();
 }
 function seekFrame(frame) {
   frame = Math.max(0, Math.min(frame, state.meta.total_frames));
   $('audio').currentTime = frame / state.meta.sample_rate;
   state.playhead = frame;
   drawOverlays();
+  lightweightRedraw();
+}
+
+function wheelSteps(event, element) {
+  let delta = event.deltaY;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) delta *= 40;
+  else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) delta *= Math.max(1, element.clientHeight);
+  return clamp(-delta / 120, -4, 4);
 }
 
 function installCanvasInteraction(element) {
   let drag = null;
   element.addEventListener('wheel', (event) => {
     event.preventDefault();
+    const steps = wheelSteps(event, element);
+    if (!steps) return;
+    if (event.ctrlKey) {
+      setVerticalScale(verticalScaleFromWheel(state.verticalScale, steps));
+      return;
+    }
     const rect = element.getBoundingClientRect();
-    zoom(event.deltaY < 0 ? 0.72 : 1/0.72, (event.clientX - rect.left) / rect.width);
+    const anchor = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    zoom(0.72 ** steps, anchor);
   }, {passive: false});
   element.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
     element.setPointerCapture(event.pointerId);
-    drag = {x: event.clientX, start: state.viewStart, end: state.viewEnd, moved: 0};
+    element.classList.add('isDragging');
+    drag = {pointerId: event.pointerId, x: event.clientX, start: state.viewStart, end: state.viewEnd, moved: 0};
   });
   element.addEventListener('pointermove', (event) => {
-    if (!drag) return;
+    if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.x; drag.moved = Math.max(drag.moved, Math.abs(dx));
     const framesPerPx = (drag.end - drag.start) / Math.max(1, element.clientWidth);
     const shift = -dx * framesPerPx;
     setView(drag.start + shift, drag.end + shift);
   });
-  element.addEventListener('pointerup', (event) => {
-    if (!drag) return;
-    if (drag.moved < 4) {
+  const finishPointer = (event, seek) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (seek && drag.moved < 4) {
       const rect = element.getBoundingClientRect();
-      const ratio = (event.clientX - rect.left) / rect.width;
+      const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
       seekFrame(state.viewStart + ratio * (state.viewEnd - state.viewStart));
     }
+    if (element.hasPointerCapture?.(event.pointerId)) element.releasePointerCapture(event.pointerId);
     drag = null;
+    element.classList.remove('isDragging');
+  };
+  element.addEventListener('pointerup', (event) => finishPointer(event, true));
+  element.addEventListener('pointercancel', (event) => finishPointer(event, false));
+  element.addEventListener('lostpointercapture', () => {
+    drag = null;
+    element.classList.remove('isDragging');
   });
 }
 
+function setRendererMode(requested, render = true) {
+  const mode = requested === 'webgl2' && state.webglRenderer ? 'webgl2' : 'canvas2d';
+  state.rendererMode = mode;
+  $('rendererSelect').value = mode;
+  $('webglPanel').classList.toggle('hidden', mode !== 'webgl2');
+  $('wavePanel').classList.toggle('hidden', mode !== 'canvas2d');
+  $('spectrumPanel').classList.toggle('hidden', mode !== 'canvas2d');
+  if (render) scheduleRender();
+  updateDiagnostics();
+}
+
 function updateDiagnostics() {
-  const p = state.plan;
-  if (!p) return;
-  const waveTiles = p.tiles.map(t => `L${t.level_index}/T${t.tile_index}`).join(', ');
-  const s = p.spectral;
-  const div = s ? `S${s.layer_index} div=${s.division}` : 'none';
-  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | wave L${p.level_index} div=${p.division}, ${p.peaks_per_pixel.toFixed(2)} peaks/px | spectral ${div}`;
-  $('tileInfo').textContent = waveTiles || '(no wave tiles)';
-  $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident · hit=${tileCache.hits} miss=${tileCache.misses}`;
+  if (!state.meta) return;
+  const span = Math.max(1, state.viewEnd - state.viewStart);
+  const horizontalZoom = state.meta.total_frames / span;
+  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× V-FS=${state.verticalScale.toFixed(2)}×`;
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    const g = state.meta.gpu_layers?.spectrogram?.length || 0;
+    const r = state.meta.gpu_layers?.loudness?.length || 0;
+    $('rendererInfo').textContent = state.webglError || state.webglRenderer.diagnostics();
+    $('tileInfo').textContent = `raw GPU layers wave=${state.meta.gpu_layers?.waveform?.length || 0} s=${state.meta.gpu_layers?.spectral?.length || 0} g=${g} r=${r}`;
+    $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} Canvas fallback entries (idle in WebGL2 mode)`;
+  } else {
+    const p = state.plan;
+    const waveTiles = p?.tiles?.map(t => `L${t.level_index}/T${t.tile_index}`).join(', ') || '(no wave tiles)';
+    const s = p?.spectral;
+    const div = s ? `S${s.layer_index} div=${s.division}` : 'none';
+    $('rendererInfo').textContent = `Canvas2D tiled fallback | spectral ${div}`;
+    $('tileInfo').textContent = waveTiles;
+    $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident/pending · hit=${tileCache.hits} miss=${tileCache.misses}`;
+  }
+  document.documentElement.dataset.renderer = state.rendererMode;
+  document.documentElement.dataset.webgl2Ready = state.webglRenderer ? '1' : '0';
 }
 
 function updateTransport() {
@@ -335,6 +501,22 @@ function updateTransport() {
     setView(state.playhead - span * .25, state.playhead + span * .75);
   } else {
     drawOverlays();
+    lightweightRedraw();
+  }
+}
+
+async function initWebGL2() {
+  try {
+    const module = await import('/webgl2_renderer.mjs');
+    state.webglRenderer = new module.WebGL2PackedRenderer($('analysisGl'), state.meta);
+    state.webglError = '';
+    return true;
+  } catch (error) {
+    state.webglRenderer = null;
+    state.webglError = `WebGL2 unavailable: ${String(error)}`;
+    const option = [...$('rendererSelect').options].find(item => item.value === 'webgl2');
+    if (option) option.disabled = true;
+    return false;
   }
 }
 
@@ -342,8 +524,10 @@ async function init() {
   state.meta = await fetchJson('/api/meta');
   state.viewStart = 0; state.viewEnd = state.meta.total_frames;
   $('mediaInfo').textContent = `${state.meta.audio_name} · ${state.meta.sample_rate} Hz · ${state.meta.channels} ch · ${state.meta.wave_encoding}`;
-  $('apiInfo').textContent = `tile_peaks=${state.meta.tile_peaks}; levels=${state.meta.levels.length}; default_divisions=[${state.meta.default_divisions.join(', ')}]; coarsest envelope_texture=${state.meta.coarsest_envelope_texture.width}×${state.meta.coarsest_envelope_texture.height}/${state.meta.coarsest_envelope_texture.bytes} bytes; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
+  const gpuCounts = ['waveform','spectral','spectrogram','loudness'].map(kind => `${kind}=${state.meta.gpu_layers?.[kind]?.length || 0}`).join(' ');
+  $('apiInfo').textContent = `raw=${state.meta.gpu_raw_bytes || 0} bytes; ${gpuCounts}; tile_peaks=${state.meta.tile_peaks}; divisions=[${state.meta.default_divisions.join(', ')}]; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
 
+  installCanvasInteraction($('webglStack'));
   installCanvasInteraction($('waveStack'));
   installCanvasInteraction($('spectrumStack'));
   $('overviewBase').parentElement.addEventListener('pointerdown', event => {
@@ -359,24 +543,50 @@ async function init() {
   $('zoomInButton').onclick = () => zoom(.5);
   $('zoomOutButton').onclick = () => zoom(2);
   $('fullButton').onclick = () => setView(0, state.meta.total_frames);
-  $('showTiles').onchange = event => { state.showTiles = event.target.checked; renderView(); };
+  $('rendererSelect').onchange = event => setRendererMode(event.target.value);
+  $('showTiles').onchange = event => { state.showTiles = event.target.checked; if (state.rendererMode === 'canvas2d') scheduleRender(); };
   $('followPlayhead').onchange = event => { state.follow = event.target.checked; };
-  $('verticalScale').oninput = event => {
-    state.verticalScale = Number(event.target.value); $('verticalValue').textContent = state.verticalScale.toFixed(2); renderView();
-  };
+  $('verticalScale').oninput = event => setVerticalScale(event.target.value);
+  $('spectrogramGain').oninput = event => setSpectrogramGain(event.target.value);
+  $('heatmap').onchange = event => { state.heatmap = event.target.checked; lightweightRedraw(); };
+  $('showSpectral').onchange = event => { state.showSpectral = event.target.checked; scheduleRender(); };
+  $('showLoudness').onchange = event => { state.showLoudness = event.target.checked; scheduleRender(); };
+  $('showGpuTiles').onchange = event => { state.showGpuTiles = event.target.checked; lightweightRedraw(); };
   $('positionSlider').oninput = event => seekFrame(Number(event.target.value)/100000 * state.meta.total_frames);
   $('audio').addEventListener('play', () => $('playButton').textContent = 'Pause');
   $('audio').addEventListener('pause', () => $('playButton').textContent = 'Play');
   $('audio').addEventListener('timeupdate', updateTransport);
 
-  const ro = new ResizeObserver(() => { renderOverview(); renderView(); });
-  ro.observe(document.querySelector('main'));
+  const webglReady = await initWebGL2();
+  setRendererMode(webglReady ? 'webgl2' : 'canvas2d', false);
+
   await renderOverview();
-  await renderView();
+  state.renderSerial++;
+  await renderView(state.renderSerial);
   updateTransport();
+
+  // Register resize observation only after the first raw windows are resident.
+  // ResizeObserver invokes its callback after observe(), so doing this earlier
+  // races the explicit initial render and duplicates identical HTTP requests.
+  const ro = new ResizeObserver(() => {
+    scheduleOverview();
+    scheduleRender();
+  });
+  ro.observe(document.querySelector('main'));
 
   const tick = () => { if (!$('audio').paused) updateTransport(); requestAnimationFrame(tick); };
   requestAnimationFrame(tick);
 }
 
-init().catch(error => { document.body.innerHTML += `<pre>${String(error)}</pre>`; });
+if (typeof globalThis !== 'undefined') {
+  globalThis.__libreapeaksInteractionMath = {
+    clamp,
+    wheelSteps,
+    zoomWindow,
+    verticalScaleFromWheel,
+  };
+}
+
+if (typeof document !== 'undefined') {
+  init().catch(error => { document.body.innerHTML += `<pre>${String(error)}</pre>`; });
+}

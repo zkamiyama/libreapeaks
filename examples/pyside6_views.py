@@ -44,6 +44,18 @@ def decode_u32_le(raw: bytes, offset: int) -> int:
     )
 
 
+def wheel_steps(event) -> float:
+    """Return continuous wheel steps; one conventional detent is 1.0."""
+
+    delta = event.angleDelta().y()
+    if delta:
+        return delta / 120.0
+    pixel_delta = event.pixelDelta().y()
+    if pixel_delta:
+        return pixel_delta / 120.0
+    return 0.0
+
+
 class TileLru:
     def __init__(self, capacity: int = 96):
         self.capacity = capacity
@@ -68,6 +80,7 @@ class TileLru:
 class PeaksCanvas(QWidget):
     viewChanged = Signal(int, int)
     seekRequested = Signal(int)
+    verticalScaleChanged = Signal(float)
 
     def __init__(self, rp: reapeaks.ReaPeaks, total_frames: int, parent=None):
         super().__init__(parent)
@@ -121,7 +134,7 @@ class PeaksCanvas(QWidget):
         self.update()
 
     def set_vertical_full_scale(self, value: float):
-        self.vertical_full_scale = max(0.05, value)
+        self.vertical_full_scale = max(0.1, min(32.0, float(value)))
         self.update()
 
     def zoom(self, factor: float, anchor_ratio: float = 0.5):
@@ -134,8 +147,19 @@ class PeaksCanvas(QWidget):
         self.set_view(new_start, new_start + new_span)
 
     def wheelEvent(self, event):  # noqa: N802 - Qt API
-        ratio = min(1.0, max(0.0, event.position().x() / max(1, self.width())))
-        self.zoom(0.72 if event.angleDelta().y() > 0 else 1.0 / 0.72, ratio)
+        steps = wheel_steps(event)
+        if steps == 0.0:
+            event.ignore()
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # REAPER-like vertical waveform zoom: wheel up makes the waveform
+            # taller, which corresponds to a smaller full-scale range.
+            value = self.vertical_full_scale * (1.15 ** (-steps))
+            self.set_vertical_full_scale(value)
+            self.verticalScaleChanged.emit(self.vertical_full_scale)
+        else:
+            ratio = min(1.0, max(0.0, event.position().x() / max(1, self.width())))
+            self.zoom(0.72**steps, ratio)
         event.accept()
 
     def mousePressEvent(self, event):  # noqa: N802

@@ -17,6 +17,7 @@ pub mod ffi;
 mod ffi_reaper_generate;
 pub mod format;
 pub mod generate;
+pub mod gpu_cache;
 pub mod loudness;
 pub mod pyramid;
 pub mod reaper_generate;
@@ -43,7 +44,11 @@ pub mod wave;
 #[cfg(feature = "python")]
 mod python;
 #[cfg(feature = "python")]
+mod python_gpu_cache;
+#[cfg(feature = "python")]
 mod python_reaper_generate;
+#[cfg(feature = "python")]
+mod python_spectrogram_view;
 
 pub use error::{ReaPeaksError, Result};
 pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
@@ -51,6 +56,7 @@ pub use generate::{
     generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3,
     generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
+pub use gpu_cache::{GpuCacheView, GpuLayerKind, GpuLayerMeta, GpuRawTile};
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
 pub use reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
 pub use spectrogram::{
