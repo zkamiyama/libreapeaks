@@ -6,10 +6,10 @@ Start with the document that matches the question you are trying to answer.
 
 Read [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
-It is the concise compatibility contract: which REAPER version/platform is used
-as the oracle, which complete-file cases are byte-identical, what waveform,
-spectral and loudness behavior is covered, and which areas are still unproven or
-unsupported.
+It is the compatibility contract: which REAPER version/platform is used as the
+oracle, which complete-file cases are byte-identical, what waveform, `-'s'`
+spectral, `-'g'` spectrogram, and `-'r'` loudness behavior is covered, and which
+areas remain unproven or unsupported.
 
 Machine-readable validation metadata lives in
 [`validation-summary.json`](validation-summary.json).
@@ -18,38 +18,41 @@ Machine-readable validation metadata lives in
 
 Read [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
 
-It contains the oracle methodology and recovered behavior for:
+It records the oracle methodology and recovered behavior for:
 
 - `.reapeaks` header/layer layout;
 - RPKN/RPKL waveform quantization;
 - `peakcachegenrs` division selection;
 - WDL resampling/FFT and `-'s'` spectral generation;
-- `-'r'` loudness filtering, block cadence, floating-point operation order, and
-  EOF scheduling;
-- the FFmpeg decoder-path provenance investigation;
+- `-'g'` spectrogram framing, 12-bit packing, Blackman-Harris window placement,
+  power quantization, and fine/coarse aggregation;
+- `-'r'` loudness filtering, cadence, floating-point operation order, and EOF
+  scheduling;
+- FFmpeg decoder-path provenance;
 - REAPER central-cache path policy.
+
+The `-'g'` implementation is independently stress-tested in both portable and
+`strict-wdl` builds. The pinned REAPER 7.79 stress gate currently covers 122
+PCM16 cases; strict-WDL output is complete-file byte-identical for all 122, and
+the portable/default FFT path is checked for exact `-'g'` output on the same
+matrix.
 
 ## I want to share a cache path with REAPER
 
 Read [`REAPER_CENTRAL_CACHE.md`](REAPER_CENTRAL_CACHE.md).
 
-The key distinction is between:
-
-- byte compatibility — generating the same cache content;
-- path compatibility — writing it where REAPER expects it.
-
-The document explains `reaper.ini`, `GetPeakFileNameEx`, persisted cache maps,
-and the current difference between the reusable higher-level policy helper and
-the older cache-mode names still exposed by the runnable demo CLIs.
+Byte compatibility and path compatibility are separate: generating the same
+cache bytes does not by itself mean an application chose the path REAPER will
+use. The document explains `reaper.ini`, `GetPeakFileNameEx`, persisted cache
+maps, and current demo integration.
 
 ## I am building a waveform UI
 
 Read [`GUI_WAVEFORM.md`](GUI_WAVEFORM.md).
 
 It documents the native/lazy waveform pyramid, 4096-peak tile identity, RGBA8
-waveform packing, spectral-code textures, and the corresponding Python/C APIs.
-
-The runnable examples are documented in
+waveform packing, `-'s'` spectral-code textures, and the corresponding Python/C
+APIs. The runnable examples are documented in
 [`../examples/PLAYER_DEMOS.md`](../examples/PLAYER_DEMOS.md).
 
 ## I am integrating from C or C++
@@ -58,13 +61,13 @@ Read [`C_ABI.md`](C_ABI.md), then use
 [`../include/reapeaks.h`](../include/reapeaks.h) as the source of truth for the
 actual exported ABI.
 
-The C document also calls out an important current limitation: C generation
-exposes waveform plus optional spectral layers, while the complete recovered
-mode-3 loudness writer is currently a Rust API.
+The complete recovered mode-3 loudness + `-'g'` spectrogram writer is currently
+a Rust API. C/Python generation still exposes waveform plus optional `-'s'`
+spectral layers.
 
 ## Source-of-truth order
 
-When documentation and code ever appear to disagree, use this order:
+When documentation and code disagree, use this order:
 
 1. current public source/API definitions (`src/`, `include/reapeaks.h`,
    `src/python.rs`);
@@ -75,5 +78,5 @@ When documentation and code ever appear to disagree, use this order:
    reverse-engineering states rather than the current implementation.
 
 Compatibility claims should always name the validated REAPER version and scope.
-Do not promote an observed REAPER 7.79 implementation quirk into a general file
-format or DSP rule without separate evidence.
+Do not promote an observed REAPER 7.79 implementation quirk into a universal
+file-format or DSP rule without separate evidence.
