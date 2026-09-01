@@ -82,8 +82,12 @@ jobs:
               dict(name='rate44100_long3', sr=44_100, frames=132_417, ch=3, kind='multitone'),
               dict(name='rate32000_exact4000', sr=32_000, frames=32_000, ch=1, kind='tone', hz=4000.0, amp=0.5),
               dict(name='rate32000_long4', sr=32_000, frames=96_257, ch=4, kind='multitone'),
+              dict(name='rate96000_short4767', sr=96_000, frames=4_767, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_short4768', sr=96_000, frames=4_768, ch=1, kind='tone', hz=12000.0, amp=0.5),
               dict(name='rate96000_exact12000', sr=96_000, frames=96_000, ch=1, kind='tone', hz=12000.0, amp=0.5),
               dict(name='rate96000_long4', sr=96_000, frames=288_319, ch=4, kind='multitone'),
+              dict(name='rate96000_tail292767', sr=96_000, frames=292_767, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_tail292768', sr=96_000, frames=292_768, ch=1, kind='tone', hz=12000.0, amp=0.5),
           ]
           (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
 
