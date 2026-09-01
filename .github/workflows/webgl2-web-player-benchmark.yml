@@ -1,0 +1,115 @@
+name: webgl2-web-player-benchmark
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'examples/player_common.py'
+      - 'examples/player_native_cache.py'
+      - 'examples/web_player/**'
+      - 'pyproject.toml'
+      - '.github/workflows/webgl2-web-player-benchmark.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'examples/player_common.py'
+      - 'examples/player_native_cache.py'
+      - 'examples/web_player/**'
+      - 'pyproject.toml'
+      - '.github/workflows/webgl2-web-player-benchmark.yml'
+
+jobs:
+  browser-webgl2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install wheel tooling and Selenium
+        run: python -m pip install --upgrade pip maturin selenium
+      - name: Build and install Python wheel
+        run: |
+          maturin build --release --out dist
+          python -m pip install dist/*.whl
+      - name: Show browser runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v google-chrome
+          google-chrome --version
+          command -v chromedriver || true
+          chromedriver --version || true
+      - name: Generate PCM16 stereo benchmark source
+        run: |
+          python - <<'PY'
+          import math, struct, wave
+          rate = 48000
+          seconds = 12
+          with wave.open('/tmp/webgl2-bench.wav', 'wb') as w:
+              w.setnchannels(2)
+              w.setsampwidth(2)
+              w.setframerate(rate)
+              frames = bytearray()
+              for n in range(rate * seconds):
+                  t = n / rate
+                  left = int(24000 * math.sin(2 * math.pi * (180 + 1600 * t / seconds) * t))
+                  right = int(21000 * math.sin(2 * math.pi * 997 * t))
+                  frames += struct.pack('<hh', left, right)
+              w.writeframes(frames)
+          PY
+      - name: Start full wave+s+g+r demo server
+        shell: bash
+        run: |
+          set -euo pipefail
+          python examples/web_player/server.py /tmp/webgl2-bench.wav \
+            --peaks /tmp/webgl2-bench.reapeaks \
+            --rebuild-cache \
+            --generation-mode spectrogram \
+            --cache-decoder wav \
+            --playback-decoder native \
+            --host 127.0.0.1 --port 8765 \
+            >/tmp/webgl2-server.log 2>&1 &
+          echo $! >/tmp/webgl2-server.pid
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8765/api/meta >/tmp/webgl2-meta.json; then
+              break
+            fi
+            sleep 0.25
+          done
+          python - <<'PY'
+          import json
+          meta = json.load(open('/tmp/webgl2-meta.json'))
+          layers = meta['gpu_layers']
+          assert layers['waveform'], layers
+          assert layers['spectral'], layers
+          assert layers['spectrogram'], layers
+          assert layers['loudness'], layers
+          print('WEBGL2_META', json.dumps({k: len(v) for k, v in layers.items()}, sort_keys=True))
+          PY
+      - name: Run real WebGL2 shader and interaction benchmark
+        run: |
+          python examples/web_player/benchmark_webgl2.py http://127.0.0.1:8765/ \
+            | tee /tmp/webgl2-browser-bench.txt
+          grep -Fq 'WEBGL2_BROWSER_BENCH ' /tmp/webgl2-browser-bench.txt
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/webgl2-server.pid; then
+            kill "$(cat /tmp/webgl2-server.pid)" 2>/dev/null || true
+          fi
+          cat /tmp/webgl2-server.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webgl2-web-player-${{ github.sha }}
+          path: |
+            /tmp/webgl2-browser-bench.txt
+            /tmp/webgl2-meta.json
+            /tmp/webgl2-server.log
+          if-no-files-found: warn
+          retention-days: 14
