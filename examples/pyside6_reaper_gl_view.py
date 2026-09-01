@@ -1,9 +1,22 @@
-"""REAPER-style interaction wrapper for the direct GLSL analysis canvas."""
+"""REAPER-style interaction wrapper for the direct GLSL analysis canvas.
+
+The wrapper is the public demo surface. It also normalizes one identifier that
+Mesa reserves in GLSL before the first OpenGL context compiles the shader.
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 
-from pyside6_gl_view import GpuAnalysisCanvas
+import pyside6_gl_view as _gl
+
+_gl.FRAGMENT_SHADER = _gl.FRAGMENT_SHADER.replace(
+    "vec3 active =",
+    "vec3 loadedColor =",
+).replace(
+    "? active :",
+    "? loadedColor :",
+)
+GpuAnalysisCanvas = _gl.GpuAnalysisCanvas
 
 
 def wheel_steps(event) -> float:
@@ -17,7 +30,7 @@ def wheel_steps(event) -> float:
 
 
 class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
-    """GpuAnalysisCanvas with REAPER-like horizontal/vertical wheel zoom."""
+    """Packed GLSL canvas with REAPER-like horizontal/vertical wheel zoom."""
 
     verticalScaleChanged = Signal(float)
 
@@ -31,10 +44,16 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
             event.ignore()
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+wheel changes only the waveform vertical full-scale. Wheel
+            # up makes the waveform taller by shrinking the displayed range.
             value = self.vertical_full_scale * (1.15 ** (-steps))
             self.set_vertical_full_scale(value)
             self.verticalScaleChanged.emit(self.vertical_full_scale)
         else:
-            anchor = min(1.0, max(0.0, event.position().x() / max(1, self.width())))
+            # Horizontal time zoom is anchored under the pointer, like REAPER.
+            anchor = min(
+                1.0,
+                max(0.0, event.position().x() / max(1, self.width())),
+            )
             self.zoom(0.72**steps, anchor)
         event.accept()
