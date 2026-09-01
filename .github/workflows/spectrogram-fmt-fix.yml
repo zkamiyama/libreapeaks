@@ -1,0 +1,36 @@
+name: spectrogram-fmt-fix
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/spectrogram-fmt-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spectrogram-g-oracle
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply rustfmt and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          if git diff --quiet; then
+            echo 'No formatting changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/format.rs src/spectrogram.rs src/lib.rs tests/spectrogram_format.rs
+          git commit -m 'apply rustfmt to spectrogram work'
+          git push origin HEAD:spectrogram-g-oracle
