@@ -133,7 +133,10 @@ fn reaper779_pcm16_spectrogram_is_byte_identical() {
         .unwrap_or_else(|error| panic!("write {}: {error}", output_path.display()));
     let generated_parsed = ReaPeaks::parse(generated.clone()).expect("parse generated cache");
 
-    assert_eq!(oracle_parsed.header, generated_parsed.header, "RPKN header differs");
+    assert_eq!(
+        oracle_parsed.header, generated_parsed.header,
+        "RPKN header differs"
+    );
     assert_eq!(
         oracle_parsed.layer_headers, generated_parsed.layer_headers,
         "layer header table differs"
@@ -143,10 +146,16 @@ fn reaper779_pcm16_spectrogram_is_byte_identical() {
     let generated_layers = split_rpkn_layers(&generated, &generated_parsed);
     assert_eq!(oracle_layers.len(), generated_layers.len());
     for (index, (expected, actual)) in oracle_layers.iter().zip(&generated_layers).enumerate() {
-        assert_eq!(expected.division, actual.division, "layer {index} division differs");
+        assert_eq!(
+            expected.division, actual.division,
+            "layer {index} division differs"
+        );
         assert_eq!(expected.count, actual.count, "layer {index} count differs");
         if expected.division != TOKEN_SPECTROGRAM {
-            assert_eq!(expected.payload, actual.payload, "non-spectrogram layer {index} differs");
+            assert_eq!(
+                expected.payload, actual.payload,
+                "non-spectrogram layer {index} differs"
+            );
         }
     }
 
@@ -185,7 +194,10 @@ fn reaper779_pcm16_spectrogram_is_byte_identical() {
         );
     }
 
-    assert_eq!(oracle, generated, "whole RPKN file differs after layer checks");
+    assert_eq!(
+        oracle, generated,
+        "whole RPKN file differs after layer checks"
+    );
     println!(
         "SPECTROGRAM_BYTE_IDENTICAL sample_rate={} channels={} source_frames={} bytes={} g_frames={:?}",
         oracle_parsed.header.sample_rate,
