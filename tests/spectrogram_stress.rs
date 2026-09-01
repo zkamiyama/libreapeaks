@@ -213,7 +213,9 @@ fn randomized_scheduler_matrix_is_total_deterministic_and_12bit() {
     for case in 0..48usize {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let sample_rate = sample_rates[state as usize % sample_rates.len()];
-        state = state.rotate_left(7).wrapping_add(case as u32 * 0x9e37_79b9);
+        state = state
+            .rotate_left(7)
+            .wrapping_add((case as u32).wrapping_mul(0x9e37_79b9));
         let peak_rate = peak_rates[state as usize % peak_rates.len()];
         let channels = 1 + ((state >> 9) as usize % 8);
         let divisions = default_divisions(sample_rate, peak_rate);
