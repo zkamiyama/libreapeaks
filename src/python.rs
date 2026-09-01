@@ -268,5 +268,6 @@ pub fn reapeaks(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_generate_pcm16, m)?)?;
     m.add_function(wrap_pyfunction!(py_generate_f32, m)?)?;
     crate::python_reaper_generate::register(m)?;
+    crate::python_gpu_cache::register(m)?;
     Ok(())
 }
