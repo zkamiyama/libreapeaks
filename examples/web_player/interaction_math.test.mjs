@@ -1,22 +1,35 @@
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
-import {
-  normalizedWheelSteps,
+const source = await readFile(new URL('./app.js', import.meta.url), 'utf8');
+const sandbox = {
+  WheelEvent: {
+    DOM_DELTA_PIXEL: 0,
+    DOM_DELTA_LINE: 1,
+    DOM_DELTA_PAGE: 2,
+  },
+};
+vm.createContext(sandbox);
+vm.runInContext(source, sandbox, {filename: 'examples/web_player/app.js'});
+const {
+  wheelSteps,
   verticalScaleFromWheel,
   zoomWindow,
-} from './interaction_math.mjs';
+} = sandbox.__libreapeaksInteractionMath;
 
 test('conventional and precision wheel deltas remain directional and continuous', () => {
-  assert.equal(normalizedWheelSteps(-120), 1);
-  assert.equal(normalizedWheelSteps(120), -1);
-  assert.equal(normalizedWheelSteps(-12), 0.1);
-  assert.equal(normalizedWheelSteps(-3, 1), 1);
-  assert.equal(normalizedWheelSteps(-1, 2, 600), 4);
-  assert.equal(normalizedWheelSteps(1, 2, 600), -4);
+  const element = {clientHeight: 600};
+  assert.equal(wheelSteps({deltaY: -120, deltaMode: 0}, element), 1);
+  assert.equal(wheelSteps({deltaY: 120, deltaMode: 0}, element), -1);
+  assert.equal(wheelSteps({deltaY: -12, deltaMode: 0}, element), 0.1);
+  assert.equal(wheelSteps({deltaY: -3, deltaMode: 1}, element), 1);
+  assert.equal(wheelSteps({deltaY: -1, deltaMode: 2}, element), 4);
+  assert.equal(wheelSteps({deltaY: 1, deltaMode: 2}, element), -4);
 });
 
-test('horizontal zoom preserves the frame under the pointer', () => {
+test('horizontal zoom preserves the exact frame under the pointer', () => {
   const start = 100;
   const end = 1100;
   for (const anchor of [0, 0.13, 0.25, 0.5, 0.91, 1]) {
@@ -29,7 +42,7 @@ test('horizontal zoom preserves the frame under the pointer', () => {
   }
 });
 
-test('ctrl-wheel uses full-scale semantics and clamps extremes', () => {
+test('ctrl-wheel follows full-scale semantics and clamps hostile deltas', () => {
   const taller = verticalScaleFromWheel(1, 1);
   const shorter = verticalScaleFromWheel(1, -1);
   assert.ok(taller < 1, 'wheel up should make waveform taller');
