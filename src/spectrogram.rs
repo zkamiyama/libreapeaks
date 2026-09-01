@@ -50,9 +50,9 @@ pub fn decode_spectrogram_frame(bytes: &[u8]) -> Result<SpectrogramFrame> {
 }
 
 fn checked_end(offset: usize, size: usize) -> Result<usize> {
-    offset
-        .checked_add(size)
-        .ok_or(ReaPeaksError::InvalidHeader("spectrogram layer offset overflow"))
+    offset.checked_add(size).ok_or(ReaPeaksError::InvalidHeader(
+        "spectrogram layer offset overflow",
+    ))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
@@ -137,7 +137,9 @@ pub fn parse_spectrogram_layers(bytes: &[u8]) -> Result<(u8, u32, Vec<Spectrogra
             count_usize
                 .checked_mul(channels_usize)
                 .and_then(|value| value.checked_mul(4))
-                .ok_or(ReaPeaksError::InvalidHeader("auxiliary layer size overflow"))?
+                .ok_or(ReaPeaksError::InvalidHeader(
+                    "auxiliary layer size overflow",
+                ))?
         } else if division == TOKEN_SPECTROGRAM {
             if count_usize % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME != 0 {
                 return Err(ReaPeaksError::InvalidHeader(
@@ -164,16 +166,18 @@ pub fn parse_spectrogram_layers(bytes: &[u8]) -> Result<(u8, u32, Vec<Spectrogra
         }
 
         if division == TOKEN_SPECTROGRAM {
-            let wave_index = spectrogram_index
-                .checked_add(1)
+            let wave_index =
+                spectrogram_index
+                    .checked_add(1)
+                    .ok_or(ReaPeaksError::InvalidHeader(
+                        "spectrogram layer index overflow",
+                    ))?;
+            let mirrored_division = positive_divisions
+                .get(wave_index)
+                .copied()
                 .ok_or(ReaPeaksError::InvalidHeader(
-                    "spectrogram layer index overflow",
-                ))?;
-            let mirrored_division = positive_divisions.get(wave_index).copied().ok_or(
-                ReaPeaksError::InvalidHeader(
                     "spectrogram layer without matching waveform layer",
-                ),
-            )?;
+                ))?;
             let time_frames = count_usize / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME;
             let value_count = time_frames
                 .checked_mul(channels_usize)
