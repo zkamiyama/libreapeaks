@@ -70,9 +70,7 @@ pub fn generate_f32_reaper(
     mode: ReaperPeakMode,
 ) -> Result<Vec<u8>> {
     match mode {
-        ReaperPeakMode::Waveform => {
-            generate_f32(pcm, &with_spectral(options, false), large_range)
-        }
+        ReaperPeakMode::Waveform => generate_f32(pcm, &with_spectral(options, false), large_range),
         ReaperPeakMode::Spectral => {
             generate_f32_mode3(pcm, &with_spectral(options, true), large_range)
         }
