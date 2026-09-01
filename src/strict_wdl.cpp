@@ -89,21 +89,25 @@ int rpk_wdl_real_fft_256(
     try {
         if (!input || !out_re || !out_im) return kInvalidArgument;
         rpk_wdl_fft_init_once();
-        double buf[256];
-        std::memcpy(buf, input, sizeof(buf));
-        WDL_real_fft(buf, 256, 0);
 
-        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
-        out_re[0] = c[0].re;
-        out_im[0] = 0.0;
-        out_re[128] = c[0].im;
-        out_im[128] = 0.0;
-        int *perm = WDL_fft_permute_tab(128);
+        // A/B probe for the -'g' path: REAPER may feed a real-valued vector to
+        // WDL's full complex FFT rather than WDL_real_fft. WDL_fft returns the
+        // conventional DFT scale, while the Rust spectrogram caller applies a
+        // 0.5 normalization because WDL_real_fft is 2x. Multiply by two here
+        // so this probe changes only the FFT arithmetic/order, not amplitude.
+        WDL_FFT_COMPLEX buf[256];
+        for (int i = 0; i < 256; ++i) {
+            buf[i].re = input[i];
+            buf[i].im = 0.0;
+        }
+        WDL_fft(buf, 256, 0);
+
+        int *perm = WDL_fft_permute_tab(256);
         if (!perm) return kProcessingFailure;
-        for (int k = 1; k < 128; ++k) {
+        for (int k = 0; k <= 128; ++k) {
             const int j = perm[k];
-            out_re[k] = c[j].re;
-            out_im[k] = c[j].im;
+            out_re[k] = buf[j].re * 2.0;
+            out_im[k] = buf[j].im * 2.0;
         }
         return 0;
     } catch (...) {
