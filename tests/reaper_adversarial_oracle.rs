@@ -1,7 +1,6 @@
 use reapeaks::{
     format::{TOKEN_LOUDNESS, TOKEN_SPECTROGRAM},
-    generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version,
-    SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+    generate_pcm16_mode3, GenerateOptions, ReaPeaks, Version, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
 };
 use std::env;
 use std::fs;
@@ -104,8 +103,14 @@ fn assert_spectrogram_extension(
         "all pre-existing mode-3 layers must stay byte-identical when REAPER adds -'g'"
     );
 
-    assert_eq!(oracle_parsed.header.version, generated_parsed.header.version);
-    assert_eq!(oracle_parsed.header.channels, generated_parsed.header.channels);
+    assert_eq!(
+        oracle_parsed.header.version,
+        generated_parsed.header.version
+    );
+    assert_eq!(
+        oracle_parsed.header.channels,
+        generated_parsed.header.channels
+    );
     assert_eq!(
         oracle_parsed.header.sample_rate,
         generated_parsed.header.sample_rate
@@ -135,7 +140,11 @@ fn assert_spectrogram_extension(
         .filter(|header| header.division == TOKEN_LOUDNESS)
         .collect();
 
-    assert_eq!(spectrogram_headers.len(), 2, "REAPER 7.79 mode-3 -'g' layer count");
+    assert_eq!(
+        spectrogram_headers.len(),
+        2,
+        "REAPER 7.79 mode-3 -'g' layer count"
+    );
     assert_eq!(
         oracle_parsed.spectrogram_layers.len(),
         spectrogram_headers.len()
@@ -236,7 +245,8 @@ fn reaper_mode3_pcm16_is_byte_identical_for_adversarial_case() {
     let generated = generate_pcm16_mode3(&pcm, &options).expect("generate mode-3 cache");
     fs::write(&output_path, &generated)
         .unwrap_or_else(|error| panic!("write {}: {error}", output_path.display()));
-    let generated_parsed = ReaPeaks::parse(generated.clone()).expect("parse generated mode-3 cache");
+    let generated_parsed =
+        ReaPeaks::parse(generated.clone()).expect("parse generated mode-3 cache");
 
     let has_spectrogram = parsed
         .layer_headers
