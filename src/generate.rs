@@ -2,6 +2,7 @@ use crate::error::{ReaPeaksError, Result};
 use crate::format::{encode, GeneratedLayer, Version};
 use crate::loudness::{build_loudness_layers_f32, build_loudness_layers_pcm16};
 use crate::spectral::{build_spectral_layers, build_spectral_layers_f32};
+use crate::spectrogram_generate::build_spectrogram_layers_pcm16;
 use crate::wave::{build_wave_layers, build_wave_layers_f32, WaveEncoding};
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,19 @@ fn validate(options: &GenerateOptions, sample_len: usize, loudness: bool) -> Res
     Ok(sample_len / options.channels)
 }
 
+fn validate_spectrogram_layer_count(options: &GenerateOptions) -> Result<()> {
+    let layer_count = options
+        .divisions
+        .len()
+        .checked_mul(4)
+        .and_then(|count| count.checked_sub(2))
+        .ok_or(ReaPeaksError::InvalidArgument("too many layers"))?;
+    if layer_count > u8::MAX as usize {
+        return Err(ReaPeaksError::InvalidArgument("too many layers"));
+    }
+    Ok(())
+}
+
 fn encode_generated(
     version: Version,
     options: &GenerateOptions,
@@ -134,6 +148,44 @@ pub fn generate_pcm16(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>>
 /// loudness layers for every waveform division except the finest.
 pub fn generate_pcm16_mode3(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
     generate_pcm16_impl(pcm, options, true)
+}
+
+/// Generate REAPER peak-cache mode-3 RPKN with `-'g'` spectrogram layers.
+///
+/// This is intentionally separate from [`generate_pcm16_mode3`] so enabling
+/// spectrogram generation cannot change the byte-exact legacy mode-3 path.
+/// `options.spectral` must be `true`, and waveform divisions must be nested
+/// integer multiples. The resulting layer order matches REAPER 7.79:
+/// waveform, mirrored `-'s'`, mirrored `-'g'`, then `-'r'` layers.
+pub fn generate_pcm16_mode3_with_spectrogram(
+    pcm: &[i16],
+    options: &GenerateOptions,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.len(), true)?;
+    validate_spectrogram_layer_count(options)?;
+
+    let mut layers = build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
+    layers.extend(build_spectral_layers(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    layers.extend(build_spectrogram_layers_pcm16(
+        pcm,
+        frames,
+        options.channels,
+        &options.divisions,
+    )?);
+    layers.extend(build_loudness_layers_pcm16(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    encode_generated(Version::Rpkn, options, &layers)
 }
 
 fn generate_f32_impl(
