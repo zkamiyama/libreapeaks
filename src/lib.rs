@@ -48,8 +48,7 @@ pub use generate::{
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
 pub use spectrogram::{
     decode_spectrogram_frame, parse_spectrogram_layers, SpectrogramFrame, SpectrogramLayer,
-    SPECTROGRAM_BINS, SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
-    SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+    SPECTROGRAM_BINS, SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
 };
 pub use texture::{
     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8, render_waveform_rgba8,
