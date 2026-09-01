@@ -93,6 +93,22 @@ test('PCM LOD enters with hysteresis then reaches exact sample mode', () => {
   assert.ok(samples.frameCount <= 4096);
 });
 
+test('PCM LOD accepts fractional UI coordinates and covers endpoint samples', () => {
+  const plan = planPcmLod({
+    viewStart: 1000.25,
+    viewEnd: 1005.75,
+    width: 1600,
+    totalFrames: 20_000,
+    channels: 2,
+    fineDivision: 160,
+  });
+  assert.equal(plan.active, true);
+  assert.equal(plan.mode, 'samples');
+  assert.ok(plan.firstFrame <= 1000);
+  assert.ok(plan.firstFrame + plan.frameCount >= 1006);
+  assert.equal(plan.framesPerPixel, 6 / 1600);
+});
+
 test('PCM LOD refuses a source window beyond its byte budget', () => {
   const plan = planPcmLod({
     viewStart: 0,
@@ -181,6 +197,8 @@ test('PCM LOD rejects nonfinite or impossible public configuration', () => {
     {enterPixelsPerPeak: Number.NaN},
     {exitPixelsPerPeak: Number.POSITIVE_INFINITY},
     {enterPixelsPerPeak: 1, exitPixelsPerPeak: 1.1},
+    {viewStart: Number.NaN},
+    {viewEnd: Number.POSITIVE_INFINITY},
     {totalFrames: Number.MAX_SAFE_INTEGER + 1},
   ];
   for (const override of invalid) {
@@ -198,8 +216,10 @@ test('randomized PCM LOD plans stay within byte, texture, and coverage bounds', 
   const fineChoices = [1, 2, 3, 16, 64, 160, 256, 1024];
   for (let iteration = 0; iteration < 5000; iteration++) {
     const totalFrames = integer(1, 20_000_000);
-    const viewStart = integer(-totalFrames, totalFrames * 2);
-    const viewEnd = viewStart + integer(-1000, Math.max(1, Math.floor(totalFrames / 2)));
+    const viewStart = integer(-totalFrames, totalFrames * 2) + (next() % 1000) / 1000;
+    const viewEnd = viewStart
+      + integer(-1000, Math.max(1, Math.floor(totalFrames / 2)))
+      + (next() % 1000) / 1000;
     const width = integer(1, 8192);
     const channels = integer(1, 32);
     const fineDivision = fineChoices[next() % fineChoices.length];
@@ -217,8 +237,8 @@ test('randomized PCM LOD plans stay within byte, texture, and coverage bounds', 
       assert.equal(plan.key, null);
       continue;
     }
-    const start = Math.min(Math.max(0, viewStart), totalFrames - 1);
-    const end = Math.min(Math.max(start + 1, viewEnd), totalFrames);
+    const start = Math.floor(Math.min(Math.max(0, viewStart), totalFrames - 1));
+    const end = Math.ceil(Math.min(Math.max(start + 1, viewEnd), totalFrames));
     assert.ok(plan.frameCount > 0);
     assert.ok(plan.division > 0 && plan.division <= fineDivision);
     assert.equal(plan.firstFrame % plan.division, 0);

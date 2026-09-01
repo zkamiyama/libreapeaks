@@ -29,6 +29,25 @@ to draw real sample points without retaining the full decoded file. See
 The shared source helper also exposes structured range-decode events and a
 draw plan for exact connected sample lines and optional point markers.
 
+### Exact high-zoom memory model
+
+Playback only guarantees that *some* short, sequential PCM neighborhood is
+normally buffered near the playhead. It does not guarantee that an arbitrary
+stopped/scrolled waveform viewport is still resident, source-rate, or pre-DSP.
+The default source LOD therefore uses independent bounded random access; a DAW
+that exposes its own source-rate block cache can share it through
+`CallbackPcmWindowReader` and avoid double-caching.
+
+The reference defaults are a 1 MiB target page, a 16 MiB hard limit for one
+raw window, a 64 MiB byte LRU, at most 1024 retained entries, 64 distinct
+pending keys, two concurrent reader calls, and 4096 display records. The LRU
+limit is not a whole-process RAM claim: active decoder output, the small
+display/HTTP buffer, GPU texture, decoder process, and OS page cache are
+additional bounded/implementation memory. WebGL2 emits
+`libreapeaks:pcm-range`; PySide6 emits `rangeAccess` and `rangeDecoded`; and
+`plan_pcm_draw()` / `planPcmDraw()` expose line/point placement without
+allocating a GUI-specific point array.
+
 ## Compatibility status
 
 The primary oracle is **REAPER 7.79 x86_64 Linux**. Compatibility claims in this
@@ -332,6 +351,8 @@ The documentation starts at [`docs/README.md`](docs/README.md):
 - [`docs/REAPER_CENTRAL_CACHE.md`](docs/REAPER_CENTRAL_CACHE.md) — cache path
   policy;
 - [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md) — GUI data model;
+- [`docs/SOURCE_PCM_LOD.md`](docs/SOURCE_PCM_LOD.md) — exact-sample LOD,
+  bounded decode/cache policy, debug events, and draw-plan API;
 - [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview.
 
 ## Third-party code

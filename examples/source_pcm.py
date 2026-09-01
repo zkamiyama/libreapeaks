@@ -68,6 +68,16 @@ def _checked_int(value: object, what: str) -> int:
         raise PlayerCacheError(f"PCM {what} must be an integer") from exc
 
 
+def _checked_finite_float(value: object, what: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PlayerCacheError(f"PCM {what} must be numeric") from exc
+    if not math.isfinite(result):
+        raise PlayerCacheError(f"PCM {what} must be finite")
+    return result
+
+
 def _validated_diagnostic_label(value: str, what: str) -> str:
     label = str(value)
     if not label or len(label.encode("utf-8")) > _MAX_DIAGNOSTIC_LABEL_BYTES:
@@ -1438,8 +1448,8 @@ def _inactive_plan(
 
 
 def plan_pcm_lod(
-    view_start: int,
-    view_end: int,
+    view_start: float,
+    view_end: float,
     width: int,
     total_frames: int,
     channels: int,
@@ -1455,8 +1465,11 @@ def plan_pcm_lod(
     """Choose cache/source/sample LOD and a reusable aligned source page."""
 
     total = _checked_int(total_frames, "LOD total frame count")
-    start_input = _checked_int(view_start, "LOD view start")
-    end_input = _checked_int(view_end, "LOD view end")
+    # UI zoom/pan coordinates may be fractional.  Source PCM reads remain
+    # integer-indexed, so cover the continuous viewport by rounding its start
+    # down and end up after clamping to the source timeline.
+    start_input = _checked_finite_float(view_start, "LOD view start")
+    end_input = _checked_finite_float(view_end, "LOD view end")
     width_px = _checked_int(width, "LOD viewport width")
     channel_count = _checked_int(channels, "LOD channel count")
     fine = _checked_int(fine_division, "LOD fine division")
@@ -1483,8 +1496,8 @@ def plan_pcm_lod(
         or exit_threshold > enter_threshold
     ):
         raise PlayerCacheError("PCM LOD thresholds must satisfy 0 < exit <= enter")
-    start = min(max(0, start_input), total - 1)
-    end = min(max(start + 1, end_input), total)
+    start = math.floor(min(max(0.0, start_input), total - 1))
+    end = math.ceil(min(max(start + 1, end_input), total))
     span = max(1, end - start)
     frames_per_pixel = span / width_px
     pixels_per_peak = fine / frames_per_pixel

@@ -28,9 +28,18 @@ export function planPcmLod({
     if (!Number.isSafeInteger(numeric)) throw new Error(`PCM LOD ${label} must be a safe integer`);
     return numeric;
   };
+  const finite = (value, label) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) throw new Error(`PCM LOD ${label} must be finite`);
+    return numeric;
+  };
   const total = integer(totalFrames, 'total frame count');
-  const startInput = integer(viewStart, 'view start');
-  const endInput = integer(viewEnd, 'view end');
+  // Browser zoom/pan coordinates are continuous even though source reads are
+  // indexed by integer sample frames.  Accept finite viewport coordinates and
+  // round the requested source interval outwards so no partially visible
+  // endpoint sample can be omitted.
+  const startInput = finite(viewStart, 'view start');
+  const endInput = finite(viewEnd, 'view end');
   const widthPx = integer(width, 'viewport width');
   const channelCount = integer(channels, 'channel count');
   const fine = integer(fineDivision, 'fine division');
@@ -50,8 +59,8 @@ export function planPcmLod({
       || !(exitThreshold > 0) || exitThreshold > enterThreshold) {
     throw new Error('PCM LOD thresholds must satisfy 0 < exit <= enter');
   }
-  const start = Math.min(Math.max(0, startInput), total - 1);
-  const end = Math.min(Math.max(start + 1, endInput), total);
+  const start = Math.floor(Math.min(Math.max(0, startInput), total - 1));
+  const end = Math.ceil(Math.min(Math.max(start + 1, endInput), total));
   const span = Math.max(1, end - start);
   const framesPerPixel = span / widthPx;
   const pixelsPerFinePeak = fine / framesPerPixel;

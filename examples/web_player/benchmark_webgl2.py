@@ -7,6 +7,7 @@ import re
 import time
 
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 
 
@@ -168,10 +169,19 @@ def main() -> int:
                 """
             )
             time.sleep(0.015)
-        wait.until(
-            lambda d: "PCM samples"
-            in d.find_element("id", "rendererInfo").text
-        )
+        try:
+            wait.until(
+                lambda d: "PCM samples"
+                in d.find_element("id", "rendererInfo").text
+            )
+        except TimeoutException as exc:
+            renderer = driver.find_element("id", "rendererInfo").text
+            ranges = driver.find_element("id", "pcmRangeInfo").text
+            viewport = driver.find_element("id", "viewportInfo").text
+            raise RuntimeError(
+                "exact sample LOD timed out; "
+                f"renderer={renderer!r}; ranges={ranges!r}; viewport={viewport!r}"
+            ) from exc
         sample_diagnostics = driver.find_element("id", "rendererInfo").text
         range_diagnostics = driver.find_element("id", "pcmRangeInfo").text
         pcm_requests = pcm_resource_count(driver)

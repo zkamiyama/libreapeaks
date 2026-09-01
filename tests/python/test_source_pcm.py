@@ -255,6 +255,17 @@ class SourcePcmUnitTests(unittest.TestCase):
             sp.DEFAULT_PCM_MAX_TEXTURE_RECORDS,
         )
 
+        fractional = sp.plan_pcm_lod(
+            1000.25, 1005.75, 1600, 20_000, 2, 160
+        )
+        self.assertTrue(fractional.active)
+        self.assertEqual(fractional.mode, "samples")
+        self.assertLessEqual(fractional.first_frame, 1000)
+        self.assertGreaterEqual(
+            fractional.first_frame + fractional.frame_count, 1006
+        )
+        self.assertEqual(fractional.frames_per_pixel, 6 / 1600)
+
         capped = sp.plan_pcm_lod(
             0,
             100_000,
@@ -625,8 +636,14 @@ class SourcePcmUnitTests(unittest.TestCase):
         rng = random.Random(0x10D5AFE)
         for case in range(5000):
             total = rng.randint(1, 20_000_000)
-            start_input = rng.randint(-total, total * 2)
-            end_input = start_input + rng.randint(-1000, max(1, total // 2))
+            start_input = (
+                rng.randint(-total, total * 2) + rng.randrange(1000) / 1000
+            )
+            end_input = (
+                start_input
+                + rng.randint(-1000, max(1, total // 2))
+                + rng.randrange(1000) / 1000
+            )
             width = rng.randint(1, 8192)
             channels = rng.randint(1, 32)
             fine = rng.choice((1, 2, 3, 16, 64, 160, 256, 1024))
@@ -650,8 +667,8 @@ class SourcePcmUnitTests(unittest.TestCase):
             if not plan.active:
                 self.assertIsNone(plan.key)
                 continue
-            start = min(max(0, start_input), total - 1)
-            end = min(max(start + 1, end_input), total)
+            start = math.floor(min(max(0, start_input), total - 1))
+            end = math.ceil(min(max(start + 1, end_input), total))
             with self.subTest(case=case):
                 self.assertGreater(plan.frame_count, 0)
                 self.assertGreater(plan.division, 0)
@@ -687,6 +704,8 @@ class SourcePcmUnitTests(unittest.TestCase):
             {"enter_pixels_per_peak": math.nan},
             {"exit_pixels_per_peak": math.inf},
             {"enter_pixels_per_peak": 1.0, "exit_pixels_per_peak": 1.1},
+            {"view_start": math.nan},
+            {"view_end": math.inf},
         )
         for override in invalid:
             arguments = {**valid, **override}
@@ -699,12 +718,13 @@ class SourcePcmUnitTests(unittest.TestCase):
         cases: list[dict[str, object]] = []
         for _case in range(1000):
             total = rng.randint(1, 20_000_000)
-            start = rng.randint(-total, total * 2)
+            start = rng.randint(-total, total * 2) + rng.randrange(1000) / 1000
             cases.append(
                 {
                     "viewStart": start,
                     "viewEnd": start
-                    + rng.randint(-1000, max(1, total // 2)),
+                    + rng.randint(-1000, max(1, total // 2))
+                    + rng.randrange(1000) / 1000,
                     "width": rng.randint(1, 8192),
                     "totalFrames": total,
                     "channels": rng.randint(1, 32),

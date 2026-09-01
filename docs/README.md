@@ -61,6 +61,16 @@ waveform packing, `-'s'` spectral-code textures, and the corresponding Python/C
 APIs. The runnable examples are documented in
 [`../examples/PLAYER_DEMOS.md`](../examples/PLAYER_DEMOS.md).
 
+## I need exact points at sample zoom
+
+Read [`SOURCE_PCM_LOD.md`](SOURCE_PCM_LOD.md).
+
+It explains why individual samples cannot be reconstructed from `.reapeaks`,
+when the reference players hand off to source PCM, how decoded memory and
+concurrency remain bounded, why a playback buffer is not automatically a
+random-access source cache, and how to consume range-decode notifications and
+the shared exact-line/dot draw plan.
+
 ## I am integrating from C or C++
 
 Read [`C_ABI.md`](C_ABI.md), then use

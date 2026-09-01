@@ -60,11 +60,19 @@ so the response is a direct float32 sample slice with no min/max reduction.
 
 For each viewport the planner:
 
-1. adds two source buckets of guard data on each side;
-2. aligns the request to a reusable page boundary;
-3. caps display records at 4096 (or the runtime GPU texture limit);
-4. checks decoded bytes before any file read or FFmpeg process starts;
-5. requests only the latest page needed by the UI.
+1. validates finite UI coordinates, clamps them to the source, and rounds the
+   continuous viewport outwards to integer frames;
+2. adds two source buckets of guard data on each side;
+3. aligns the request to a reusable page boundary;
+4. caps display records at 4096 (or the runtime GPU texture limit);
+5. checks decoded bytes before any file read or FFmpeg process starts;
+6. requests only the latest page needed by the UI.
+
+UI coordinates are deliberately allowed to be fractional: cursor-anchored
+wheel zoom and high-resolution trackpads produce continuous frame positions.
+Decoder and HTTP coordinates remain non-negative integers. Flooring the visible
+start and ceiling the visible end ensures both partially visible endpoint
+samples are covered before division/page alignment.
 
 Default budgets are:
 
@@ -88,6 +96,15 @@ For example, 1 MiB holds 131,072 stereo frames (2.73 seconds at 48 kHz) or
 32,768 eight-channel frames (0.68 seconds at 48 kHz). Exact sample view needs
 only roughly the canvas width plus guards, so its normal payload is much
 smaller than the byte limit.
+
+The 64 MiB LRU is a retained-page bound, **not** a promise that process RSS is
+64 MiB. With the default two reader slots, up to two bounded 16 MiB reader
+results can be in flight in addition to the resident cache. A returned display
+slice/HTTP body, GPU texture, FFmpeg process and pipe buffers, Python/object
+overhead, and the operating system's file page cache are separate. Each has a
+bounded request geometry or external lifecycle, but they should be included in
+an application's global memory budget. Setting cache capacity to zero removes
+retention; it does not make the active decoder/result buffer zero-copy.
 
 The LRU is byte-bounded and has an independent entry-count bound. Identical
 concurrent HTTP requests share one in-flight decode, even when retained-cache
@@ -133,7 +150,8 @@ bounded.
 
 ### Reusing a playback engine's PCM
 
-A player normally has *some* decoded PCM in RAM, but it is usually a short
+The safe premise is **“some PCM near the playhead is probably resident,” not
+“the exact waveform viewport is resident.”** A player normally has a short
 sequential ring/read-ahead buffer around the playhead, not the entire file.
 Waveform viewports can be stopped, can jump arbitrarily, and can inspect a
 region far from playback. The playback buffer may also be device-rate,
@@ -267,6 +285,11 @@ cache bytes. They also expose a range-event id, raw decoded interval, reader
 time, cache disposition, and the semantic `X-Pcm-Range-Reader-Ran` header. The
 older/debug-friendly `X-Pcm-Range-Decode-Ran` spelling is retained as an alias.
 A one-component response is exact samples; two components are `max,min`.
+The demo endpoint rejects missing/duplicate/non-integer arguments, more than 32
+query fields, starts at/beyond EOF, unaligned starts, and counts beyond the
+configured byte limit before invoking the source reader. The WebGL2 client
+then checks geometry, raw-page coverage, payload byte count, diagnostic flags,
+and printable backend metadata before texture upload or event dispatch.
 
 ### Debug events and draw-plan API
 
@@ -279,6 +302,20 @@ line shows and briefly highlights the latest real decode, and the local server
 logs one `PCM_RANGE_DECODE` record per actual reader run. PySide6 exposes
 `PcmWindowLoader.rangeAccess` and `rangeDecoded` Qt signals and shows real
 decodes in both its diagnostics row and status bar.
+
+Browser hook:
+
+```js
+analysisGl.addEventListener('libreapeaks:pcm-range', ({detail}) => {
+  console.log(detail.cacheDisposition, detail.readerRan,
+              detail.rawFirstFrame, detail.rawFrameCount, detail.readerMs);
+});
+```
+
+Use every `rangeAccess`/custom event for cache telemetry, but use
+`readerRan`/`rangeDecoded` when the UI should specifically announce that disk
+I/O or a decoder ran. A coalesced waiter receives the shared result without
+being misreported as another decode.
 
 CPU and texture GUI clients can share the placement math:
 
@@ -301,6 +338,18 @@ for local in range(draw.visible_record_count):
 default dot threshold at 3 px per frame. `x_origin_px`/`x_step_px` support an
 even tighter inner loop. JavaScript exports the mirrored `planPcmDraw()` helper,
 which the WebGL2 shader path uses directly.
+
+The payload layout is record-major, then channel, then component:
+
+```text
+offset = ((record * channels) + channel) * components + component
+samples:   components=1, component 0 = exact f32 sample
+envelope:  components=2, component 0 = max, component 1 = min
+```
+
+`sample_offset()` / `sampleOffset()` validates the sample-mode case, so a GUI
+does not need to duplicate this indexing or accidentally draw an envelope as
+sample points.
 
 Both players accept:
 
@@ -341,11 +390,31 @@ media must never have a full-file RAM peak.
 - The cache does not carry an exact source-frame count. Players prefer media
   metadata/exact WAV geometry and clamp a short final decode at EOF.
 
+## Adversarial invariants
+
+The permanent tests lock several failure-prone properties discovered while
+hardening the path:
+
+- fractional view coordinates are finite and are outward-rounded before I/O;
+- the aligned raw page covers the complete display interval, including a final
+  partial bucket when EOF is not divisible by the selected division;
+- byte, texture-record, retained-item, pending-key, and active-reader limits
+  are checked independently;
+- a failed owner wakes all coalesced waiters, and same-thread same-key
+  recursion fails rather than deadlocking;
+- zero-capacity caching still coalesces identical in-flight requests;
+- response diagnostics cannot claim `cache-hit`/`decoded` while carrying
+  contradictory reader/cache flags;
+- NaN/infinity source values are sanitized before CPU or shader drawing;
+- malformed WAV chunk sizes/counts and FFmpeg over-output cannot create an
+  unbounded allocation or partial-frame payload.
+
 ## Verification
 
 Regression tests cover direct split-chunk WAV range reads, EOF clamping,
 float32 zero-copy sample payloads, exact on-demand extrema, LOD hysteresis and
-memory limits, zero-capacity concurrent decode coalescing, failed-waiter wakeup,
+memory limits, fractional zoom coordinates and outward endpoint coverage,
+zero-capacity concurrent decode coalescing, failed-waiter wakeup,
 same-key reentrancy, pending/concurrent request limits, byte and item LRU
 eviction, malformed reader output, NaN/infinity samples, structured and random
 malformed WAV corpora, structured range-decode events, HTTP query floods,
