@@ -16,8 +16,7 @@ fn options(sample_rate: u32, channels: usize, peak_rate: u32) -> GenerateOptions
 }
 
 fn lane_sample(frame: usize, channel: usize) -> i16 {
-    let a = ((frame as u64 * (97 + channel as u64 * 18_376)
-        + channel as u64 * 1_000_003)
+    let a = ((frame as u64 * (97 + channel as u64 * 18_376) + channel as u64 * 1_000_003)
         % 56_001) as i32
         - 28_000;
     let b = (((frame / (channel + 1).max(1)) % 257) as i32 - 128) * (channel as i32 + 1);
@@ -70,7 +69,10 @@ fn multichannel_spectrogram_equals_independent_mono_lanes() {
             .collect();
         let mono = ReaPeaks::parse(generate(&mono_pcm, sample_rate, 1, peak_rate))
             .expect("parse mono lane cache");
-        assert_eq!(multi.spectrogram_layers.len(), mono.spectrogram_layers.len());
+        assert_eq!(
+            multi.spectrogram_layers.len(),
+            mono.spectrogram_layers.len()
+        );
         for (level, (multi_layer, mono_layer)) in multi
             .spectrogram_layers
             .iter()
@@ -101,13 +103,8 @@ fn channel_permutation_and_sign_inversion_are_exact_equivariances() {
         .expect("parse original cache");
 
     let inverted_pcm: Vec<i16> = pcm.iter().map(|&sample| -sample).collect();
-    let inverted = ReaPeaks::parse(generate(
-        &inverted_pcm,
-        sample_rate,
-        channels,
-        peak_rate,
-    ))
-    .expect("parse sign-inverted cache");
+    let inverted = ReaPeaks::parse(generate(&inverted_pcm, sample_rate, channels, peak_rate))
+        .expect("parse sign-inverted cache");
     assert_eq!(
         original.spectrogram_layers, inverted.spectrogram_layers,
         "magnitude spectrogram changed under exact sign inversion"
@@ -120,13 +117,8 @@ fn channel_permutation_and_sign_inversion_are_exact_equivariances() {
             permuted_pcm.push(frame[old_channel]);
         }
     }
-    let permuted = ReaPeaks::parse(generate(
-        &permuted_pcm,
-        sample_rate,
-        channels,
-        peak_rate,
-    ))
-    .expect("parse permuted cache");
+    let permuted = ReaPeaks::parse(generate(&permuted_pcm, sample_rate, channels, peak_rate))
+        .expect("parse permuted cache");
 
     for (level, (expected, actual)) in original
         .spectrogram_layers
@@ -209,12 +201,12 @@ fn zero_pcm_stays_zero_across_rate_preference_and_channel_extremes() {
 #[test]
 fn randomized_scheduler_matrix_is_total_deterministic_and_12bit() {
     let sample_rates = [
-        8_000u32, 11_025, 16_000, 22_050, 22_051, 24_000, 32_000, 44_100, 48_000,
-        76_799, 76_800, 76_801, 88_200, 96_000, 176_400, 192_000,
+        8_000u32, 11_025, 16_000, 22_050, 22_051, 24_000, 32_000, 44_100, 48_000, 76_799, 76_800,
+        76_801, 88_200, 96_000, 176_400, 192_000,
     ];
     let peak_rates = [
-        100u32, 149, 150, 171, 172, 173, 187, 188, 200, 299, 300, 301, 374, 375,
-        376, 499, 500, 501, 1_000,
+        100u32, 149, 150, 171, 172, 173, 187, 188, 200, 299, 300, 301, 374, 375, 376, 499, 500,
+        501, 1_000,
     ];
     let mut state = 0x6d2b_79f5u32;
 
@@ -251,7 +243,9 @@ fn randomized_scheduler_matrix_is_total_deterministic_and_12bit() {
         let pcm = lane_pcm(frames, channels);
         let result = std::panic::catch_unwind(|| generate(&pcm, sample_rate, channels, peak_rate));
         let bytes = result.unwrap_or_else(|_| {
-            panic!("panic case={case} sr={sample_rate} pps={peak_rate} ch={channels} frames={frames}")
+            panic!(
+                "panic case={case} sr={sample_rate} pps={peak_rate} ch={channels} frames={frames}"
+            )
         });
         let parsed = ReaPeaks::parse(bytes.clone()).unwrap_or_else(|error| {
             panic!("parse case={case} sr={sample_rate} pps={peak_rate} ch={channels} frames={frames}: {error}")
@@ -288,17 +282,9 @@ fn completed_spectrogram_prefix_is_stable_under_zero_tail_extension() {
         let base_frames = divisions[1] as usize * 4 + divisions[0] as usize / 2 + 17;
         let short_pcm = lane_pcm(base_frames, channels);
         let mut long_pcm = short_pcm.clone();
-        long_pcm.resize(
-            (base_frames + divisions[1] as usize + 113) * channels,
-            0,
-        );
-        let short = ReaPeaks::parse(generate(
-            &short_pcm,
-            sample_rate,
-            channels,
-            peak_rate,
-        ))
-        .expect("parse short cache");
+        long_pcm.resize((base_frames + divisions[1] as usize + 113) * channels, 0);
+        let short = ReaPeaks::parse(generate(&short_pcm, sample_rate, channels, peak_rate))
+            .expect("parse short cache");
         let long = ReaPeaks::parse(generate(&long_pcm, sample_rate, channels, peak_rate))
             .expect("parse extended cache");
 
@@ -340,12 +326,10 @@ fn many_nested_spectrogram_levels_remain_parseable_and_bounded() {
     assert_eq!(parsed.spectrogram_layers.len(), options.divisions.len() - 1);
     for layer in parsed.spectrogram_layers {
         assert_eq!(layer.frames.len() % channels, 0);
-        assert!(
-            layer
-                .frames
-                .iter()
-                .all(|frame| frame.bins.iter().all(|&bin| bin <= 0x0fff))
-        );
+        assert!(layer
+            .frames
+            .iter()
+            .all(|frame| frame.bins.iter().all(|&bin| bin <= 0x0fff)));
     }
 }
 
@@ -383,7 +367,10 @@ fn hostile_spectrogram_header_mutations_fail_without_panicking() {
         mutated[4] = channels_byte;
         let result = std::panic::catch_unwind(|| ReaPeaks::parse(mutated));
         assert!(result.is_ok(), "parser panicked channels={channels_byte}");
-        assert!(result.unwrap().is_err(), "accepted channels={channels_byte}");
+        assert!(
+            result.unwrap().is_err(),
+            "accepted channels={channels_byte}"
+        );
     }
 
     let mut zero_rate = valid.clone();
