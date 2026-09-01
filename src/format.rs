@@ -1,4 +1,8 @@
 use crate::error::{ReaPeaksError, Result};
+use crate::spectrogram::{
+    decode_spectrogram_frame, SpectrogramLayer, SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
+    SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+};
 use crate::wave::PeakPair;
 use std::fs;
 use std::path::Path;
@@ -132,6 +136,7 @@ pub struct ReaPeaks {
     pub layer_headers: Vec<LayerHeader>,
     pub wave_layers: Vec<WaveLayer>,
     pub spectral_layers: Vec<SpectralLayer>,
+    pub spectrogram_layers: Vec<SpectrogramLayer>,
     pub loudness_layers: Vec<LoudnessLayer>,
     pub raw: Vec<u8>,
 }
@@ -165,7 +170,9 @@ fn layer_payload_size(version: Version, h: LayerHeader, channels: usize) -> Opti
             Version::Rpkn | Version::Rpkl => n.checked_mul(channels)?.checked_mul(4),
         },
         LayerKind::Spectral => n.checked_mul(channels)?.checked_mul(4),
-        LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(192),
+        // REAPER's -'g' header count is a number of 32-bit words per channel.
+        // One spectrogram time record is 48 words = 192 bytes per channel.
+        LayerKind::Spectrogram => n.checked_mul(channels)?.checked_mul(4),
         // The -'r' header count is the number of f32 values per channel. Each
         // time record stores momentary and short-term energy, so the count is
         // twice the number of records.
@@ -226,9 +233,11 @@ impl ReaPeaks {
             .filter_map(|h| (h.division > 0).then_some(h.division as u32))
             .collect();
         let mut spectral_index = 0usize;
+        let mut spectrogram_index = 0usize;
         let mut loudness_index = 0usize;
         let mut wave_layers = Vec::new();
         let mut spectral_layers = Vec::new();
+        let mut spectrogram_layers = Vec::new();
         let mut loudness_layers = Vec::new();
 
         for (idx, h) in hs.iter().copied().enumerate() {
@@ -306,13 +315,56 @@ impl ReaPeaks {
                     spectral_index += 1;
                 }
                 LayerKind::Spectrogram => {
+                    let word_count = h.peak_count as usize;
+                    if word_count % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME != 0 {
+                        return Err(ReaPeaksError::InvalidHeader(
+                            "spectrogram word count must be divisible by 48",
+                        ));
+                    }
                     let size = layer_payload_size(version, h, channels_usize)
-                        .ok_or(ReaPeaksError::Unsupported("spectrogram layout"))?;
+                        .ok_or(ReaPeaksError::InvalidHeader(
+                            "spectrogram size overflow",
+                        ))?;
                     let end = checked_end(off, size)?;
                     if end > raw.len() {
                         return Err(ReaPeaksError::Truncated);
                     }
+                    let wave_index = spectrogram_index
+                        .checked_add(1)
+                        .ok_or(ReaPeaksError::InvalidHeader(
+                            "spectrogram layer index overflow",
+                        ))?;
+                    let mirrored_division = positive_divs.get(wave_index).copied().ok_or(
+                        ReaPeaksError::InvalidHeader(
+                            "spectrogram layer without matching waveform layer",
+                        ),
+                    )?;
+                    let record_count = word_count / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME;
+                    let value_count = record_count.checked_mul(channels_usize).ok_or(
+                        ReaPeaksError::InvalidHeader("spectrogram frame count overflow"),
+                    )?;
+                    let mut frames = Vec::with_capacity(value_count);
+                    for value_index in 0..value_count {
+                        let position = off
+                            .checked_add(
+                                value_index
+                                    .checked_mul(SPECTROGRAM_BYTES_PER_CHANNEL_FRAME)
+                                    .ok_or(ReaPeaksError::InvalidHeader(
+                                        "spectrogram frame offset overflow",
+                                    ))?,
+                            )
+                            .ok_or(ReaPeaksError::InvalidHeader(
+                                "spectrogram frame offset overflow",
+                            ))?;
+                        let frame_end = checked_end(position, SPECTROGRAM_BYTES_PER_CHANNEL_FRAME)?;
+                        frames.push(decode_spectrogram_frame(&raw[position..frame_end])?);
+                    }
                     off = end;
+                    spectrogram_layers.push(SpectrogramLayer {
+                        mirrored_division,
+                        frames,
+                    });
+                    spectrogram_index += 1;
                 }
                 LayerKind::Loudness => {
                     if h.peak_count % 2 != 0 {
@@ -399,6 +451,7 @@ impl ReaPeaks {
             layer_headers: hs,
             wave_layers,
             spectral_layers,
+            spectrogram_layers,
             loudness_layers,
             raw,
         })
@@ -438,6 +491,13 @@ pub fn encode(
         if layer.header.division == TOKEN_LOUDNESS && layer.header.peak_count % 2 != 0 {
             return Err(ReaPeaksError::InvalidArgument(
                 "loudness value count must be even",
+            ));
+        }
+        if layer.header.division == TOKEN_SPECTROGRAM
+            && layer.header.peak_count as usize % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME != 0
+        {
+            return Err(ReaPeaksError::InvalidArgument(
+                "spectrogram word count must be divisible by 48",
             ));
         }
         if let Some(expected) = layer_payload_size(version, layer.header, channels as usize) {
