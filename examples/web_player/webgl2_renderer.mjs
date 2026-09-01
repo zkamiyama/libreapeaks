@@ -1,4 +1,5 @@
 const PAGE_RECORDS = 512;
+const TARGET_PAGE_BYTES = 256 * 1024;
 
 export function nearestLevel(levels, desiredDivision) {
   if (!Array.isArray(levels) || levels.length === 0) return null;
@@ -17,6 +18,21 @@ export function nearestLevel(levels, desiredDivision) {
   return best;
 }
 
+export function pageRecordsForLayer(
+  layer,
+  channels,
+  maximum = PAGE_RECORDS,
+  targetBytes = TARGET_PAGE_BYTES,
+) {
+  const maxPage = Math.max(64, Number(maximum) | 0);
+  const bytesPerChannel = Math.max(1, Number(layer?.bytes_per_channel_record) | 0);
+  const bytesPerRecord = Math.max(1, Number(channels) | 0) * bytesPerChannel;
+  const budgetRecords = Math.max(1, Math.floor(Math.max(1, Number(targetBytes)) / bytesPerRecord));
+  let page = 64;
+  while (page * 2 <= maxPage && page * 2 <= budgetRecords) page *= 2;
+  return Math.min(maxPage, page);
+}
+
 export function pageWindow(viewStart, viewEnd, division, totalRecords, pageRecords = PAGE_RECORDS) {
   const div = Math.max(1, Math.floor(Number(division) || 1));
   const total = Math.max(0, Math.floor(Number(totalRecords) || 0));
@@ -25,7 +41,7 @@ export function pageWindow(viewStart, viewEnd, division, totalRecords, pageRecor
   const firstNeeded = Math.max(0, Math.floor(Number(viewStart) / div) - 2);
   const lastNeeded = Math.min(total, Math.ceil(Number(viewEnd) / div) + 3);
   const first = Math.floor(firstNeeded / page) * page;
-  const minimumEnd = Math.min(total, first + page * 2);
+  const minimumEnd = Math.min(total, first + page);
   const last = Math.min(total, Math.max(minimumEnd, Math.ceil(lastNeeded / page) * page));
   return {first, count: Math.max(1, last - first)};
 }
@@ -40,7 +56,10 @@ export function textureShape(kind, records, channels, bytesPerChannel) {
   }
   if (kind === 'spectrogram') {
     if (bytesPerChannel !== 192) throw new Error(`unexpected spectrogram record size ${bytesPerChannel}`);
-    return {width: 192, height: records * channels, components: 1, type: 'u8'};
+    // `.reapeaks` is time-major, then channel-inner. One texture row is one
+    // time record, so this upload is byte-for-byte contiguous and avoids a
+    // records*channels texture height that can exceed MAX_TEXTURE_SIZE on 8ch.
+    return {width: 192 * channels, height: records, components: 1, type: 'u8'};
   }
   if (kind === 'loudness') {
     if (bytesPerChannel !== 8) throw new Error(`unexpected loudness record size ${bytesPerChannel}`);
@@ -140,12 +159,11 @@ vec3 heat(float t) {
 }
 
 uint unpackG(int record, int channel, int bin) {
-    int row = record * u_channels + channel;
     int pair = bin >> 1;
-    int x = pair * 3;
-    uint b0 = texelFetch(u_g, ivec2(x, row), 0).r;
-    uint b1 = texelFetch(u_g, ivec2(x + 1, row), 0).r;
-    uint b2 = texelFetch(u_g, ivec2(x + 2, row), 0).r;
+    int x = channel * 192 + pair * 3;
+    uint b0 = texelFetch(u_g, ivec2(x, record), 0).r;
+    uint b1 = texelFetch(u_g, ivec2(x + 1, record), 0).r;
+    uint b2 = texelFetch(u_g, ivec2(x + 2, record), 0).r;
     return (bin & 1) == 0
         ? ((b0 << 4u) | (b1 >> 4u))
         : ((b2 << 4u) | (b1 & 15u));
@@ -284,6 +302,7 @@ export class WebGL2PackedRenderer {
       powerPreference: 'high-performance',
     });
     if (!this.gl) throw new Error('WebGL2 is not available in this browser');
+    this.maxTextureSize = Number(this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE));
     this.program = linkProgram(this.gl);
     this.vao = this.gl.createVertexArray();
     if (!this.vao) throw new Error('WebGL2 VAO allocation failed');
@@ -331,7 +350,8 @@ export class WebGL2PackedRenderer {
 
   async fetchWindow(kind, choice, viewStart, viewEnd, signal) {
     if (!choice) return null;
-    const window = pageWindow(viewStart, viewEnd, choice.division, choice.record_count, this.pageRecords);
+    const pageRecords = pageRecordsForLayer(choice, this.meta.channels, this.pageRecords);
+    const window = pageWindow(viewStart, viewEnd, choice.division, choice.record_count, pageRecords);
     if (!window.count) return null;
     const key = `${choice.layer_index}:${window.first}:${window.count}`;
     const current = this.uploads.get(kind);
@@ -368,7 +388,12 @@ export class WebGL2PackedRenderer {
 
   uploadTexture(kind, records, channels, bytesPerChannel, raw) {
     const gl = this.gl;
-    textureShape(kind, records, channels, bytesPerChannel);
+    const shape = textureShape(kind, records, channels, bytesPerChannel);
+    if (shape.width > this.maxTextureSize || shape.height > this.maxTextureSize) {
+      throw new Error(
+        `${kind} texture ${shape.width}x${shape.height} exceeds WebGL2 MAX_TEXTURE_SIZE=${this.maxTextureSize}`,
+      );
+    }
     const texture = gl.createTexture();
     if (!texture) throw new Error(`cannot create ${kind} WebGL2 texture`);
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -377,9 +402,9 @@ export class WebGL2PackedRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (kind === 'waveform' || kind === 'spectral') {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8UI, channels, records, 0, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, raw);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8UI, shape.width, shape.height, 0, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, raw);
     } else if (kind === 'spectrogram') {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, 192, records * channels, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, raw);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, shape.width, shape.height, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, raw);
     } else if (kind === 'loudness') {
       let floats;
       if (this.littleEndian && raw.byteOffset % 4 === 0) {
@@ -389,7 +414,7 @@ export class WebGL2PackedRenderer {
         const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
         for (let i = 0; i < floats.length; i++) floats[i] = view.getFloat32(i * 4, true);
       }
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, channels, records, 0, gl.RG, gl.FLOAT, floats);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, shape.width, shape.height, 0, gl.RG, gl.FLOAT, floats);
     }
     gl.bindTexture(gl.TEXTURE_2D, null);
     return texture;
@@ -528,7 +553,7 @@ export class WebGL2PackedRenderer {
     const resident = [...this.uploads.entries()].map(([kind, u]) => `${kind}:${u.layerIndex}@${u.first}+${u.records}`).join(', ');
     const mib = this.uploadBytes / (1024 * 1024);
     const timer = this.timerExt ? `${this.gpuMs.toFixed(3)}ms` : 'n/a';
-    return `WebGL2 packed cpu=${this.cpuSubmitMs.toFixed(3)}ms gpu=${timer} | last fetch=${this.lastFetchMs.toFixed(3)}ms upload=${this.lastUploadMs.toFixed(3)}ms | uploads=${this.uploadCount} ${mib.toFixed(2)}MiB | resident [${resident || 'none'}]`;
+    return `WebGL2 packed cpu=${this.cpuSubmitMs.toFixed(3)}ms gpu=${timer} | last fetch=${this.lastFetchMs.toFixed(3)}ms upload=${this.lastUploadMs.toFixed(3)}ms | uploads=${this.uploadCount} ${mib.toFixed(2)}MiB | maxTex=${this.maxTextureSize} | resident [${resident || 'none'}]`;
   }
 
   dispose() {
