@@ -91,7 +91,9 @@ jobs:
           print('WEBGL2_META', json.dumps({k: len(v) for k, v in layers.items()}, sort_keys=True))
           PY
       - name: Run real WebGL2 shader and interaction benchmark
+        shell: bash
         run: |
+          set -euo pipefail
           python examples/web_player/benchmark_webgl2.py http://127.0.0.1:8765/ \
             | tee /tmp/webgl2-browser-bench.txt
           grep -Fq 'WEBGL2_BROWSER_BENCH ' /tmp/webgl2-browser-bench.txt
