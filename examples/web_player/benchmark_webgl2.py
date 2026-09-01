@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 
 from selenium import webdriver
 from selenium.webdriver.support.ui import WebDriverWait
+
+
+def upload_count(text: str) -> int:
+    match = re.search(r"\buploads=(\d+)\b", text)
+    if not match:
+        raise RuntimeError(f"renderer diagnostics missing upload count: {text!r}")
+    return int(match.group(1))
 
 
 def main() -> int:
@@ -41,6 +49,8 @@ def main() -> int:
         )
 
         initial = driver.find_element("id", "rendererInfo").text
+        initial_uploads = upload_count(initial)
+
         # Uniform-only stress: gain, heatmap and vertical full-scale should not
         # cause raw record network traffic once the current windows are resident.
         uniform_start = time.perf_counter()
@@ -66,9 +76,20 @@ def main() -> int:
                 -120 if index % 2 == 0 else 120,
             )
         uniform_seconds = time.perf_counter() - uniform_start
+        time.sleep(0.2)
+        uniform_diagnostics = driver.find_element("id", "rendererInfo").text
+        uniform_uploads = upload_count(uniform_diagnostics)
+        if uniform_uploads != initial_uploads:
+            raise RuntimeError(
+                "uniform-only controls unexpectedly uploaded raw records: "
+                f"{initial_uploads} -> {uniform_uploads}"
+            )
 
-        # Paged stress: horizontal wheel zoom and pan-like wheel bursts exercise
-        # raw record window selection, HTTP transfer and texture replacement.
+        # Only count raw endpoint traffic caused by horizontal viewport changes.
+        driver.execute_script("performance.clearResourceTimings()")
+
+        # Paged stress: horizontal wheel zoom bursts exercise raw record window
+        # selection, HTTP transfer and texture replacement.
         paged_start = time.perf_counter()
         for index in range(18):
             driver.execute_script(
@@ -88,6 +109,18 @@ def main() -> int:
         time.sleep(0.8)
 
         diagnostics = driver.find_element("id", "rendererInfo").text
+        resource_stats = driver.execute_script(
+            """
+            const rows = performance.getEntriesByType('resource')
+              .filter(e => e.name.includes('/api/gpu-records'));
+            return {
+              requests: rows.length,
+              encoded_body_bytes: rows.reduce((n, e) => n + (e.encodedBodySize || 0), 0),
+              transferred_bytes: rows.reduce((n, e) => n + (e.transferSize || 0), 0),
+              duration_ms: rows.reduce((n, e) => n + (e.duration || 0), 0),
+            };
+            """
+        )
         info = driver.execute_script(
             """
             const canvas = document.getElementById('analysisGl');
@@ -100,6 +133,7 @@ def main() -> int:
               vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
               version: gl.getParameter(gl.VERSION),
               timer_query: !!gl.getExtension('EXT_disjoint_timer_query_webgl2'),
+              max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE),
               width: canvas.width,
               height: canvas.height,
               backend: document.documentElement.dataset.renderer,
@@ -111,13 +145,18 @@ def main() -> int:
             row
             for row in driver.get_log("browser")
             if row.get("level") in {"SEVERE", "ERROR"}
+            and "/favicon.ico" not in row.get("message", "")
         ]
         result = {
             **info,
             "initial": initial,
+            "initial_uploads": initial_uploads,
+            "uniform_diagnostics": uniform_diagnostics,
+            "uniform_uploads": uniform_uploads,
             "diagnostics": diagnostics,
             "uniform_stress_ms": uniform_seconds * 1000.0,
             "paged_stress_ms": paged_seconds * 1000.0,
+            "paged_raw_resources": resource_stats,
             "browser_errors": errors,
         }
         print("WEBGL2_BROWSER_BENCH " + json.dumps(result, sort_keys=True))
