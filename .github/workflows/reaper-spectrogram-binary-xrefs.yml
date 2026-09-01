@@ -1,0 +1,124 @@
+name: reaper-spectrogram-binary-xrefs
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/reaper-spectrogram-binary-xrefs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xrefs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-xrefs
+          mkdir -p "$root/reaper" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/reaper-xrefs/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Disassemble and locate spectrogram constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-xrefs/results
+          readelf -W -S "$REAPER_BIN" > "$root/sections.txt"
+          objdump -d -Mintel "$REAPER_BIN" > "$root/disasm.txt"
+          nm -D "$REAPER_BIN" > "$root/dynamic-symbols.txt" || true
+          strings -a -t x "$REAPER_BIN" | grep -Ei 'spectro|peakcache|fft|blackman|harris' > "$root/interesting-strings.txt" || true
+          REAPER_BIN="$REAPER_BIN" python - <<'PY' | tee "$root/report.txt"
+          from pathlib import Path
+          import os, re, struct
+
+          binary = Path(os.environ['REAPER_BIN'])
+          results = Path('/tmp/reaper-xrefs/results')
+          data = binary.read_bytes()
+          sections_text = (results / 'sections.txt').read_text(errors='replace')
+          dis_lines = (results / 'disasm.txt').read_text(errors='replace').splitlines()
+
+          sections = []
+          # readelf -SW columns: [Nr] Name Type Address Off Size ...
+          for line in sections_text.splitlines():
+              m = re.match(r'\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)', line)
+              if m:
+                  name, addr, off, size = m.groups()
+                  sections.append((name, int(addr, 16), int(off, 16), int(size, 16)))
+
+          constants = [
+              ('BH_A0', 0.35875),
+              ('BH_A1', 0.48829),
+              ('BH_A2', 0.14128),
+              ('BH_A3', 0.01168),
+              ('CODE_MAX', 4095.0),
+              ('CODES_PER_DECADE', 409.5),
+              ('PCM_SCALE', 1.0 / 32768.0),
+              ('FFT_SCALE_HALF', 0.5),
+          ]
+
+          def fileoff_to_va(off):
+              for name, addr, sec_off, size in sections:
+                  if sec_off <= off < sec_off + size:
+                      return name, addr + (off - sec_off)
+              return None, None
+
+          def xrefs_to(target):
+              refs = []
+              target_hex = f'{target:x}'
+              for idx, line in enumerate(dis_lines):
+                  # GNU objdump annotates resolved RIP-relative addresses after '#'.
+                  m = re.search(r'#\s*([0-9a-fA-F]+)', line)
+                  if m and int(m.group(1), 16) == target:
+                      refs.append(idx)
+              return refs
+
+          for name, value in constants:
+              print(f'CONSTANT {name} value={value!r}')
+              for fmt in ('<d', '<f'):
+                  raw = struct.pack(fmt, value)
+                  label = 'f64' if fmt == '<d' else 'f32'
+                  offsets = []
+                  pos = 0
+                  while True:
+                      pos = data.find(raw, pos)
+                      if pos < 0:
+                          break
+                      offsets.append(pos)
+                      pos += 1
+                  print(f'  {label} offsets={[hex(x) for x in offsets[:50]]} count={len(offsets)}')
+                  for off in offsets[:20]:
+                      section, va = fileoff_to_va(off)
+                      print(f'    off=0x{off:x} section={section} va={None if va is None else hex(va)}')
+                      if va is None:
+                          continue
+                      refs = xrefs_to(va)
+                      print(f'      xrefs={len(refs)}')
+                      for ref_index in refs[:12]:
+                          lo = max(0, ref_index - 10)
+                          hi = min(len(dis_lines), ref_index + 11)
+                          print('      --- xref context ---')
+                          for row in dis_lines[lo:hi]:
+                              print('      ' + row)
+          PY
+          cat "$root/report.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload binary xref evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-binary-xrefs-${{ github.sha }}
+          path: /tmp/reaper-xrefs/results
+          if-no-files-found: error
+          retention-days: 7
