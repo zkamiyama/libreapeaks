@@ -16,6 +16,13 @@ enum {
   RPK_WAVE_ENCODING_RPKL = 2
 };
 
+/* REAPER 7.79-native peak-cache shapes observed by the live oracle. */
+enum {
+  RPK_REAPER_PEAK_MODE_WAVEFORM = 0,
+  RPK_REAPER_PEAK_MODE_SPECTRAL = 1,
+  RPK_REAPER_PEAK_MODE_SPECTROGRAM = 2
+};
+
 typedef struct RpkBuffer {
   uint8_t *data;
   size_t len;
@@ -85,19 +92,47 @@ int32_t rpk_default_divisions(uint32_t sample_rate,
                               uint32_t fine_peaks_per_second,
                               uint32_t out_divisions[3]);
 
-/* RPKN generator for decoded PCM16. */
+/* Legacy RPKN generator: waveform plus optional -'s' spectral layers. */
 int32_t rpk_generate_pcm16(const int16_t *pcm, size_t frames, size_t channels,
                            uint32_t sample_rate, const uint32_t *divisions,
                            size_t division_count, uint32_t source_mtime_low32,
                            uint32_t source_size_low32, uint8_t spectral,
                            RpkBuffer *out);
 
-/* Float generator. large_range=1 writes RPKL; 0 writes RPKN. */
+/* Legacy float generator. large_range=1 writes RPKL; 0 writes RPKN. */
 int32_t rpk_generate_f32(const float *pcm, size_t frames, size_t channels,
                          uint32_t sample_rate, const uint32_t *divisions,
                          size_t division_count, uint32_t source_mtime_low32,
                          uint32_t source_size_low32, uint8_t large_range,
                          uint8_t spectral, RpkBuffer *out);
+
+/*
+ * Generate one of REAPER 7.79's observed native cache shapes in one call:
+ *   WAVEFORM    -> waveform only
+ *   SPECTRAL    -> waveform + -'s' spectral + -'r' loudness
+ *   SPECTROGRAM -> waveform + -'s' + -'g' spectrogram + -'r'
+ * No s-only/g-only/r-only shape was observed in the live oracle.
+ */
+int32_t rpk_generate_pcm16_reaper(const int16_t *pcm, size_t frames,
+                                  size_t channels, uint32_t sample_rate,
+                                  const uint32_t *divisions,
+                                  size_t division_count,
+                                  uint32_t source_mtime_low32,
+                                  uint32_t source_size_low32, uint8_t mode,
+                                  RpkBuffer *out);
+
+/*
+ * Float REAPER modes support WAVEFORM and SPECTRAL. SPECTROGRAM returns -2
+ * until exact float32 -'g' generation is implemented.
+ */
+int32_t rpk_generate_f32_reaper(const float *pcm, size_t frames,
+                                size_t channels, uint32_t sample_rate,
+                                const uint32_t *divisions,
+                                size_t division_count,
+                                uint32_t source_mtime_low32,
+                                uint32_t source_size_low32,
+                                uint8_t large_range, uint8_t mode,
+                                RpkBuffer *out);
 
 void rpk_buffer_free(RpkBuffer *buf);
 
