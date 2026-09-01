@@ -49,6 +49,31 @@ pub fn decode_spectrogram_frame(bytes: &[u8]) -> Result<SpectrogramFrame> {
     Ok(SpectrogramFrame { bins })
 }
 
+/// Encode one REAPER spectrogram channel frame.
+///
+/// This is the exact inverse of [`decode_spectrogram_frame`]. Each bin must
+/// already fit in the on-disk 12-bit range; values above 4095 are rejected
+/// rather than silently truncated.
+pub fn encode_spectrogram_frame(
+    frame: &SpectrogramFrame,
+) -> Result<[u8; SPECTROGRAM_BYTES_PER_CHANNEL_FRAME]> {
+    let mut out = [0u8; SPECTROGRAM_BYTES_PER_CHANNEL_FRAME];
+    for pair in 0..(SPECTROGRAM_BINS / 2) {
+        let first = frame.bins[pair * 2];
+        let second = frame.bins[pair * 2 + 1];
+        if first > 0x0fff || second > 0x0fff {
+            return Err(ReaPeaksError::InvalidArgument(
+                "spectrogram bins must fit in 12 bits",
+            ));
+        }
+        let offset = pair * 3;
+        out[offset] = (first >> 4) as u8;
+        out[offset + 1] = (((first & 0x0f) << 4) | (second & 0x0f)) as u8;
+        out[offset + 2] = (second >> 4) as u8;
+    }
+    Ok(out)
+}
+
 fn checked_end(offset: usize, size: usize) -> Result<usize> {
     offset.checked_add(size).ok_or(ReaPeaksError::InvalidHeader(
         "spectrogram layer offset overflow",

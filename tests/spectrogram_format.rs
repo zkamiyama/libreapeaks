@@ -1,19 +1,7 @@
 use reapeaks::{
-    decode_spectrogram_frame, parse_spectrogram_layers, ReaPeaks, ReaPeaksError, SPECTROGRAM_BINS,
-    SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+    decode_spectrogram_frame, encode_spectrogram_frame, parse_spectrogram_layers, ReaPeaks,
+    ReaPeaksError, SpectrogramFrame, SPECTROGRAM_BINS, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
 };
-
-fn encode_frame(bins: &[u16; SPECTROGRAM_BINS]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SPECTROGRAM_BYTES_PER_CHANNEL_FRAME);
-    for pair in 0..(SPECTROGRAM_BINS / 2) {
-        let first = bins[pair * 2] & 0x0fff;
-        let second = bins[pair * 2 + 1] & 0x0fff;
-        out.push((first >> 4) as u8);
-        out.push((((first & 0x0f) << 4) | (second & 0x0f)) as u8);
-        out.push((second >> 4) as u8);
-    }
-    out
-}
 
 fn synthetic_file(first_g_count: u32, truncate: usize) -> Vec<u8> {
     let channels = 2u8;
@@ -48,7 +36,8 @@ fn synthetic_file(first_g_count: u32, truncate: usize) -> Vec<u8> {
             for (bin_index, value) in bins.iter_mut().enumerate() {
                 *value = ((frame_index * 1000 + channel * 100 + bin_index) & 0x0fff) as u16;
             }
-            out.extend_from_slice(&encode_frame(&bins));
+            let raw = encode_spectrogram_frame(&SpectrogramFrame { bins }).unwrap();
+            out.extend_from_slice(&raw);
         }
     }
     for channel in 0..2usize {
@@ -56,7 +45,8 @@ fn synthetic_file(first_g_count: u32, truncate: usize) -> Vec<u8> {
         for (bin_index, value) in bins.iter_mut().enumerate() {
             *value = ((3000 + channel * 100 + bin_index) & 0x0fff) as u16;
         }
-        out.extend_from_slice(&encode_frame(&bins));
+        let raw = encode_spectrogram_frame(&SpectrogramFrame { bins }).unwrap();
+        out.extend_from_slice(&raw);
     }
 
     out.truncate(out.len().saturating_sub(truncate));
@@ -64,7 +54,7 @@ fn synthetic_file(first_g_count: u32, truncate: usize) -> Vec<u8> {
 }
 
 #[test]
-fn decodes_official_12bit_pair_packing() {
+fn encodes_and_decodes_official_12bit_pair_packing() {
     let mut expected = [0u16; SPECTROGRAM_BINS];
     for (index, value) in expected.iter_mut().enumerate() {
         *value = match index % 8 {
@@ -78,10 +68,24 @@ fn decodes_official_12bit_pair_packing() {
             _ => 4095,
         };
     }
-    let raw = encode_frame(&expected);
+    let raw = encode_spectrogram_frame(&SpectrogramFrame { bins: expected }).unwrap();
     assert_eq!(raw.len(), 192);
     let decoded = decode_spectrogram_frame(&raw).unwrap();
     assert_eq!(decoded.bins, expected);
+
+    let mut pair = [0u16; SPECTROGRAM_BINS];
+    pair[0] = 0x0abc;
+    pair[1] = 0x0def;
+    let raw = encode_spectrogram_frame(&SpectrogramFrame { bins: pair }).unwrap();
+    assert_eq!(&raw[..3], &[0xab, 0xcf, 0xde]);
+}
+
+#[test]
+fn encoder_rejects_spectrogram_bin_above_12_bits() {
+    let mut bins = [0u16; SPECTROGRAM_BINS];
+    bins[17] = 4096;
+    let err = encode_spectrogram_frame(&SpectrogramFrame { bins }).unwrap_err();
+    assert!(matches!(err, ReaPeaksError::InvalidArgument(_)));
 }
 
 #[test]
