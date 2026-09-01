@@ -166,7 +166,19 @@ fn quantize_power(power: f64) -> u16 {
 }
 
 fn analysis_shift(fine_division: u32) -> i64 {
-    (i64::from(fine_division) - FFT_SIZE as i64) / 2
+    let fine_division = i64::from(fine_division);
+    if fine_division >= FFT_SIZE as i64 {
+        // Once the base division is at least one FFT window, REAPER right-aligns
+        // the 256-sample analysis window to the base boundary. At 96 kHz the
+        // recovered 320-sample division therefore starts at +64 and ends at
+        // sample 320. This phase is required for off-bin low-frequency tones.
+        fine_division - FFT_SIZE as i64
+    } else {
+        // For overlapping base windows REAPER centers the analysis window on
+        // the division boundary; negative integer division truncates toward 0,
+        // matching the 44.1/32/48 kHz oracle boundaries.
+        (fine_division - FFT_SIZE as i64) / 2
+    }
 }
 
 fn base_frame_count(frames: usize, fine_division: u32) -> Result<usize> {
@@ -210,15 +222,7 @@ fn validate_divisions(divisions: &[u32]) -> Result<Vec<usize>> {
 fn time_counts(frames: usize, divisions: &[u32]) -> Result<Vec<usize>> {
     let ratios = validate_divisions(divisions)?;
     let base_count = base_frame_count(frames, divisions[0])?;
-    let first_count = if analysis_shift(divisions[0]) >= 0 {
-        let first_boundary = divisions[0] as usize;
-        let cadence = divisions[1] as usize;
-        if frames < first_boundary {
-            0
-        } else {
-            1 + (frames - first_boundary) / cadence
-        }
-    } else if base_count == 0 {
+    let first_count = if base_count == 0 {
         0
     } else {
         1 + (base_count - 1) / ratios[0]
@@ -362,21 +366,10 @@ pub(crate) fn build_spectrogram_layers_pcm16(
             ))?;
     let mut current_frames = Vec::with_capacity(first_capacity);
     let first_ratio = ratios[0];
-    let nonnegative_shift = analysis_shift(divisions[0]) >= 0;
     for time_frame in 0..first_count {
-        let (first_base, last_base) = if nonnegative_shift {
-            if time_frame == 0 {
-                (0, 1.min(base_count))
-            } else {
-                let first = 1 + (time_frame - 1) * first_ratio;
-                (first, (first + first_ratio).min(base_count))
-            }
-        } else {
-            let first = time_frame * first_ratio;
-            (first, (first + first_ratio).min(base_count))
-        };
+        let first_base = time_frame * first_ratio;
+        let last_base = (first_base + first_ratio).min(base_count);
         let actual_count = last_base - first_base;
-        debug_assert!(actual_count > 0);
         for channel in 0..channels {
             let mut sums = [0u64; SPECTROGRAM_BINS];
             for base_index in first_base..last_base {
@@ -463,6 +456,7 @@ mod tests {
         assert_eq!(time_counts(30_709, &d32).unwrap(), vec![19, 1]);
 
         let d96 = [320, 4_800, 96_000];
+        assert_eq!(analysis_shift(d96[0]), 64);
         assert_eq!(time_counts(319, &d96).unwrap(), vec![0, 0]);
         assert_eq!(time_counts(320, &d96).unwrap(), vec![1, 0]);
         assert_eq!(time_counts(4_767, &d96).unwrap(), vec![1, 0]);
