@@ -120,47 +120,61 @@ Zero sample/peak rates and a null output pointer are rejected.
 
 ## Generation
 
+The legacy generation entry points remain available:
+
 ```text
 rpk_generate_pcm16
 rpk_generate_f32
 ```
 
-`rpk_generate_pcm16()` writes RPKN from decoded interleaved PCM16.
+They write waveform plus an optional `-'s'` spectral layer set. They are kept
+for compatibility with existing callers, but that optional-`s` shape is not one
+of the three complete cache shapes observed from REAPER 7.79's native peak
+modes.
 
-`rpk_generate_f32(..., large_range=0)` writes RPKN from decoded float samples,
-which is useful when integer media such as PCM24/PCM32/FLAC has been decoded to
-float.
-
-`rpk_generate_f32(..., large_range=1)` writes RPKL, the large-range waveform
-encoding observed for float media and several compressed formats in the tested
-REAPER 7.79 build.
-
-The `spectral` argument controls whether mirrored `-'s'` spectral layers are
-also generated.
-
-### Important mode-3 limitation
-
-The current C writer entry points call the legacy Rust generation surface:
+For new REAPER-oriented code, use:
 
 ```text
-generate_pcm16
-generate_f32
+rpk_generate_pcm16_reaper
+rpk_generate_f32_reaper
 ```
 
-They generate waveform plus optional spectral layers. They do **not** currently
-expose the Rust complete mode-3 functions:
+and one of the stable mode constants:
 
 ```text
-generate_pcm16_mode3
-generate_f32_mode3
+RPK_REAPER_PEAK_MODE_WAVEFORM
+RPK_REAPER_PEAK_MODE_SPECTRAL
+RPK_REAPER_PEAK_MODE_SPECTROGRAM
 ```
 
-Therefore the C ABI does not currently generate `-'r'` loudness layers, even
-though the Rust core can generate them and the Rust parser can read them.
+A fresh-process sweep of 71 `showpeaks` configurations in pinned REAPER 7.79
+x86_64 Linux, including the native actions `Peaks: Show normal peaks`, `Peaks:
+Toggle spectral peaks`, `Peaks: Toggle spectrogram`, and the LUFS display
+actions, produced only these three on-disk layer shapes:
 
-When byte-exact spectral behavior matters, build the library with
-`--features strict-wdl`. The pure Rust fallback spectral implementation is not
-the backend covered by the current byte-exact REAPER 7.79 spectral claim.
+```text
+WAVEFORM:
+  waveform
+
+SPECTRAL:
+  waveform + -'s' spectral + -'r' loudness
+
+SPECTROGRAM:
+  waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
+```
+
+No `-'s'`-only, `-'g'`-only, or `-'r'`-only file was observed, so the native
+mode API intentionally exposes a mode enum instead of independent layer bits.
+
+`rpk_generate_pcm16_reaper()` supports all three modes. The float32 entry point
+supports WAVEFORM and SPECTRAL with RPKN/RPKL selection via `large_range`.
+SPECTROGRAM currently returns `-2` for float32 because exact float32 `-'g'`
+generation has not been implemented; it is not silently converted through
+PCM16.
+
+When byte-exact `-'s'` behavior matters, build with `--features strict-wdl`.
+The PCM16 SPECTROGRAM mode uses the same strict-WDL-compatible `-'s'`, `-'r'`,
+and exact `-'g'` generation paths covered by the pinned whole-file oracles.
 
 ## Build
 

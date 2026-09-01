@@ -54,10 +54,64 @@ See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for the exact contract and
 [`docs/validation-summary.json`](docs/validation-summary.json) for the
 machine-readable validation summary.
 
+## REAPER-native generation modes
+
+REAPER 7.79 does **not** generate arbitrary independent `-'s'`, `-'g'`, and
+`-'r'` caches. A live fresh-process sweep of 71 `showpeaks` configurations,
+including REAPER's native normal/spectral/spectrogram/LUFS actions, produced
+exactly three cache shapes:
+
+```text
+waveform:
+  waveform only
+
+spectral:
+  waveform + -'s' spectral + -'r' loudness
+
+spectrogram:
+  waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
+```
+
+No `-'s'`-only, `-'g'`-only, or `-'r'`-only file was observed. For new callers,
+libreapeaks therefore exposes these as a **mode**, rather than as independent
+layer flags.
+
+Rust:
+
+```text
+ReaperPeakMode::{Waveform, Spectral, Spectrogram}
+generate_pcm16_reaper(...)
+generate_f32_reaper(...)
+```
+
+Python:
+
+```text
+REAPER_PEAK_MODE_WAVEFORM      = "waveform"
+REAPER_PEAK_MODE_SPECTRAL      = "spectral"
+REAPER_PEAK_MODE_SPECTROGRAM   = "spectrogram"
+generate_pcm16_reaper(..., mode)
+generate_f32_reaper(..., mode)
+```
+
+C:
+
+```text
+RPK_REAPER_PEAK_MODE_WAVEFORM
+RPK_REAPER_PEAK_MODE_SPECTRAL
+RPK_REAPER_PEAK_MODE_SPECTROGRAM
+rpk_generate_pcm16_reaper(...)
+rpk_generate_f32_reaper(...)
+```
+
+PCM16 supports all three modes. Float32 currently supports waveform and spectral
+modes; float32 spectrogram mode fails closed until exact float32 `-'g'`
+generation is implemented.
+
 ## Spectrogram (`-'g'`) support
 
-`-'g'` is now parsed, serialized, and generated natively for PCM16 mode-3
-caches. The Rust API exposes:
+`-'g'` is parsed, serialized, and generated natively for PCM16 mode-3 caches.
+The low-level Rust API exposes:
 
 ```text
 generate_pcm16_mode3_with_spectrogram(...)
@@ -98,12 +152,12 @@ frame count.
 | RPKM | Header/layout recognition; compact waveform payload is not exposed through the current waveform pyramid |
 | `-'s'` spectral peaks | Parse, generate, tile |
 | `-'g'` spectrogram | Parse, serialize, PCM16 mode-3 generate |
-| `-'r'` loudness | Parse; generate through Rust mode-3 APIs |
+| `-'r'` loudness | Parse and generate through REAPER-native mode APIs |
 | legacy `-'l'` loudness | Token recognized; payload layout not implemented |
 | REAPER-style divisions | `default_divisions(sample_rate, peakcachegenrs)` in Rust/Python/C |
 | GUI waveform pyramid | Native REAPER levels plus lazy ratio-4 display levels |
-| C ABI | Parsing, view planning, waveform/spectral textures/rendering and waveform/`-'s'` generation; no complete mode-3/`-'g'` writer entry point yet |
-| Python | Parsing/GUI APIs and waveform/`-'s'` generation; no complete mode-3/`-'g'` writer entry point yet |
+| C ABI | Native waveform / spectral (`s+r`) / PCM16 spectrogram (`s+g+r`) generation plus legacy APIs |
+| Python | Native waveform / spectral (`s+r`) / PCM16 spectrogram (`s+g+r`) generation plus legacy APIs |
 
 ## Rust generation entry points
 
@@ -127,7 +181,20 @@ gates:
 cargo test --release --features strict-wdl
 ```
 
-Generation entry points:
+Preferred REAPER-shaped entry points:
+
+```text
+generate_pcm16_reaper(..., ReaperPeakMode::Waveform)
+    waveform only
+
+generate_pcm16_reaper(..., ReaperPeakMode::Spectral)
+    waveform + -'s' spectral + -'r' loudness
+
+generate_pcm16_reaper(..., ReaperPeakMode::Spectrogram)
+    waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
+```
+
+The lower-level/legacy entry points remain available:
 
 ```text
 generate_pcm16 / generate_f32
@@ -140,10 +207,6 @@ generate_pcm16_mode3_with_spectrogram
     waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
 ```
 
-`GenerateOptions.spectral` controls the existing `-'s'` spectral path and must
-be `true` for the mode-3 entry points. Spectrogram generation is selected by the
-separate `generate_pcm16_mode3_with_spectrogram` function.
-
 ## Python
 
 The distribution name is `libreapeaks`; the import module is `reapeaks`.
@@ -152,11 +215,22 @@ The distribution name is `libreapeaks`; the import module is `reapeaks`.
 maturin develop --release
 python - <<'PY'
 import reapeaks
-print(reapeaks.default_divisions(48_000, 300))
+
+divisions = reapeaks.default_divisions(48_000, 300)
+print(divisions)
+
+# pcm16le is interleaved little-endian PCM16 bytes.
+cache = reapeaks.generate_pcm16_reaper(
+    pcm16le,
+    48_000,
+    2,
+    divisions,
+    reapeaks.REAPER_PEAK_MODE_SPECTROGRAM,
+)
 PY
 ```
 
-For 48 kHz / 300 peaks per second the result is:
+For 48 kHz / 300 peaks per second the divisions are:
 
 ```text
 [160, 2400, 48000]
@@ -197,9 +271,7 @@ generation:
 python examples/pyside6_player.py song.flac --cache-decoder ffmpeg
 ```
 
-The demos use fixed-size waveform/spectral tiles and frontend LRUs. Their public
-Python writer path still exposes waveform plus optional `-'s'` spectral layers;
-the complete mode-3 loudness/`-'g'` writer is currently a Rust API. See
+The demos use fixed-size waveform/spectral tiles and frontend LRUs. See
 [`examples/PLAYER_DEMOS.md`](examples/PLAYER_DEMOS.md).
 
 ## C / C++
@@ -211,9 +283,9 @@ cargo build --release --features strict-wdl
 ```
 
 The stable C ABI exposes parsing, zoom planning, tiled waveform/spectral
-textures, CPU RGBA rendering, REAPER-style divisions, and PCM16/f32
-waveform/`-'s'` generation. Returned `RpkBuffer` objects must be released with
-`rpk_buffer_free`. See [`docs/C_ABI.md`](docs/C_ABI.md).
+textures, CPU RGBA rendering, REAPER-style divisions, legacy writers, and the
+three observed native generation modes. Returned `RpkBuffer` objects must be
+released with `rpk_buffer_free`. See [`docs/C_ABI.md`](docs/C_ABI.md).
 
 ## Sharing REAPER's cache path
 

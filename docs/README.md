@@ -8,8 +8,9 @@ Read [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 It is the compatibility contract: which REAPER version/platform is used as the
 oracle, which complete-file cases are byte-identical, what waveform, `-'s'`
-spectral, `-'g'` spectrogram, and `-'r'` loudness behavior is covered, and which
-areas remain unproven or unsupported.
+spectral, `-'g'` spectrogram, and `-'r'` loudness behavior is covered, which
+native layer combinations REAPER actually emits, and which areas remain
+unproven or unsupported.
 
 Machine-readable validation metadata lives in
 [`validation-summary.json`](validation-summary.json).
@@ -37,6 +38,11 @@ PCM16 cases; strict-WDL output is complete-file byte-identical for all 122, and
 the portable/default FFT path is checked for exact `-'g'` output on the same
 matrix.
 
+A separate fresh-process oracle sweeps 71 REAPER `showpeaks` configurations and
+locks the three native cache shapes: waveform-only, waveform + `-'s'` + `-'r'`,
+and waveform + `-'s'` + `-'g'` + `-'r'`. No individual `s`/`g`/`r` cache was
+observed.
+
 ## I want to share a cache path with REAPER
 
 Read [`REAPER_CENTRAL_CACHE.md`](REAPER_CENTRAL_CACHE.md).
@@ -61,9 +67,10 @@ Read [`C_ABI.md`](C_ABI.md), then use
 [`../include/reapeaks.h`](../include/reapeaks.h) as the source of truth for the
 actual exported ABI.
 
-The complete recovered mode-3 loudness + `-'g'` spectrogram writer is currently
-a Rust API. C/Python generation still exposes waveform plus optional `-'s'`
-spectral layers.
+Rust, Python, and C now expose the same REAPER-oriented mode vocabulary:
+waveform, spectral (`wave + s + r`), and PCM16 spectrogram (`wave + s + g + r`).
+Float32 spectrogram generation remains unsupported until an exact float32
+`-'g'` implementation exists.
 
 ## Source-of-truth order
 
