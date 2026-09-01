@@ -1,10 +1,10 @@
 """Direct `.reapeaks` -> OpenGL renderer for the PySide6 demo.
 
-The important property of this path is that it does not build display RGBA on
-CPU. Waveform and `-'s'` bytes are uploaded as RGBA8UI, packed `-'g'` is uploaded
-verbatim as R8UI, and `-'r'` energy pairs are uploaded as RG32F. GLSL performs
-all byte decoding, 12-bit spectrogram unpacking, gain/palette transforms and
-analysis overlays at draw time.
+This path intentionally avoids CPU display conversion. Waveform and `-'s'`
+records are uploaded as RGBA8UI, packed `-'g'` frames remain their exact 192
+on-disk bytes and are uploaded as R8UI, and `-'r'` records are uploaded as
+RG32F. GLSL performs decoding, spectrogram unpacking, gain/palette transforms,
+overlays, playhead drawing, and a realtime GPU-residency debug strip.
 """
 from __future__ import annotations
 
@@ -13,8 +13,14 @@ import math
 import time
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QSurfaceFormat
-from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram, QOpenGLTexture, QOpenGLTimerQuery
+from PySide6.QtGui import QSurfaceFormat, QVector2D
+from PySide6.QtOpenGL import (
+    QOpenGLShader,
+    QOpenGLShaderProgram,
+    QOpenGLTexture,
+    QOpenGLTimerQuery,
+    QOpenGLVertexArrayObject,
+)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 import reapeaks
@@ -40,6 +46,8 @@ uniform int u_waveEncoding;
 uniform float u_verticalFs;
 uniform float u_specGain;
 uniform int u_heatmap;
+uniform float u_playhead;
+uniform float u_nyquist;
 
 uniform int u_hasWave;
 uniform usampler2D u_wave;
@@ -52,7 +60,6 @@ uniform usampler2D u_spectral;
 uniform float u_sRecord0;
 uniform float u_sRecordsAcross;
 uniform int u_sCount;
-uniform float u_nyquist;
 
 uniform int u_hasG;
 uniform usampler2D u_g;
@@ -66,6 +73,13 @@ uniform float u_rRecord0;
 uniform float u_rRecordsAcross;
 uniform int u_rCount;
 
+uniform int u_tileDebug;
+uniform vec2 u_viewGlobal;
+uniform vec2 u_waveResident;
+uniform vec2 u_sResident;
+uniform vec2 u_gResident;
+uniform vec2 u_rResident;
+
 int s16(uint lo, uint hi) {
     uint value = lo | (hi << 8u);
     return (value & 0x8000u) != 0u ? int(value) - 65536 : int(value);
@@ -77,7 +91,9 @@ float decodeWave(int code) {
     }
     bool neg = code < 0;
     float mag = float(abs(code));
-    float amp = mag <= 24576.0 ? mag / 24576.0 : exp2((mag - 24576.0) / 1024.0);
+    float amp = mag <= 24576.0
+        ? mag / 24576.0
+        : exp2((mag - 24576.0) / 1024.0);
     return neg ? -amp : amp;
 }
 
@@ -87,9 +103,7 @@ int recordAt(float record0, float across, int count) {
 
 vec3 heat(float t) {
     t = clamp(t, 0.0, 1.0);
-    if (u_heatmap == 0) {
-        return vec3(t);
-    }
+    if (u_heatmap == 0) return vec3(t);
     vec3 a = vec3(0.01, 0.01, 0.03);
     vec3 b = vec3(0.05, 0.18, 0.62);
     vec3 c = vec3(0.04, 0.85, 0.92);
@@ -108,21 +122,51 @@ uint unpackG(int record, int channel, int bin) {
     uint b0 = texelFetch(u_g, ivec2(x, row), 0).r;
     uint b1 = texelFetch(u_g, ivec2(x + 1, row), 0).r;
     uint b2 = texelFetch(u_g, ivec2(x + 2, row), 0).r;
-    return (bin & 1) == 0 ? ((b0 << 4u) | (b1 >> 4u))
-                          : ((b2 << 4u) | (b1 & 15u));
+    return (bin & 1) == 0
+        ? ((b0 << 4u) | (b1 >> 4u))
+        : ((b2 << 4u) | (b1 & 15u));
+}
+
+bool resident(vec2 range, float x) {
+    return range.y > range.x && x >= range.x && x <= range.y;
+}
+
+vec3 debugRow(int row, float x) {
+    vec2 r = row == 0 ? u_waveResident
+           : row == 1 ? u_sResident
+           : row == 2 ? u_gResident
+                      : u_rResident;
+    vec3 active = row == 0 ? vec3(0.30, 0.95, 0.56)
+                : row == 1 ? vec3(0.28, 0.62, 1.00)
+                : row == 2 ? vec3(0.95, 0.34, 0.90)
+                           : vec3(1.00, 0.58, 0.18);
+    vec3 base = resident(r, x) ? active : vec3(0.10, 0.11, 0.14);
+    if (x >= u_viewGlobal.x && x <= u_viewGlobal.y) {
+        base = mix(base, vec3(1.0), 0.20);
+    }
+    return base;
 }
 
 void main() {
+    if (u_tileDebug != 0 && v_uv.y < 0.080) {
+        int row = clamp(int(floor(v_uv.y / 0.020)), 0, 3);
+        fragColor = vec4(debugRow(row, v_uv.x), 1.0);
+        return;
+    }
+
     float lane = (1.0 - clamp(v_uv.y, 0.0, 0.999999)) * float(max(1, u_channels));
     int channel = clamp(int(floor(lane)), 0, max(0, u_channels - 1));
     float localY = fract(lane);
-
     vec3 color = vec3(0.025, 0.032, 0.045);
 
     if (u_hasG != 0 && u_gCount > 0) {
         int record = recordAt(u_gRecord0, u_gRecordsAcross, u_gCount);
         int bin = clamp(int(floor((1.0 - localY) * 128.0)), 0, 127);
-        float intensity = clamp(float(unpackG(record, channel, bin)) / 4095.0 * u_specGain, 0.0, 1.0);
+        float intensity = clamp(
+            float(unpackG(record, channel, bin)) / 4095.0 * u_specGain,
+            0.0,
+            1.0
+        );
         color = mix(color, heat(intensity), 0.92);
     }
 
@@ -133,8 +177,15 @@ void main() {
         float frequency = float(code & 0x7fffu);
         float density = float((code >> 15u) & 0x3fffu) / 16383.0;
         if (frequency > 0.0) {
-            float target = 1.0 - clamp(frequency / max(1.0, u_nyquist), 0.0, 1.0);
-            float alpha = (1.0 - smoothstep(0.002, 0.012, abs(localY - target))) * (0.25 + 0.75 * density);
+            float logLo = log(20.0);
+            float logHi = log(max(21.0, u_nyquist));
+            float target = 1.0 - clamp(
+                (log(max(20.0, frequency)) - logLo) / max(1e-6, logHi - logLo),
+                0.0,
+                1.0
+            );
+            float alpha = (1.0 - smoothstep(0.002, 0.012, abs(localY - target)))
+                        * (0.25 + 0.75 * density);
             color = mix(color, vec3(0.35, 0.72, 1.0), alpha);
         }
     }
@@ -144,10 +195,10 @@ void main() {
         uvec4 bytes = texelFetch(u_wave, ivec2(channel, record), 0);
         float mx = decodeWave(s16(bytes.r, bytes.g));
         float mn = decodeWave(s16(bytes.b, bytes.a));
-        float amplitudeAtPixel = (0.5 - localY) * 2.0 * u_verticalFs;
-        float aa = max(fwidth(amplitudeAtPixel) * 1.5, 0.001);
-        float inside = smoothstep(mn - aa, mn + aa, amplitudeAtPixel) *
-                       (1.0 - smoothstep(mx - aa, mx + aa, amplitudeAtPixel));
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float aa = max(fwidth(amplitude) * 1.5, 0.001);
+        float inside = smoothstep(mn - aa, mn + aa, amplitude)
+                     * (1.0 - smoothstep(mx - aa, mx + aa, amplitude));
         color = mix(color, vec3(0.43, 0.92, 0.67), inside);
     }
 
@@ -164,6 +215,10 @@ void main() {
         color = mix(color, vec3(1.0, 0.24, 0.10), sa * 0.85);
     }
 
+    if (u_playhead >= 0.0 && u_playhead <= 1.0) {
+        float line = 1.0 - smoothstep(0.0005, 0.0020, abs(v_uv.x - u_playhead));
+        color = mix(color, vec3(1.0, 0.78, 0.20), line);
+    }
     fragColor = vec4(color, 1.0);
 }
 """
@@ -179,9 +234,15 @@ class UploadWindow:
     texture: QOpenGLTexture
     byte_count: int
 
+    def normalized_range(self, total_frames: int) -> tuple[float, float]:
+        denominator = max(1, total_frames)
+        start = self.first_record * self.division / denominator
+        end = (self.first_record + self.record_count) * self.division / denominator
+        return max(0.0, start), min(1.0, end)
+
 
 class GpuAnalysisCanvas(QOpenGLWidget):
-    """REAPER-like composite analysis display driven by raw `.reapeaks` bytes."""
+    """Composite REAPER-style analysis display driven by packed cache bytes."""
 
     viewChanged = Signal(int, int)
     seekRequested = Signal(int)
@@ -206,12 +267,14 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         self.heatmap = True
         self.show_spectral = True
         self.show_loudness = True
+        self.show_tile_debug = True
         self.drag_last_x: float | None = None
         self.drag_distance = 0.0
+
         self._program: QOpenGLShaderProgram | None = None
+        self._vao: QOpenGLVertexArrayObject | None = None
         self._gl = None
         self._uploads: dict[str, UploadWindow] = {}
-        self._dummy: dict[str, QOpenGLTexture] = {}
         self._gpu_query: QOpenGLTimerQuery | None = None
         self._gpu_query_pending = False
         self._gpu_ms = 0.0
@@ -231,7 +294,11 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         if self.view_end >= old - 1:
             self.set_view(0, self.total_frames, emit=False)
         else:
-            self.set_view(self.view_start, min(self.view_end, self.total_frames), emit=False)
+            self.set_view(
+                self.view_start,
+                min(self.view_end, self.total_frames),
+                emit=False,
+            )
 
     def set_view(self, start: int, end: int, *, emit: bool = True):
         minimum_span = max(64, self.gpu.sample_rate // 50)
@@ -251,11 +318,11 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         self.update()
 
     def set_vertical_full_scale(self, value: float):
-        self.vertical_full_scale = max(0.05, float(value))
+        self.vertical_full_scale = max(0.1, min(32.0, float(value)))
         self.update()
 
     def set_spectrogram_gain(self, value: float):
-        self.spectrogram_gain = max(0.01, float(value))
+        self.spectrogram_gain = max(0.01, min(64.0, float(value)))
         self.update()
 
     def set_heatmap(self, enabled: bool):
@@ -270,9 +337,8 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         self.show_loudness = bool(enabled)
         self.update()
 
-    def set_tile_debug(self, _enabled: bool):
-        # Direct-GL diagnostics are reported as upload windows instead of
-        # QPainter tile bands. Keep the method for backend interchangeability.
+    def set_tile_debug(self, enabled: bool):
+        self.show_tile_debug = bool(enabled)
         self.update()
 
     def zoom(self, factor: float, anchor_ratio: float = 0.5):
@@ -323,17 +389,25 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         return min(
             enumerate(levels),
             key=lambda item: abs(
-                math.log(max(1.0, float(item[1][0])) / max(1.0, desired_division))
+                math.log(
+                    max(1.0, float(item[1][0])) / max(1.0, desired_division)
+                )
             ),
         )
 
     def _window_for(self, kind: str, layer_index: int, division: int, total: int):
         first_needed = max(0, self.view_start // max(1, division) - 2)
-        last_needed = min(total, (self.view_end + division - 1) // max(1, division) + 3)
+        last_needed = min(
+            total,
+            (self.view_end + division - 1) // max(1, division) + 3,
+        )
         page = self.PAGE_RECORDS
         first = (first_needed // page) * page
         minimum_end = min(total, first + page * 2)
-        last = min(total, max(minimum_end, ((last_needed + page - 1) // page) * page))
+        last = min(
+            total,
+            max(minimum_end, ((last_needed + page - 1) // page) * page),
+        )
         count = max(1, last - first)
         current = self._uploads.get(kind)
         if (
@@ -344,14 +418,24 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         ):
             return current
 
-        t0 = time.perf_counter_ns()
+        read_start = time.perf_counter_ns()
         first_actual, records, channels, bytes_per_channel, raw = self.gpu.records(
-            kind, layer_index, first, count
+            kind,
+            layer_index,
+            first,
+            count,
         )
         payload = bytes(raw)
-        t1 = time.perf_counter_ns()
-        texture = self._upload_texture(kind, records, channels, bytes_per_channel, payload)
-        t2 = time.perf_counter_ns()
+        read_end = time.perf_counter_ns()
+        texture = self._upload_texture(
+            kind,
+            int(records),
+            int(channels),
+            int(bytes_per_channel),
+            payload,
+        )
+        upload_end = time.perf_counter_ns()
+
         if current is not None:
             current.texture.destroy()
         window = UploadWindow(
@@ -364,14 +448,14 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             len(payload),
         )
         self._uploads[kind] = window
-        self._read_ms = (t1 - t0) / 1e6
-        self._upload_ms = (t2 - t1) / 1e6
+        self._read_ms = (read_end - read_start) / 1e6
+        self._upload_ms = (upload_end - read_end) / 1e6
         self._upload_bytes_total += len(payload)
         self._upload_count += 1
         return window
 
+    @staticmethod
     def _upload_texture(
-        self,
         kind: str,
         records: int,
         channels: int,
@@ -380,7 +464,10 @@ class GpuAnalysisCanvas(QOpenGLWidget):
     ) -> QOpenGLTexture:
         texture = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
         texture.setMipLevels(1)
-        texture.setMinMagFilters(QOpenGLTexture.Filter.Nearest, QOpenGLTexture.Filter.Nearest)
+        texture.setMinMagFilters(
+            QOpenGLTexture.Filter.Nearest,
+            QOpenGLTexture.Filter.Nearest,
+        )
         texture.setWrapMode(QOpenGLTexture.WrapMode.ClampToEdge)
         if kind in ("waveform", "spectral"):
             if bytes_per_channel != 4:
@@ -398,7 +485,9 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             )
         elif kind == "spectrogram":
             if bytes_per_channel != 192:
-                raise ValueError(f"unexpected spectrogram record size {bytes_per_channel}")
+                raise ValueError(
+                    f"unexpected spectrogram record size {bytes_per_channel}"
+                )
             texture.setFormat(QOpenGLTexture.TextureFormat.R8U)
             texture.setSize(192, records * channels)
             texture.allocateStorage(
@@ -412,7 +501,9 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             )
         elif kind == "loudness":
             if bytes_per_channel != 8:
-                raise ValueError(f"unexpected loudness record size {bytes_per_channel}")
+                raise ValueError(
+                    f"unexpected loudness record size {bytes_per_channel}"
+                )
             texture.setFormat(QOpenGLTexture.TextureFormat.RG32F)
             texture.setSize(channels, records)
             texture.allocateStorage(
@@ -432,15 +523,22 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         self._gl = self.context().functions()
         self._program = QOpenGLShaderProgram(self)
         if not self._program.addShaderFromSourceCode(
-            QOpenGLShader.ShaderTypeBit.Vertex, VERTEX_SHADER
+            QOpenGLShader.ShaderTypeBit.Vertex,
+            VERTEX_SHADER,
         ):
             raise RuntimeError(self._program.log())
         if not self._program.addShaderFromSourceCode(
-            QOpenGLShader.ShaderTypeBit.Fragment, FRAGMENT_SHADER
+            QOpenGLShader.ShaderTypeBit.Fragment,
+            FRAGMENT_SHADER,
         ):
             raise RuntimeError(self._program.log())
         if not self._program.link():
             raise RuntimeError(self._program.log())
+
+        self._vao = QOpenGLVertexArrayObject(self)
+        if not self._vao.create():
+            raise RuntimeError("cannot create OpenGL core-profile VAO")
+
         self._gpu_query = QOpenGLTimerQuery(self)
         if not self._gpu_query.create():
             self._gpu_query = None
@@ -453,30 +551,46 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         for upload in self._uploads.values():
             upload.texture.destroy()
         self._uploads.clear()
-        for texture in self._dummy.values():
-            texture.destroy()
-        self._dummy.clear()
+        if self._vao is not None and self._vao.isCreated():
+            self._vao.destroy()
         if self._gpu_query is not None and self._gpu_query.isCreated():
             self._gpu_query.destroy()
         self.doneCurrent()
 
-    def _set_window_uniforms(self, prefix: str, window: UploadWindow | None):
+    def _set_window_uniforms(
+        self,
+        has_name: str,
+        short: str,
+        window: UploadWindow | None,
+    ) -> None:
         assert self._program is not None
         if window is None:
-            self._program.setUniformValue(f"u_has{prefix}", 0)
-            self._program.setUniformValue(f"u_{prefix.lower()}Count", 0)
+            self._program.setUniformValue(f"u_has{has_name}", 0)
+            self._program.setUniformValue(f"u_{short}Count", 0)
+            self._program.setUniformValue(f"u_{short}Record0", 0.0)
+            self._program.setUniformValue(f"u_{short}RecordsAcross", 0.0)
             return
-        self._program.setUniformValue(f"u_has{prefix}", 1)
-        short = {"Wave": "wave", "Spectral": "s", "G": "g", "Loudness": "r"}[prefix]
-        record_at_view = self.view_start / max(1, window.division) - window.first_record
+        self._program.setUniformValue(f"u_has{has_name}", 1)
+        record_at_view = (
+            self.view_start / max(1, window.division) - window.first_record
+        )
         across = (self.view_end - self.view_start) / max(1, window.division)
         self._program.setUniformValue(f"u_{short}Record0", float(record_at_view))
         self._program.setUniformValue(f"u_{short}RecordsAcross", float(across))
         self._program.setUniformValue(f"u_{short}Count", int(window.record_count))
 
+    def _resident_uniform(self, kind: str) -> QVector2D:
+        window = self._uploads.get(kind)
+        if window is None:
+            return QVector2D(0.0, 0.0)
+        start, end = window.normalized_range(self.total_frames)
+        return QVector2D(float(start), float(end))
+
     def paintGL(self):  # noqa: N802
         start_ns = time.perf_counter_ns()
         assert self._gl is not None and self._program is not None
+        assert self._vao is not None
+
         if self._gpu_query_pending and self._gpu_query is not None:
             if self._gpu_query.isResultAvailable():
                 self._gpu_ms = self._gpu_query.waitForResult() / 1e6
@@ -488,43 +602,110 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         wave = None
         target_division = desired
         if wave_choice is not None:
-            wave_index, (wave_division, wave_total, _bpc) = wave_choice
-            target_division = wave_division
+            wave_index, (division, total, _bpc) = wave_choice
+            target_division = int(division)
             wave = self._window_for(
-                "waveform", wave_index, int(wave_division), int(wave_total)
+                "waveform",
+                wave_index,
+                int(division),
+                int(total),
             )
 
         spectral = None
         if self.show_spectral:
-            choice = self._nearest_level(self.gpu.levels("spectral"), target_division)
+            choice = self._nearest_level(
+                self.gpu.levels("spectral"),
+                target_division,
+            )
             if choice is not None:
                 index, (division, total, _bpc) = choice
-                spectral = self._window_for("spectral", index, int(division), int(total))
+                spectral = self._window_for(
+                    "spectral",
+                    index,
+                    int(division),
+                    int(total),
+                )
 
         spectrogram = None
-        choice = self._nearest_level(self.gpu.levels("spectrogram"), target_division)
+        choice = self._nearest_level(
+            self.gpu.levels("spectrogram"),
+            target_division,
+        )
         if choice is not None:
             index, (division, total, _bpc) = choice
             spectrogram = self._window_for(
-                "spectrogram", index, int(division), int(total)
+                "spectrogram",
+                index,
+                int(division),
+                int(total),
             )
 
         loudness = None
         if self.show_loudness:
-            choice = self._nearest_level(self.gpu.levels("loudness"), target_division)
+            choice = self._nearest_level(
+                self.gpu.levels("loudness"),
+                target_division,
+            )
             if choice is not None:
                 index, (division, total, _bpc) = choice
-                loudness = self._window_for("loudness", index, int(division), int(total))
+                loudness = self._window_for(
+                    "loudness",
+                    index,
+                    int(division),
+                    int(total),
+                )
 
         self._gl.glClearColor(0.02, 0.025, 0.035, 1.0)
-        self._gl.glClear(0x00004000)  # GL_COLOR_BUFFER_BIT
+        self._gl.glClear(0x00004000)
         self._program.bind()
+        self._vao.bind()
+
         self._program.setUniformValue("u_channels", int(self.gpu.channels))
-        self._program.setUniformValue("u_waveEncoding", 0)  # generated demo spectrograms are RPKN
-        self._program.setUniformValue("u_verticalFs", float(self.vertical_full_scale))
-        self._program.setUniformValue("u_specGain", float(self.spectrogram_gain))
+        self._program.setUniformValue(
+            "u_waveEncoding",
+            0 if self.gpu.wave_encoding == "RPKN" else 1,
+        )
+        self._program.setUniformValue(
+            "u_verticalFs",
+            float(self.vertical_full_scale),
+        )
+        self._program.setUniformValue(
+            "u_specGain",
+            float(self.spectrogram_gain),
+        )
         self._program.setUniformValue("u_heatmap", 1 if self.heatmap else 0)
-        self._program.setUniformValue("u_nyquist", float(self.gpu.sample_rate) * 0.5)
+        self._program.setUniformValue(
+            "u_nyquist",
+            float(self.gpu.sample_rate) * 0.5,
+        )
+        playhead_ratio = (self.playhead - self.view_start) / span
+        self._program.setUniformValue("u_playhead", float(playhead_ratio))
+
+        total = max(1, self.total_frames)
+        self._program.setUniformValue(
+            "u_tileDebug",
+            1 if self.show_tile_debug else 0,
+        )
+        self._program.setUniformValue(
+            "u_viewGlobal",
+            QVector2D(self.view_start / total, self.view_end / total),
+        )
+        self._program.setUniformValue(
+            "u_waveResident",
+            self._resident_uniform("waveform"),
+        )
+        self._program.setUniformValue(
+            "u_sResident",
+            self._resident_uniform("spectral"),
+        )
+        self._program.setUniformValue(
+            "u_gResident",
+            self._resident_uniform("spectrogram"),
+        )
+        self._program.setUniformValue(
+            "u_rResident",
+            self._resident_uniform("loudness"),
+        )
 
         bindings = [
             (wave, "u_wave", 0),
@@ -537,14 +718,14 @@ class GpuAnalysisCanvas(QOpenGLWidget):
                 window.texture.bind(unit)
             self._program.setUniformValue(uniform, unit)
 
-        self._set_window_uniforms("Wave", wave)
-        self._set_window_uniforms("Spectral", spectral)
-        self._set_window_uniforms("G", spectrogram)
-        self._set_window_uniforms("Loudness", loudness)
+        self._set_window_uniforms("Wave", "wave", wave)
+        self._set_window_uniforms("Spectral", "s", spectral)
+        self._set_window_uniforms("G", "g", spectrogram)
+        self._set_window_uniforms("Loudness", "r", loudness)
 
         if self._gpu_query is not None and not self._gpu_query_pending:
             self._gpu_query.begin()
-            self._gl.glDrawArrays(0x0004, 0, 3)  # GL_TRIANGLES
+            self._gl.glDrawArrays(0x0004, 0, 3)
             self._gpu_query.end()
             self._gpu_query_pending = True
         else:
@@ -553,6 +734,7 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         for window, _uniform, unit in bindings:
             if window is not None:
                 window.texture.release(unit)
+        self._vao.release()
         self._program.release()
 
         self._cpu_ms = (time.perf_counter_ns() - start_ns) / 1e6
@@ -563,7 +745,7 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         )
         mib = self._upload_bytes_total / (1024.0 * 1024.0)
         self.diagnostics = (
-            f"GLSL packed path cpu={self._cpu_ms:.3f}ms gpu={self._gpu_ms:.3f}ms | "
+            f"GLSL packed cpu={self._cpu_ms:.3f}ms gpu={self._gpu_ms:.3f}ms | "
             f"last read={self._read_ms:.3f}ms upload={self._upload_ms:.3f}ms | "
-            f"uploads={self._upload_count} {mib:.2f}MiB | {windows}"
+            f"uploads={self._upload_count} {mib:.2f}MiB | resident [{windows}]"
         )
