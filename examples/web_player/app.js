@@ -456,14 +456,14 @@ function installCanvasInteraction(element) {
   });
 }
 
-function setRendererMode(requested) {
+function setRendererMode(requested, render = true) {
   const mode = requested === 'webgl2' && state.webglRenderer ? 'webgl2' : 'canvas2d';
   state.rendererMode = mode;
   $('rendererSelect').value = mode;
   $('webglPanel').classList.toggle('hidden', mode !== 'webgl2');
   $('wavePanel').classList.toggle('hidden', mode !== 'canvas2d');
   $('spectrumPanel').classList.toggle('hidden', mode !== 'canvas2d');
-  scheduleRender();
+  if (render) scheduleRender();
   updateDiagnostics();
 }
 
@@ -558,17 +558,21 @@ async function init() {
   $('audio').addEventListener('timeupdate', updateTransport);
 
   const webglReady = await initWebGL2();
-  setRendererMode(webglReady ? 'webgl2' : 'canvas2d');
+  setRendererMode(webglReady ? 'webgl2' : 'canvas2d', false);
 
+  await renderOverview();
+  state.renderSerial++;
+  await renderView(state.renderSerial);
+  updateTransport();
+
+  // Register resize observation only after the first raw windows are resident.
+  // ResizeObserver invokes its callback after observe(), so doing this earlier
+  // races the explicit initial render and duplicates identical HTTP requests.
   const ro = new ResizeObserver(() => {
     scheduleOverview();
     scheduleRender();
   });
   ro.observe(document.querySelector('main'));
-  await renderOverview();
-  state.renderSerial++;
-  await renderView(state.renderSerial);
-  updateTransport();
 
   const tick = () => { if (!$('audio').paused) updateTransport(); requestAnimationFrame(tick); };
   requestAnimationFrame(tick);
