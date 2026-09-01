@@ -3,13 +3,42 @@ name: reaper-individual-layer-oracle
 on:
   push:
     branches:
-      - individual-analysis-layers
+      - main
     paths:
       - '.github/workflows/reaper-individual-layer-oracle.yml'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'src/spectrogram_generate.rs'
+      - 'src/loudness.rs'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/strict_wdl.cpp'
+      - 'tests/reaper_peak_modes.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-individual-layer-oracle.yml'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'src/spectrogram_generate.rs'
+      - 'src/loudness.rs'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/strict_wdl.cpp'
+      - 'tests/reaper_peak_modes.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: reaper-individual-layer-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   probe:
@@ -111,15 +140,11 @@ jobs:
           from pathlib import Path
           root=Path('/tmp/individual-layer-oracle')
           values=set()
-          # Exhaust all 4 display-mode bits documented for showpeaks, with the
-          # historical always-spectral bit both off/on and display-global bit off/on.
           display_bits=(32,256,512,1024)
           for nibble in range(16):
               mask=sum(bit for index,bit in enumerate(display_bits) if nibble & (1<<index))
               for base in (0,1,64,65):
                   values.add(base|mask)
-          # Preserve values observed after native REAPER peak-display actions too;
-          # this catches newer display modes if they use additional bits.
           amap=root/'results/action-map.tsv'
           if amap.exists():
               for line in amap.read_text(errors='replace').splitlines():
@@ -184,7 +209,7 @@ jobs:
           done <"$root/results/showpeaks-values.txt"
           kill "$xvfb_pid" 2>/dev/null || true
           trap - EXIT
-      - name: Classify generated layer combinations
+      - name: Classify and enforce generated layer combinations
         shell: bash
         run: |
           set -euo pipefail
@@ -195,6 +220,7 @@ jobs:
           rows=[]
           groups={}
           token_name={-115:'s',-103:'g',-114:'r',-108:'l'}
+          by_value={}
           for value in map(int,(root/'showpeaks-values.txt').read_text().split()):
               p=root/f'showpeaks-{value}.reapeaks'
               data=p.read_bytes()
@@ -203,22 +229,35 @@ jobs:
               headers=[struct.unpack_from('<iI',data,18+8*i) for i in range(count)]
               kinds=['w' if div>0 else token_name.get(div,str(div)) for div,_ in headers]
               signature=''.join(kinds)
-              specials=sorted(set(k for k in kinds if k!='w'))
+              specials=tuple(sorted(set(k for k in kinds if k!='w')))
               row={
                   'showpeaks':value,
                   'headers':headers,
                   'kinds':kinds,
-                  'specials':specials,
+                  'specials':list(specials),
                   'signature':signature,
                   'size':len(data),
               }
               rows.append(row)
-              groups.setdefault(tuple(specials),[]).append(value)
+              by_value[value]=row
+              groups.setdefault(specials,[]).append(value)
           action_lines=[]
           for line in (root/'action-map.tsv').read_text(errors='replace').splitlines():
               parts=line.split('\t')
               if len(parts)>=5 and parts[0]=='ACTION':
                   action_lines.append({'command':int(parts[1]),'name':parts[2],'showpeaks':parts[4]})
+          expected={(),('r','s'),('g','r','s')}
+          assert set(groups)==expected, f'unexpected REAPER layer groups: {sorted(groups)}'
+          action_expected={
+              'Peaks: Show normal peaks': (),
+              'Peaks: Toggle spectral peaks': ('r','s'),
+              'Peaks: Toggle spectrogram': ('g','r','s'),
+          }
+          action_map={item['name']:int(item['showpeaks'],0) for item in action_lines}
+          for name,specials in action_expected.items():
+              assert name in action_map, f'missing native action: {name}'
+              value=action_map[name]
+              assert tuple(by_value[value]['specials'])==specials, (name,value,by_value[value])
           report={
               'oracle':'REAPER 7.79 x86_64 Linux',
               'actions':action_lines,
@@ -230,12 +269,7 @@ jobs:
           for key,vals in sorted(groups.items()):
               label='+'.join(key) if key else 'wave-only'
               print(f'{label}: {vals[:20]}'+(' ...' if len(vals)>20 else ''))
-          wanted={(),('s',),('g',),('r',)}
-          found=set(groups)
-          print('INDIVIDUAL_LAYER_SIGNATURES_FOUND',sorted(found & wanted))
-          missing=wanted-found
-          if missing:
-              print('INDIVIDUAL_LAYER_SIGNATURES_MISSING',sorted(missing))
+          print('REAPER_NATIVE_LAYER_MODES_EXACT=wave-only,r+s,g+r+s')
           PY
       - name: Upload oracle evidence
         if: always()
