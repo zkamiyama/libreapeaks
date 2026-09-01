@@ -1,0 +1,350 @@
+name: reaper-spectrogram-value-oracle
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - .github/workflows/reaper-spectrogram-value-oracle.yml
+      - tools/reaper_oracle/build_probe.lua
+      - src/spectrogram.rs
+      - src/format.rs
+      - tests/spectrogram_format.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-value-oracle
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-value-oracle/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create focused PCM16 WAVE probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, math, struct, wave
+
+          root = Path('/tmp/spectrogram-value-oracle/media')
+          sr = 48_000
+          frames = sr
+          cases = [
+              dict(name='silence', ch=1, kind='silence'),
+              dict(name='dc_half', ch=1, kind='dc', amp=0.5),
+              dict(name='tone_100', ch=1, kind='tone', hz=100, amp=0.5),
+              dict(name='tone_500', ch=1, kind='tone', hz=500, amp=0.5),
+              dict(name='tone_1000', ch=1, kind='tone', hz=1000, amp=0.5),
+              dict(name='tone_2000', ch=1, kind='tone', hz=2000, amp=0.5),
+              dict(name='tone_4000', ch=1, kind='tone', hz=4000, amp=0.5),
+              dict(name='tone_6000', ch=1, kind='tone', hz=6000, amp=0.5),
+              dict(name='tone_8000', ch=1, kind='tone', hz=8000, amp=0.5),
+              dict(name='tone_12000', ch=1, kind='tone', hz=12000, amp=0.5),
+              dict(name='tone_16000', ch=1, kind='tone', hz=16000, amp=0.5),
+              dict(name='tone_20000', ch=1, kind='tone', hz=20000, amp=0.5),
+              dict(name='tone_1000_quarter', ch=1, kind='tone', hz=1000, amp=0.25),
+              dict(name='tone_1000_eighth', ch=1, kind='tone', hz=1000, amp=0.125),
+              dict(name='split_1000_6000', ch=2, kind='split', hz0=1000, hz1=6000, amp=0.5),
+              dict(name='impulse_center', ch=1, kind='impulse'),
+          ]
+          (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          def q16(value):
+              return max(-32768, min(32767, int(round(value))))
+
+          for case in cases:
+              payload = bytearray()
+              for frame in range(frames):
+                  if case['kind'] == 'silence':
+                      values = [0]
+                  elif case['kind'] == 'dc':
+                      values = [q16(case['amp'] * 32767)]
+                  elif case['kind'] == 'tone':
+                      phase = 2.0 * math.pi * case['hz'] * frame / sr
+                      values = [q16(case['amp'] * 32767 * math.sin(phase))]
+                  elif case['kind'] == 'split':
+                      phase0 = 2.0 * math.pi * case['hz0'] * frame / sr
+                      phase1 = 2.0 * math.pi * case['hz1'] * frame / sr
+                      values = [
+                          q16(case['amp'] * 32767 * math.sin(phase0)),
+                          q16(case['amp'] * 32767 * math.sin(phase1)),
+                      ]
+                  elif case['kind'] == 'impulse':
+                      values = [32767 if frame == frames // 2 else 0]
+                  else:
+                      raise AssertionError(case)
+                  payload += struct.pack('<' + 'h' * case['ch'], *values)
+
+              wav_path = root / f"{case['name']}.wav"
+              with wave.open(str(wav_path), 'wb') as out:
+                  out.setnchannels(case['ch'])
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+      - name: Build real REAPER spectrogram caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess, tempfile, time
+
+          root = Path('/tmp/spectrogram-value-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':98'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.4)
+              for index, case in enumerate(cases):
+                  name = case['name']
+                  media = media_root / f'{name}.wav'
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-value-{index:02d}-'))
+                  config = case_dir / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=1345\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case_dir / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  log_path = results / f'{name}.reaper.log'
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{name}.status.txt').write_text(status, encoding='utf-8')
+                  source_type = next(
+                      (line[5:] for line in status.splitlines() if line.startswith('TYPE=')),
+                      '',
+                  )
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{name}: REAPER failed rc={completed.returncode}: {status!r}')
+                  if source_type != 'WAVE':
+                      raise SystemExit(f'{name}: expected WAVE source, got {source_type!r}')
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{name}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Decode 128-bin values and prove payload ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/spectrogram-value-oracle/results/report.txt
+          from pathlib import Path
+          import hashlib, json, struct
+
+          root = Path('/tmp/spectrogram-value-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          case_by_name = {case['name']: case for case in cases}
+          WORDS_PER_FRAME = 48
+          BYTES_PER_FRAME = 192
+          TOKEN_G = -ord('g')
+
+          def decode_frame(raw):
+              if len(raw) != BYTES_PER_FRAME:
+                  raise AssertionError(len(raw))
+              bins = []
+              for offset in range(0, len(raw), 3):
+                  first, packed, second = raw[offset:offset + 3]
+                  bins.append((first << 4) | (packed >> 4))
+                  bins.append((second << 4) | (packed & 0x0f))
+              if len(bins) != 128:
+                  raise AssertionError(len(bins))
+              return bins
+
+          def parse(path):
+              data = path.read_bytes()
+              if data[:4] != b'RPKN':
+                  raise AssertionError((path, data[:4]))
+              channels = data[4]
+              layer_count = data[5]
+              sample_rate = struct.unpack_from('<I', data, 6)[0]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  size = count * channels * 4
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise AssertionError((path, division, count, len(payload), size))
+                  layers.append(dict(division=division, count=count, payload=payload))
+                  offset += size
+              if offset != len(data):
+                  raise AssertionError((path, offset, len(data)))
+              g_layers = [layer for layer in layers if layer['division'] == TOKEN_G]
+              if len(g_layers) != 2:
+                  raise AssertionError((path, headers))
+              for layer in g_layers:
+                  if layer['count'] % WORDS_PER_FRAME:
+                      raise AssertionError((path, layer['count']))
+              return dict(
+                  channels=channels,
+                  sample_rate=sample_rate,
+                  headers=headers,
+                  g_layers=g_layers,
+              )
+
+          parsed = {
+              case['name']: parse(results / f"{case['name']}.reaper.reapeaks")
+              for case in cases
+          }
+
+          # Silence is an exact zero baseline for both -'g' levels.
+          for layer in parsed['silence']['g_layers']:
+              if any(layer['payload']):
+                  raise AssertionError('silence spectrogram payload was not all zero')
+
+          # The stereo split probe must equal the corresponding mono probes
+          # channel-by-channel when interpreted as [time][channel][192 bytes].
+          split = parsed['split_1000_6000']
+          mono0 = parsed['tone_1000']
+          mono1 = parsed['tone_6000']
+          for level in range(2):
+              split_layer = split['g_layers'][level]
+              left_layer = mono0['g_layers'][level]
+              right_layer = mono1['g_layers'][level]
+              split_frames = split_layer['count'] // WORDS_PER_FRAME
+              left_frames = left_layer['count'] // WORDS_PER_FRAME
+              right_frames = right_layer['count'] // WORDS_PER_FRAME
+              if not (split_frames == left_frames == right_frames):
+                  raise AssertionError((level, split_frames, left_frames, right_frames))
+              blocks = [
+                  split_layer['payload'][offset:offset + BYTES_PER_FRAME]
+                  for offset in range(0, len(split_layer['payload']), BYTES_PER_FRAME)
+              ]
+              left_blocks = [
+                  left_layer['payload'][offset:offset + BYTES_PER_FRAME]
+                  for offset in range(0, len(left_layer['payload']), BYTES_PER_FRAME)
+              ]
+              right_blocks = [
+                  right_layer['payload'][offset:offset + BYTES_PER_FRAME]
+                  for offset in range(0, len(right_layer['payload']), BYTES_PER_FRAME)
+              ]
+              for frame in range(split_frames):
+                  if blocks[frame * 2] != left_blocks[frame]:
+                      raise AssertionError(f'level {level} frame {frame}: left channel ordering mismatch')
+                  if blocks[frame * 2 + 1] != right_blocks[frame]:
+                      raise AssertionError(f'level {level} frame {frame}: right channel ordering mismatch')
+          print('SPECTROGRAM_PAYLOAD_ORDER=time-major-channel-inner confirmed')
+
+          report = {}
+          for case in cases:
+              name = case['name']
+              info = parsed[name]
+              entry = dict(
+                  channels=info['channels'],
+                  sample_rate=info['sample_rate'],
+                  headers=info['headers'],
+                  layers=[],
+              )
+              for level, layer in enumerate(info['g_layers']):
+                  time_frames = layer['count'] // WORDS_PER_FRAME
+                  if time_frames == 0:
+                      entry['layers'].append(dict(words=layer['count'], time_frames=0, sha256=hashlib.sha256(layer['payload']).hexdigest()))
+                      continue
+                  selected_time = time_frames // 2
+                  selected_channel = 0
+                  block_index = selected_time * info['channels'] + selected_channel
+                  start = block_index * BYTES_PER_FRAME
+                  bins = decode_frame(layer['payload'][start:start + BYTES_PER_FRAME])
+                  top = sorted(range(128), key=lambda index: (-bins[index], index))[:8]
+                  layer_entry = dict(
+                      words=layer['count'],
+                      time_frames=time_frames,
+                      sha256=hashlib.sha256(layer['payload']).hexdigest(),
+                      selected_time=selected_time,
+                      selected_channel=selected_channel,
+                      bins=bins,
+                      top=[[index, bins[index]] for index in top],
+                  )
+                  entry['layers'].append(layer_entry)
+                  print(
+                      f"{name} level={level} words={layer['count']} frames={time_frames} "
+                      f"top={layer_entry['top']} min={min(bins)} max={max(bins)}"
+                  )
+              report[name] = entry
+
+          (results / 'spectrogram-value-report.json').write_text(
+              json.dumps(report, indent=2),
+              encoding='utf-8',
+          )
+
+          print('TONE_TOP_BINS')
+          for name in [
+              'tone_100', 'tone_500', 'tone_1000', 'tone_2000', 'tone_4000',
+              'tone_6000', 'tone_8000', 'tone_12000', 'tone_16000', 'tone_20000',
+          ]:
+              case = case_by_name[name]
+              layer = report[name]['layers'][0]
+              print(f"hz={case['hz']} top_bin={layer['top'][0][0]} top_code={layer['top'][0][1]}")
+
+          print('AMPLITUDE_1000HZ_TOP_CODES')
+          for name in ['tone_1000', 'tone_1000_quarter', 'tone_1000_eighth']:
+              case = case_by_name[name]
+              layer = report[name]['layers'][0]
+              print(f"amp={case['amp']} top_bin={layer['top'][0][0]} top_code={layer['top'][0][1]}")
+          PY
+      - name: Upload focused spectrogram evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-value-oracle-${{ github.sha }}
+          path: |
+            /tmp/spectrogram-value-oracle/results
+            /tmp/spectrogram-value-oracle/media/cases.json
+          if-no-files-found: error
+          retention-days: 7
