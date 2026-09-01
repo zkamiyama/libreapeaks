@@ -1,0 +1,84 @@
+name: reaper-spectrogram-stress-oracle
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/reaper-spectrogram-stress-oracle.yml'
+      - 'src/**'
+      - 'tests/spectrogram_stress.rs'
+      - 'tests/reaper_spectrogram_exact.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-spectrogram-stress-oracle.yml'
+      - 'src/**'
+      - 'tests/spectrogram_stress.rs'
+      - 'tests/reaper_spectrogram_exact.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'vendor/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-spectrogram-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Strict-WDL spectrogram invariants
+        run: cargo test --release --features strict-wdl --test spectrogram_stress -- --nocapture
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-stress
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-stress/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate adversarial PCM16 corpus
+        run: python3 tools/reaper_oracle/spectrogram_stress_cases.py /tmp/spectrogram-stress/media
+      - name: Run fresh-process REAPER whole-file exact stress
+        run: python3 tools/reaper_oracle/spectrogram_stress_run.py /tmp/spectrogram-stress "$REAPER_BIN"
+      - name: Publish stress summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/spectrogram-stress/results/summary.txt ]; then
+            tail -160 /tmp/spectrogram-stress/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload stress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-stress-${{ github.sha }}
+          path: |
+            /tmp/spectrogram-stress/results
+            /tmp/spectrogram-stress/media/cases.json
+          if-no-files-found: warn
+          retention-days: 7
