@@ -172,18 +172,20 @@ pub fn parse_spectrogram_layers(bytes: &[u8]) -> Result<(u8, u32, Vec<Spectrogra
                     .ok_or(ReaPeaksError::InvalidHeader(
                         "spectrogram layer index overflow",
                     ))?;
-            let mirrored_division = positive_divisions
-                .get(wave_index)
-                .copied()
-                .ok_or(ReaPeaksError::InvalidHeader(
-                    "spectrogram layer without matching waveform layer",
-                ))?;
+            let mirrored_division =
+                positive_divisions
+                    .get(wave_index)
+                    .copied()
+                    .ok_or(ReaPeaksError::InvalidHeader(
+                        "spectrogram layer without matching waveform layer",
+                    ))?;
             let time_frames = count_usize / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME;
-            let value_count = time_frames
-                .checked_mul(channels_usize)
-                .ok_or(ReaPeaksError::InvalidHeader(
-                    "spectrogram frame count overflow",
-                ))?;
+            let value_count =
+                time_frames
+                    .checked_mul(channels_usize)
+                    .ok_or(ReaPeaksError::InvalidHeader(
+                        "spectrogram frame count overflow",
+                    ))?;
             let mut frames = Vec::with_capacity(value_count);
             for value_index in 0..value_count {
                 let start = payload_offset
