@@ -1,0 +1,272 @@
+name: reaper-spectrogram-byte-identical
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/reaper-spectrogram-byte-identical.yml'
+      - 'src/**'
+      - 'tests/reaper_spectrogram_exact.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-spectrogram-byte-identical.yml'
+      - 'src/**'
+      - 'tests/reaper_spectrogram_exact.rs'
+      - 'tools/reaper_oracle/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'vendor/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-spectrogram-byte-identical-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-exact
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-exact/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create deterministic PCM16 WAVE corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, math, struct, wave
+
+          root = Path('/tmp/spectrogram-exact/media')
+          cases = [
+              dict(name='silence', sr=48_000, frames=48_000, ch=1, kind='silence'),
+              dict(name='tone_exact_6000', sr=48_000, frames=48_000, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='tone_offbin_997', sr=48_000, frames=48_000, ch=1, kind='tone', hz=997.0, amp=0.5),
+              dict(name='two_tone', sr=48_000, frames=48_000, ch=1, kind='two_tone'),
+              dict(name='impulse_edges', sr=48_000, frames=48_000, ch=1, kind='impulse'),
+              dict(name='noise', sr=48_000, frames=48_000, ch=1, kind='noise'),
+              dict(name='split_stereo', sr=48_000, frames=48_000, ch=2, kind='split'),
+              dict(name='short_2607', sr=48_000, frames=2_607, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='short_2608', sr=48_000, frames=2_608, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='partial_5007', sr=48_000, frames=5_007, ch=1, kind='noise'),
+              dict(name='partial_5008', sr=48_000, frames=5_008, ch=1, kind='noise'),
+              dict(name='rate44100_exact5512_5', sr=44_100, frames=44_100, ch=1, kind='tone', hz=5512.5, amp=0.5),
+              dict(name='rate44100_long3', sr=44_100, frames=132_417, ch=3, kind='multitone'),
+              dict(name='rate32000_exact4000', sr=32_000, frames=32_000, ch=1, kind='tone', hz=4000.0, amp=0.5),
+              dict(name='rate32000_long4', sr=32_000, frames=96_257, ch=4, kind='multitone'),
+              dict(name='rate96000_short319', sr=96_000, frames=319, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_short320', sr=96_000, frames=320, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_short4767', sr=96_000, frames=4_767, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_short4768', sr=96_000, frames=4_768, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_exact12000', sr=96_000, frames=96_000, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_offbin997', sr=96_000, frames=96_000, ch=1, kind='tone', hz=997.0, amp=0.43),
+              dict(name='rate96000_long4', sr=96_000, frames=288_319, ch=4, kind='multitone'),
+              dict(name='rate96000_long4_next', sr=96_000, frames=288_320, ch=4, kind='multitone'),
+              dict(name='rate96000_tail292767', sr=96_000, frames=292_767, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_tail292768', sr=96_000, frames=292_768, ch=1, kind='tone', hz=12000.0, amp=0.5),
+          ]
+          (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          rates = {case['sr'] for case in cases}
+          channels = {case['ch'] for case in cases}
+          assert {32_000, 44_100, 48_000, 96_000}.issubset(rates)
+          assert {1, 2, 3, 4}.issubset(channels)
+          assert any(case['frames'] > 3 * case['sr'] for case in cases)
+
+          def q16(v):
+              return max(-32768, min(32767, int(round(v))))
+
+          for case_index, case in enumerate(cases):
+              sr = case['sr']
+              seed = (0x13579BDF ^ (case_index * 0x9E3779B9)) & 0xffffffff
+              payload = bytearray()
+              impulse_points = {
+                  0, 64, 159, 160, 2191, 2192, 2399, 2400, 2607, 2608,
+                  max(0, case['frames'] - 2), max(0, case['frames'] - 1),
+              }
+              for frame in range(case['frames']):
+                  values = []
+                  for channel in range(case['ch']):
+                      kind = case['kind']
+                      if kind == 'silence':
+                          value = 0
+                      elif kind == 'tone':
+                          phase = 2.0 * math.pi * case['hz'] * frame / sr
+                          value = q16(case['amp'] * 32767.0 * math.sin(phase))
+                      elif kind == 'two_tone':
+                          value = q16(
+                              0.41 * 32767.0 * math.sin(2.0 * math.pi * 997.0 * frame / sr)
+                              + 0.19 * 32767.0 * math.sin(2.0 * math.pi * 6000.0 * frame / sr + 0.37)
+                          )
+                      elif kind == 'impulse':
+                          value = (32767 if frame % 2 == 0 else -32768) if frame in impulse_points else 0
+                      elif kind == 'noise':
+                          seed = (1664525 * seed + 1013904223 + channel) & 0xffffffff
+                          value = (((seed >> 16) & 0xffff) - 32768) // 3
+                      elif kind == 'split':
+                          hz = 1000.0 if channel == 0 else 6000.0
+                          amp = 0.5 if channel == 0 else 0.25
+                          phase = 2.0 * math.pi * hz * frame / sr + channel * 0.23
+                          value = q16(amp * 32767.0 * math.sin(phase))
+                      elif kind == 'multitone':
+                          frequencies = (997.0, 3000.0, 6000.0, 11000.0)
+                          amplitudes = (0.43, 0.31, 0.22, 0.16)
+                          hz = frequencies[channel]
+                          amp = amplitudes[channel]
+                          phase = 2.0 * math.pi * hz * frame / sr + channel * 0.31
+                          value = q16(amp * 32767.0 * math.sin(phase))
+                      else:
+                          raise AssertionError(kind)
+                      values.append(value)
+                  payload += struct.pack('<' + 'h' * case['ch'], *values)
+
+              raw_path = root / f"{case['name']}.s16le"
+              wav_path = root / f"{case['name']}.wav"
+              raw_path.write_bytes(payload)
+              with wave.open(str(wav_path), 'wb') as out:
+                  out.setnchannels(case['ch'])
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+      - name: Build pinned REAPER spectrogram oracle files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess, tempfile, time
+
+          root = Path('/tmp/spectrogram-exact')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':94'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.4)
+              for index, case in enumerate(cases):
+                  name = case['name']
+                  media = media_root / f'{name}.wav'
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-exact-{index:02d}-'))
+                  config = case_dir / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=1345\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case_dir / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  with (results / f'{name}.reaper.log').open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{name}.status.txt').write_text(status, encoding='utf-8')
+                  source_type = next((line[5:] for line in status.splitlines() if line.startswith('TYPE=')), '')
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{name}: REAPER failed rc={completed.returncode}: {status!r}')
+                  if source_type != 'WAVE':
+                      raise SystemExit(f'{name}: expected WAVE source, got {source_type!r}')
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{name}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Compare spectrogram payloads byte-for-byte
+        shell: bash
+        run: |
+          set +e
+          failures=0
+          : > /tmp/spectrogram-exact/results/summary.txt
+          for name in $(python -c "import json;print(' '.join(x['name'] for x in json.load(open('/tmp/spectrogram-exact/media/cases.json'))))"); do
+            echo "=== $name ===" | tee -a /tmp/spectrogram-exact/results/summary.txt
+            REAPEAKS_PCM16="/tmp/spectrogram-exact/media/$name.s16le" \
+            REAPEAKS_ORACLE="/tmp/spectrogram-exact/results/$name.reaper.reapeaks" \
+            LIBREAPEAKS_OUTPUT="/tmp/spectrogram-exact/results/$name.libreapeaks.reapeaks" \
+              cargo test --release --features strict-wdl \
+                --test reaper_spectrogram_exact \
+                reaper779_pcm16_spectrogram_is_byte_identical \
+                -- --ignored --exact --nocapture \
+                > "/tmp/spectrogram-exact/results/$name.test.txt" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "PASS $name" | tee -a /tmp/spectrogram-exact/results/summary.txt
+              grep 'SPECTROGRAM_' "/tmp/spectrogram-exact/results/$name.test.txt" | tee -a /tmp/spectrogram-exact/results/summary.txt
+            else
+              echo "FAIL $name rc=$rc" | tee -a /tmp/spectrogram-exact/results/summary.txt
+              grep -E 'SPECTROGRAM_EXACT_STATS|spectrogram mismatch|layer header table differs|non-spectrogram layer|RPKN header differs' \
+                "/tmp/spectrogram-exact/results/$name.test.txt" | tail -20 | tee -a /tmp/spectrogram-exact/results/summary.txt
+              failures=$((failures+1))
+            fi
+          done
+          echo "FAILURES=$failures" | tee -a /tmp/spectrogram-exact/results/summary.txt
+          cat /tmp/spectrogram-exact/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          exit "$failures"
+      - name: Upload exact-match evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-byte-identical-${{ github.sha }}
+          path: |
+            /tmp/spectrogram-exact/results
+            /tmp/spectrogram-exact/media/cases.json
+          if-no-files-found: error
+          retention-days: 7

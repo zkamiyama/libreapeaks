@@ -1,0 +1,209 @@
+name: reaper-spectrogram-rate-oracle-v2
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - .github/workflows/reaper-spectrogram-rate-oracle-v2.yml
+      - tools/reaper_oracle/build_probe.lua
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-rate-oracle-v2
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-rate-oracle-v2/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Probe cross-rate scheduler, FFT grid, and phase
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/spectrogram-rate-oracle-v2/results/report.txt
+          from pathlib import Path
+          import math, os, shutil, struct, subprocess, tempfile, time, wave
+
+          root = Path('/tmp/spectrogram-rate-oracle-v2')
+          media_root = root / 'media'
+          results = root / 'results'
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':93'
+          TOKEN_G = -ord('g')
+          WORDS_PER_FRAME = 48
+          BYTES_PER_FRAME = 192
+
+          configs = {
+              44_100: dict(d0=147, d1=2205, d2=44100, first_end=201),
+              32_000: dict(d0=106, d1=1696, d2=32224, first_end=181),
+          }
+
+          def write_wav(path, sample_rate, frames, sample_fn):
+              payload = bytearray()
+              for frame in range(frames):
+                  value = max(-32768, min(32767, int(round(sample_fn(frame)))))
+                  payload += struct.pack('<h', value)
+              with wave.open(str(path), 'wb') as out:
+                  out.setnchannels(1)
+                  out.setsampwidth(2)
+                  out.setframerate(sample_rate)
+                  out.writeframes(payload)
+
+          def parse(path):
+              data = path.read_bytes()
+              channels = data[4]
+              layer_count = data[5]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  size = count * channels * 4
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise AssertionError((path, division, count, len(payload), size))
+                  layers.append((division, count, payload))
+                  offset += size
+              if offset != len(data):
+                  raise AssertionError((path, offset, len(data)))
+              return headers, [layer for layer in layers if layer[0] == TOKEN_G]
+
+          def decode_frame(raw):
+              if len(raw) != BYTES_PER_FRAME:
+                  raise AssertionError(len(raw))
+              bins = []
+              for offset in range(0, BYTES_PER_FRAME, 3):
+                  first, packed, second = raw[offset:offset + 3]
+                  bins.append((first << 4) | (packed >> 4))
+                  bins.append((second << 4) | (packed & 0x0f))
+              return bins
+
+          counter = 0
+          def run_reaper(media, label, missing_ok=False):
+              nonlocal_state = None
+              global counter
+              counter += 1
+              peak_name = media.name + '.reapeaks'
+              for old in media_root.rglob(peak_name):
+                  old.unlink()
+              case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-rate-v2-{counter:03d}-'))
+              config = case_dir / 'reaper.ini'
+              config.write_text('[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=1345\n', encoding='utf-8')
+              status_path = case_dir / 'result.txt'
+              env = os.environ.copy()
+              env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status_path))
+              with (results / f'{label}.reaper.log').open('wb') as log:
+                  completed = subprocess.run(
+                      [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                      env=env,
+                      stdout=log,
+                      stderr=subprocess.STDOUT,
+                      timeout=90,
+                      check=False,
+                  )
+              status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+              if completed.returncode != 0 or 'OK loops=' not in status:
+                  raise RuntimeError(f'{label}: REAPER failed rc={completed.returncode}: {status!r}')
+              peaks = list(media_root.rglob(peak_name))
+              if not peaks and missing_ok:
+                  return [], []
+              if len(peaks) != 1:
+                  raise RuntimeError(f'{label}: expected one peak file, found {peaks}')
+              copied = results / f'{label}.reaper.reapeaks'
+              shutil.copy2(peaks[0], copied)
+              return parse(copied)
+
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], stdout=xvfb_log, stderr=subprocess.STDOUT)
+          time.sleep(0.4)
+          try:
+              for sample_rate, cfg in configs.items():
+                  d0, d1, d2, first_end = cfg['d0'], cfg['d1'], cfg['d2'], cfg['first_end']
+                  q1, q2 = d1 // d0, d2 // d1
+                  print(f'RATE sample_rate={sample_rate} divisions={[d0,d1,d2]} ratios={[q1,q2]} predicted_first_end={first_end}')
+
+                  threshold_cases = sorted(set([
+                      first_end - 1, first_end, first_end + 1,
+                      first_end + d1 - 1, first_end + d1, first_end + d1 + 1,
+                      first_end + (q2 - 1) * d1 - 1,
+                      first_end + (q2 - 1) * d1,
+                      first_end + (q2 - 1) * d1 + 1,
+                  ]))
+                  for frames in threshold_cases:
+                      media = media_root / f'{sample_rate}_n{frames}.wav'
+                      write_wav(media, sample_rate, frames, lambda i, sr=sample_rate: 16383.5 * math.sin(2 * math.pi * (sr / 8.0) * i / sr))
+                      headers, layers = run_reaper(media, f'{sample_rate}_n{frames}', missing_ok=True)
+                      counts = [count // WORDS_PER_FRAME for _, count, _ in layers]
+                      print(f'COUNT sample_rate={sample_rate} samples={frames} g_frames={counts} headers={headers}')
+
+                  tone_frames = d2 * 2 + 256
+                  tone = media_root / f'{sample_rate}_exact_bin.wav'
+                  write_wav(tone, sample_rate, tone_frames, lambda i, sr=sample_rate: 16383.5 * math.sin(2 * math.pi * (sr / 8.0) * i / sr))
+                  _, tone_layers = run_reaper(tone, f'{sample_rate}_exact_bin')
+                  _, fine_words, fine_payload = tone_layers[0]
+                  fine_count = fine_words // WORDS_PER_FRAME
+                  selected = fine_count // 2
+                  bins = decode_frame(fine_payload[selected * BYTES_PER_FRAME:(selected + 1) * BYTES_PER_FRAME])
+                  top = max(range(128), key=lambda i: (bins[i], -i))
+                  print(f'EXACT_BIN sample_rate={sample_rate} stored_bin={top} code={bins[top]} neighbors={[bins[top-1],bins[top],bins[top+1]]}')
+
+                  phases = list(range(0, 2 * d0))
+                  lead_groups = 3
+                  tail_groups = 3
+                  total_groups = lead_groups + len(phases) + tail_groups
+                  positions = [(lead_groups + index) * d1 + phase for index, phase in enumerate(phases)]
+                  position_set = set(positions)
+                  sweep_frames = total_groups * d1 + 256
+                  sweep = media_root / f'{sample_rate}_phase.wav'
+                  write_wav(sweep, sample_rate, sweep_frames, lambda i, ps=position_set: 32767 if i in ps else 0)
+                  _, sweep_layers = run_reaper(sweep, f'{sample_rate}_phase')
+                  _, fine_words, fine_payload = sweep_layers[0]
+                  print(f'PHASE_SWEEP sample_rate={sample_rate} frames={fine_words // WORDS_PER_FRAME}')
+                  rows = []
+                  for index, phase in enumerate(phases):
+                      frame_index = lead_groups + index
+                      codes = []
+                      for delta in (-1, 0, 1):
+                          idx = frame_index + delta
+                          bins = decode_frame(fine_payload[idx * BYTES_PER_FRAME:(idx + 1) * BYTES_PER_FRAME])
+                          if min(bins) != max(bins):
+                              raise AssertionError(('impulse bins not flat', sample_rate, phase, idx, min(bins), max(bins)))
+                          codes.append(bins[0])
+                      rows.append((phase, *codes))
+                      print(f'PHASE sample_rate={sample_rate} phase={phase} prev={codes[0]} current={codes[1]} next={codes[2]}')
+                  current = {phase: code for phase, _, code, _ in rows}
+                  diffs = [abs(current[p] - current[p + d0]) for p in range(d0)]
+                  print(f'PERIOD sample_rate={sample_rate} period={d0} mae={sum(diffs)/len(diffs):.6f} maxdiff={max(diffs)}')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+          cat /tmp/spectrogram-rate-oracle-v2/results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload cross-rate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-rate-oracle-v2-${{ github.sha }}
+          path: /tmp/spectrogram-rate-oracle-v2/results
+          if-no-files-found: error
+          retention-days: 7

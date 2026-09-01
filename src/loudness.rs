@@ -174,15 +174,21 @@ fn k_weighting_coefficients(sample_rate: u32) -> Result<FilterCoefficients> {
 }
 
 fn loudness_windows(sample_rate: u32) -> Result<(usize, usize)> {
-    let samples_in_100ms = (u64::from(sample_rate) + 5) / 10;
-    let momentary = samples_in_100ms
-        .checked_mul(4)
+    let rate = u64::from(sample_rate);
+    // REAPER 7.79/libebur128 derives the normalization spans directly from
+    // the source rate. Do not round a nominal 100 ms frame count first: for
+    // odd rates that changes the 400 ms denominator by up to two samples and
+    // the 3 s denominator by up to fifteen samples, which is visible in the
+    // raw f32 -'r' payload.
+    let momentary = rate
+        .checked_mul(2)
+        .map(|value| value / 5)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(ReaPeaksError::InvalidArgument(
             "momentary loudness window is too large",
         ))?;
-    let short_term = samples_in_100ms
-        .checked_mul(30)
+    let short_term = rate
+        .checked_mul(3)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(ReaPeaksError::InvalidArgument(
             "short-term loudness window is too large",
@@ -433,6 +439,15 @@ mod tests {
         assert_eq!(layers[1].header.peak_count, (frames / 48_000 * 2) as u32);
         assert_eq!(layers[1].bytes.len(), frames / 48_000 * 2 * 8);
         assert_eq!(fnv64(&layers[1].bytes), coarse_hash);
+    }
+
+    #[test]
+    fn odd_rate_loudness_windows_match_reaper779_normalization() {
+        assert_eq!(loudness_windows(11_025).unwrap(), (4_410, 33_075));
+        assert_eq!(loudness_windows(22_051).unwrap(), (8_820, 66_153));
+        assert_eq!(loudness_windows(76_799).unwrap(), (30_719, 230_397));
+        assert_eq!(loudness_windows(76_800).unwrap(), (30_720, 230_400));
+        assert_eq!(loudness_windows(76_801).unwrap(), (30_720, 230_403));
     }
 
     #[test]

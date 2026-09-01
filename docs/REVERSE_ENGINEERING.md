@@ -2,67 +2,40 @@
 
 Date updated: 2026-09-01  
 Primary oracle: REAPER 7.79 x86_64 Linux  
-Current scope: waveform, `-'s'` spectral peaks, `-'r'` loudness, division
-selection, decoder-path provenance, and central-cache path policy
+Current scope: waveform, `-'s'` spectral peaks, `-'g'` spectrogram, `-'r'`
+loudness, division selection, decoder provenance, and cache-path policy
 
-This document is the technical record behind libreapeaks' REAPER-compatibility
-code. It separates public Cockos format facts from behavior measured against a
-live REAPER executable and from implementation details recovered by differential
-probing/disassembly.
-
-For a shorter statement of what is actually proven today, read
+This is the technical record behind libreapeaks' compatibility implementation.
+It distinguishes documented format facts from behavior measured against a live,
+pinned REAPER executable and from details recovered by differential probing or
+binary inspection. For the shorter compatibility contract, read
 [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Evidence labels
 
 - **Official** — documented by Cockos.
 - **Oracle** — directly measured from REAPER 7.79-generated `.reapeaks` files or
-  REAPER API results.
-- **Runtime trace** — observed function/library calls inside a running REAPER
-  process.
+  public REAPER API results.
+- **Runtime trace** — observed calls inside a running REAPER process.
 - **Disassembly** — recovered from the REAPER 7.79 x86_64 binary and checked
   against differential probes.
-- **Validated implementation** — exercised by CI against REAPER-generated
-  golden/oracle data.
+- **Validated implementation** — continuously exercised by CI/oracle tests.
 
-## Public sources
+## Live oracle method
 
-- Cockos `.ReaPeaks` format: https://www.reaper.fm/sdk/reapeaks.txt
-- ReaScript API: https://www.reaper.fm/sdk/reascript/reascripthelp.html
-- Cockos WDL: https://github.com/justinfrankel/WDL
-
-# Live oracle method
-
-REAPER 7.79 is run headlessly under Xvfb. A ReaScript creates a `PCM_source` and
-drives:
-
-```text
-PCM_Source_BuildPeaks(source, 0)  # begin
-PCM_Source_BuildPeaks(source, 1)  # run until complete
-PCM_Source_BuildPeaks(source, 2)  # finish
-```
-
-The common mode-3 configuration is:
-
-```text
-peakcachegenmode=3
-peakcachegenrs=300
-```
-
-but the adversarial oracle also uses `peakcachegenrs=150` and `500`.
-
-The most important harness rule is:
+REAPER 7.79 is run headlessly under Xvfb. ReaScript drives
+`PCM_Source_BuildPeaks` begin/run/finish. Golden media follow one rule that
+proved essential during spectral work:
 
 > **one media file = one fresh REAPER process**
 
-Early batch probing showed spectral results that could depend on a preceding
-source when several `PCM_Source_BuildPeaks` operations were performed in one
-REAPER process. Xvfb can be shared, but golden media are built by fresh REAPER
-instances.
+Batching multiple peak builds in one process exposed state-sensitive behavior,
+so permanent golden generation does not rely on a warmed REAPER instance.
+
+Common mode-3 configuration is `peakcachegenmode=3`; `peakcachegenrs` is varied
+throughout the oracle matrices rather than assumed to be 300.
 
 # File layout
-
-## Header — Official
 
 All multibyte integers are little-endian.
 
@@ -77,7 +50,7 @@ All multibyte integers are little-endian.
 ...       payloads in header order
 ```
 
-Mipmap header:
+Each mipmap header is:
 
 ```text
 int32  division_or_token
@@ -96,60 +69,25 @@ Known special negative tokens:
 Current parser behavior:
 
 - RPKN/RPKL positive waveform layers are materialized;
-- RPKM is recognized and sized but its compact waveform payload is not exposed
+- RPKM is recognized/sized, but its compact waveform payload is not exposed
   through `WavePyramid`;
 - `-'s'` layers are parsed into spectral peaks;
-- `-'g'` payload size is recognized and skipped, not decoded;
+- `-'g'` layers are decoded into 128-bin `SpectrogramFrame` records;
 - `-'r'` layers are parsed into momentary/short-term energy records;
-- the legacy `-'l'` payload layout is intentionally unsupported.
-
-## Spectral code — Official
-
-One u32 per peak/channel:
-
-```text
-frequency_hz = code & 0x7fff
-density      = (code >> 15) & 0x3fff
-```
-
-Density 16383 is most tonal; 0 is noise-like.
-
-## `-'r'` loudness layout — Oracle
-
-REAPER 7.79 mode-3 files store two little-endian f32 values per time record and
-channel:
-
-```text
-f32 momentary_energy
-f32 short_term_energy
-```
-
-The `peak_count` field in the `-'r'` layer header is the number of f32 values
-per channel, so it is twice the time-record count. Consequently:
-
-```text
-payload_bytes = peak_count * channels * 4
-record_count  = peak_count / 2
-```
-
-The loudness record count is not required to equal the mirrored waveform bucket
-count. EOF scheduling and some peak-rate combinations make such an equality
-check invalid.
+- legacy `-'l'` payload layout remains intentionally unsupported.
 
 # REAPER preference-derived divisions
 
-## `peakcachegenrs` is not fixed at 300 — Oracle
-
-A live REAPER matrix measured `peakcachegenrs` values
-100/150/200/300/500/1000 at 22,051 / 44,100 / 48,000 Hz. The recovered rule is:
+A live matrix measured `peakcachegenrs` 100/150/200/300/500/1000 at several
+rates. The recovered REAPER 7.79 rule is:
 
 ```text
 sr  = max(sample_rate, 1)
 pps = max(peakcachegenrs, 1)
 
-fine = max(1, floor(sr / pps))
-mid  = fine * max(1, ceil(sr / (fine * 20)))
-coarse = mid * max(1, ceil(sr / mid))
+fine   = max(1, floor(sr / pps))
+mid    = fine * max(1, ceil(sr / (fine * 20)))
+coarse = mid  * max(1, ceil(sr / mid))
 ```
 
 Examples:
@@ -161,31 +99,21 @@ Examples:
 22,051 / 300 -> [73, 1168, 22192]
 ```
 
-`default_divisions(sample_rate, fine_peaks_per_second)` implements this rule and
-is exposed through Rust, Python, and `rpk_default_divisions` in the C ABI.
+`default_divisions` implements this behavior and is exposed from Rust, Python,
+and C.
 
 # Waveform generation
 
 ## RPKN PCM16 quantizer — Oracle
 
-A mono probe assigned one fine bucket to every signed 16-bit value. REAPER's
-stored extrema give the exact integer map:
-
-```text
-if v < 0:
-    stored = v
-else:
-    stored = round_half_up(v * 32767 / 32768)
-```
-
-Equivalent normalized form:
+Exhaustive signed-int16 probing recovered the asymmetric normalized mapping:
 
 ```text
 x >= 0:  round_half_up(x * 32767)
 x <  0: -round_half_up(-x * 32768)
 ```
 
-Notable values:
+Notable integer results:
 
 ```text
 -32768 -> -32768
@@ -196,279 +124,249 @@ Notable values:
 32767  -> 32766
 ```
 
-The recorded waveform corpus contains **122,516 / 122,516 exact buckets**. A
-separate decoded PCM24 probe confirmed the same normalized RPKN rule for
-**50,000 / 50,000** buckets.
+Recorded validation: **122,516 / 122,516** waveform buckets exact. A separate
+PCM24 corpus gives **50,000 / 50,000** exact buckets.
 
-## RPKL encoder — Official + Oracle
+## RPKL float waveform encoding — Official + Oracle
 
-For floating amplitude `x`:
-
-```text
-m = abs(x)
-
-if m <= 1:
-    code_mag = round_half_up(m * 24576)
-else:
-    code_mag = round_half_up(24576 + 1024*log2(m))
-
-positive: clamp code_mag to 32767
-negative: clamp code_mag to 32768, then negate
-```
-
-REAPER initializes each floating bucket as:
+For magnitude `m = abs(x)`:
 
 ```text
-max = -1.0
-min = +1.0
+m <= 1: code_mag = round_half_up(m * 24576)
+m >  1: code_mag = round_half_up(24576 + 1024*log2(m))
 ```
 
-before scanning samples. This affects buckets whose entire signal is above +1
-or below -1. The recorded RPKL corpus is **43,857 / 43,857 exact**.
+Positive values clamp to 32767; negative magnitude clamps to 32768 before sign
+application. REAPER initializes each RPKL bucket with `max=-1.0`, `min=+1.0`.
+The recorded float corpus is **43,857 / 43,857** exact.
 
 ## Waveform EOF scheduling — Oracle
 
-The adversarial whole-file oracle specifically probes exact and off-by-one EOF
-positions. REAPER's positive waveform mipmaps do not all use a naive
-`ceil(frames/division)` rule recursively. The implementation preserves the
-measured fine-bucket flush and upper-mipmap completion behavior used by REAPER
-7.79.
+Positive mipmaps do not reduce to a single recursive `ceil(frames/division)`
+formula. The implementation preserves observed fine-bucket flush and upper-level
+completion behavior. Permanent whole-file tests include exact and ±1-sample EOF
+and loudness-window boundaries.
 
-The permanent live oracle includes:
+# `-'s'` spectral generation
 
-```text
-3 seconds - 1 sample
-exact 3 seconds
-3 seconds + 1 sample
-400 ms - 1 sample
-exact 400 ms
-400 ms + 1 sample
-```
+`-'s'` is the older per-peak spectral-frequency/density layer and must not be
+confused with `-'g'` spectrogram bins.
 
-and compares the complete resulting mode-3 files.
-
-# Spectral generation
-
-## Analysis domain — Disassembly + Oracle
-
-For source rates above 22,050 Hz, REAPER's spectral path operates in a 22,050 Hz
-analysis domain and uses a 1024-point WDL FFT.
-
-For source division `div`:
+One official `-'s'` code is:
 
 ```text
-analysis_hop = div * 22050 / source_rate
+frequency_hz = code & 0x7fff
+density      = (code >> 15) & 0x3fff
 ```
 
-The analysis aperture is centered around the scheduled peak and has a 512-sample
-half-width in the 22.05 kHz domain.
+For source rates above 22,050 Hz, the recovered path uses a 22,050 Hz analysis
+domain and a 1024-point WDL FFT. Window/sample precision, WDL resampler feed
+size, phase refinement, magnitude accumulation, density calculation, and coarse
+aggregation are all compatibility-sensitive.
 
-Precision-sensitive window preparation is:
+At `source_rate <= 22050`, REAPER 7.79 creates `-'s'` layers whose payload codes
+are zero; strict-WDL reproduces this as a version-specific compatibility quirk.
 
-1. analysis-ring sample stored as float32;
-2. Hann coefficient stored as float32;
-3. multiplication performed in float32;
-4. product promoted to double for WDL FFT input.
-
-`strict-wdl` builds Cockos WDL with:
-
-```text
-WDL_FFT_REALSIZE=8
-```
-
-so FFT storage matches the recovered path.
-
-## Fine spectral count — Oracle
-
-The old approximation `floor((frames-1024)/div)` is not generally correct. For
-`source_rate > 22050`, the measured scheduler is equivalent to:
-
-```text
-analysis_frames = source_frames * 22050 / source_rate
-analysis_hop    = source_division * 22050 / source_rate
-fine_count      = round_half_up((analysis_frames - 512) / analysis_hop)
-```
-
-The implementation uses rational/integer arithmetic where possible to avoid
-introducing additional floating-point ambiguity.
-
-## <= 22,050 Hz REAPER 7.79 quirk — Oracle
-
-For:
-
-```text
-source_rate <= 22050
-```
-
-REAPER 7.79 still creates spectral layers, but their u32 payload codes are zero.
-The fine count follows the source-domain schedule:
-
-```text
-fine_count = round_half_up((source_frames - 512) / fine_division)
-```
-
-This is reproduced in `strict-wdl` as a compatibility quirk, not recommended as
-general spectral-analysis behavior.
-
-## WDL resampler feed granularity — Oracle
-
-Near 22,051 Hz, WDL's IIR prefilter startup depends on how many frames are fed
-to the resampler at once. The exact REAPER-compatible feed granularity found by
-differential sweep is:
+Near 22,051 Hz the exact WDL resampler feed granularity recovered by differential
+sweep is:
 
 ```text
 interleaved source buffer = 2048 samples
 block_frames = max(1, 2048 / channels)
 ```
 
-At 22,051 Hz, deterministic tone and integer-noise probes matched all tested
-spectral codes only at this granularity. The same setting then passed broader
-mono/stereo/4-channel, float32, and high-rate corpora.
+Upstream `WDL_fft_init()` has process-global first-use state; the strict bridge
+uses `std::call_once` to make concurrent first use deterministic.
 
-## WDL FFT initialization race — Validated implementation
+For non-Nyquist dominant bin `k`, REAPER's phase-refined frequency uses current
+double precision phase and previous float32 complex values. Coarser `-'s'`
+levels aggregate directly from the fine level. Density is averaged with floor;
+frequency is selected from the fine record maximizing
+`density * (32768 - frequency_hz)`.
 
-Upstream `WDL_fft_init()` uses a process-global static initialization path that
-is not safe for concurrent first use. Parallel tests were able to observe
-partially initialized FFT tables.
-
-The `strict-wdl` bridge therefore wraps WDL initialization in C++
-`std::call_once`. The C ABI boundary also validates channel/rate/span inputs and
-prevents C++ exceptions from crossing the ABI.
-
-## Magnitudes — Disassembly
-
-For a real 1024 FFT:
-
-```text
-mag[0]   = abs(DC)
-mag[512] = abs(Nyquist)
-mag[k]   = sqrt(re[k]^2 + im[k]^2), 1 <= k <= 511
-```
-
-Total magnitude is accumulated in double precision. A float32-rounded copy of
-each magnitude is used by the density second-moment path.
-
-Dominant-bin selection starts with Nyquist and scans 1..511 with strict `>`.
-DC contributes to density but is not selected as the dominant frequency bin.
-
-## Frequency refinement — Disassembly
-
-For non-Nyquist dominant bin `k`, current double phase is compared with the
-previous spectrum stored as float32 complex values:
-
-```text
-phase_cur  = atan2(cur_im_f64, cur_re_f64)
-phase_prev = atan2(prev_im_f32, prev_re_f32)
-
-residual = fmod(
-    (phase_cur - phase_prev)/pi - 2*(elapsed/1024)*k,
-    2
-)
-
-if residual <= -1: residual += 2
-if residual >   1: residual -= 2
-
-best_bin = k + (512/elapsed) * residual
-frequency_hz = trunc(0.5 + best_bin * 22050 / 1024)
-```
-
-The result is clamped to the 15-bit frequency field.
-
-## Density — Disassembly
-
-The recovered expression is:
-
-```text
-total  = sum(mag_f64[k], k=0..512)
-spread = sum(float32(mag[k]) * (k-best_bin)^2, k=0..512)
-
-density = trunc(
-    0.5 + 16383 * (1 - 4*spread/(total*512^2))
-)
-```
-
-then clamped to `[0,16383]`.
-
-## Coarser spectral mipmaps — Oracle
-
-Coarser spectral levels are aggregated **directly from the fine spectral
-level**, not recursively from the immediately finer stored level.
-
-For a group of fine peaks:
-
-```text
-density_out = floor(mean(fine_density))
-```
-
-Frequency is copied from the fine peak maximizing:
-
-```text
-density * (32768 - frequency_hz)
-```
-
-The reverse-engineering differential corpus matched **3,219 / 3,219** aggregate
+Validation totals include **16,300 / 16,300** independent fine codes,
+**96,222 / 96,222** all-mipmap codes, and **3,219 / 3,219** coarse aggregation
 points.
 
-# Loudness generation
+# `-'g'` spectrogram generation
 
-## Root cause of the former mode-3 mismatch — Oracle + implementation tracing
+This section records the implementation recovered for PR #6 and locked against
+the pinned REAPER 7.79 oracle.
 
-Initial mode-3 files matched REAPER in waveform, spectral data, and short-term
-loudness but differed by tiny f32 values in the momentary `-'r'` payload after
-step/DC transitions. The mismatch was not caused by ALAC/FFmpeg decoding.
+## On-disk frame layout — Oracle + validated implementation
 
-The exact REAPER 7.79 result is reproduced by the libebur128-style topology
-below.
-
-## K-weighting filter topology
-
-The two K-weighting biquad sections are first convolved into one fourth-order
-transfer function. Processing uses a Direct Form II state vector, rather than
-running two separately rounded Direct Form I biquads.
-
-For coefficients `b[0..4]`, `a[1..4]` and state `s[1..4]`:
+A logical channel/time frame contains:
 
 ```text
-v0 = input
-     - a1*s1
-     - a2*s2
-     - a3*s3
-     - a4*s4
-
-out = b0*v0
-      + b1*s1
-      + b2*s2
-      + b3*s3
-      + b4*s4
-
-s4 = s3
-s3 = s2
-s2 = s1
-s1 = v0
+128 bins * 12 bits = 1536 bits = 192 bytes = 48 u32 words
 ```
 
-The coefficient-convolution expression tree is preserved because algebraically
-equivalent rewrites can change the last bits of the raw loudness f32 payload.
-
-## 25 ms energy blocks
-
-REAPER-compatible block size:
+The layer header uses token `-103`. Crucially, its `peak_count` is the number of
+**u32 words per channel**, not the number of logical spectrogram frames.
+Therefore:
 
 ```text
-block_frames = max(1, floor(sample_rate / 40))
+time_frames = peak_count / 48
+payload_bytes = peak_count * channels * 4
 ```
 
-Filtered squared samples are accumulated into that block. An incomplete final
-25 ms block is **not** pushed into the rolling energy rings at EOF.
+Payload ordering is time-major, channel-inner.
 
-Two rings are maintained per channel:
+Two 12-bit codes `a` and `b` are packed into three bytes:
 
 ```text
-momentary:   16 blocks
-short-term: 120 blocks
+[a >> 4,
+ ((a & 0x0f) << 4) | (b & 0x0f),
+ b >> 4]
 ```
 
-The observable ring update order is:
+The decoder requires exactly 192 bytes for one channel frame; the encoder
+rejects codes above `0x0fff`. Silence produces all-zero `-'g'` payload.
+
+## FFT bin mapping — Oracle
+
+The analysis FFT size is **256**. Stored bins are real-FFT bins **1 through
+128**; DC bin 0 is omitted and Nyquist is retained. For example, at 48 kHz an
+exact 6000 Hz tone lands in stored bin index 31 (FFT bin 32).
+
+## Blackman-Harris window — Disassembly + Oracle
+
+The recovered four-term coefficients are:
+
+```text
+A0 = 0.35875
+A1 = 0.48829
+A2 = 0.14128
+A3 = 0.01168
+```
+
+REAPER 7.79 builds the window through a mixed f64/f32 sequence: phase and cosine
+operations plus the unnormalized sum are double precision; each raw coefficient
+is stored as float32; `1/sum` is converted to float32; normalization is a
+float32 multiply. Phase advances by repeated addition rather than recomputation
+from the sample index. This ordering is visible in the pinned binary and matters
+for coherent tones.
+
+PCM16 is first scaled by the float32 constant `1/32768`, multiplied by the
+float32 window in float32, then promoted to f64 for the FFT input.
+
+## Scheduler and window placement — Oracle
+
+The recovered base-window shift for fine division `d` is:
+
+```text
+if d >= 256:
+    shift = d - 256
+else:
+    shift = (d - 256) / 2   # signed integer division, truncating toward zero
+```
+
+Consequences:
+
+- overlapping windows (`d < 256`) are centered around the division boundary;
+- at and above one FFT width, REAPER right-aligns the 256-sample window to the
+  base boundary;
+- default 96 kHz / 300 pps has `d=320`, therefore `shift=+64`: the first full
+  window starts at sample 64 and ends at sample 320;
+- default 48 kHz / 300 pps has `d=160`, therefore `shift=-48`.
+
+The 48 kHz leading edge exposed another non-obvious rule: REAPER does **not**
+pretend unavailable negative-time samples are zeros under a fixed 256-point
+window. The first analysis has only 208 real samples, so those samples receive a
+new symmetric **208-point** Blackman-Harris window, normalized with the same
+mixed-precision path, and the result is then zero-padded to the 256-point FFT.
+The same resize-to-available rule covers lower-rate leading edges.
+
+These rules are locked by explicit scheduler tests at the exact transition
+samples and by live cases around fine divisions 255/256/257.
+
+## FFT scaling, power, and quantizer — Disassembly + Oracle
+
+The WDL real-FFT bridge returns the recovered raw scale, which is 2x a
+conventional unscaled real DFT representation for the relevant path. The
+portable FFT explicitly multiplies its output by 2 to match it.
+
+REAPER quantizes **squared magnitude directly**, with no `sqrt`/`hypot` step:
+
+```text
+power = re*re + im*im
+```
+
+Constants recovered and validated by exact-bin amplitude sweeps:
+
+```text
+POWER_LOG_SCALE = 88.92179516969081
+CODE_BIAS       = 4095.5
+CODE_MAX        = 4095
+```
+
+For finite `0 < power < 1`:
+
+```text
+raw  = ln(power) * POWER_LOG_SCALE + CODE_BIAS
+code = trunc(raw), clamped to 0..4095
+```
+
+Non-finite/non-positive power maps to 0; power at or above 1 maps to 4095.
+Operating directly on power avoids an extra square-root rounding that changes
+low sidelobes.
+
+## Fine and coarse aggregation — Oracle
+
+The 256-point analyses first produce already-quantized 12-bit base frames. The
+first stored `-'g'` layer averages groups of those **quantized codes** according
+to the ratio between the first two positive waveform divisions, using integer
+floor division per bin. A final partial group is included at this first stored
+level when the scheduler produces it.
+
+Higher `-'g'` mipmaps then average complete groups of the immediately preceding
+stored spectrogram frames according to the next nested division ratio. Partial
+coarse groups are not emitted.
+
+Spectrogram generation therefore requires positive divisions to be nested
+integer multiples.
+
+## Validation and stress — Validated implementation
+
+The permanent pinned-REAPER stress corpus contains **122 PCM16 WAVE cases**.
+Every source is built by a fresh REAPER 7.79 process. The strict-WDL test checks
+headers, all non-`g` payloads, decoded bins, packed `-'g'` bytes, and finally the
+whole RPKN byte stream:
+
+```text
+122 / 122 complete spectrogram mode-3 files byte-identical
+```
+
+The portable/default FFT implementation is checked against the same 122 cases
+for exact `-'g'` output.
+
+The corpus covers 8 kHz through 192 kHz, 1-8 channels, preference and fine
+window-placement boundaries, scheduler ±1 boundaries, long coarse mipmaps,
+DC/Nyquist/LSB/full-scale extremes, exact-bin and off-bin tones, chirps, ramps,
+impulses, noise, sparse channels, and deterministic randomized configurations.
+
+Independent property/adversarial tests additionally exhaust 12-bit packing,
+round-trip arbitrary 192-byte frames, reject truncations and malformed counts,
+probe 255/256 channel limits, exercise fine divisions 254..258, compare
+multichannel output with independent mono lanes, and stress deterministic
+parallel generation under normal/strict-WDL/sanitizer builds.
+
+# `-'r'` loudness generation
+
+REAPER 7.79 mode-3 stores two little-endian f32 values per time record/channel:
+
+```text
+f32 momentary_energy
+f32 short_term_energy
+```
+
+The `-'r'` header `peak_count` is the number of f32 values per channel and is
+twice the logical record count.
+
+The byte-exact implementation uses libebur128-style K-weighting with the two
+biquads convolved into one fourth-order Direct Form II filter. Energy blocks are
+`max(1, floor(sample_rate/40))` frames. Momentary and short-term rings contain
+16 and 120 blocks. The observable update order is:
 
 ```text
 old = ring[next]
@@ -476,68 +374,18 @@ sum = (sum + new_energy) - old
 ring[next] = new_energy
 ```
 
-Writing the mathematically equivalent `(sum - old) + new_energy` changes tiny
-DC-tail values and breaks byte identity.
+An incomplete final 25 ms block is not inserted at EOF. Normalization uses
+`round(sample_rate/10) * 4` and `* 30` frame counts. Base loudness records follow
+the second positive waveform division; coarser levels average complete groups.
 
-## Loudness normalization
+Algebraically equivalent filter/ring rewrites can change the final f32 bytes and
+are therefore not assumed compatible.
 
-REAPER 7.79 matches libebur128-style normalization based on rounded 100 ms
-sample counts:
+# FFmpeg decoder-path provenance
 
-```text
-samples_100ms = round(sample_rate / 10)
-momentary_normalization = samples_100ms * 4
-short_term_normalization = samples_100ms * 30
-```
-
-In integer form used by the implementation:
-
-```text
-samples_100ms = (sample_rate + 5) / 10
-```
-
-The ring sums are divided by these frame counts, then stored as f32.
-
-## Record and mipmap cadence
-
-The base loudness layer mirrors the **second** positive waveform division
-(`divisions[1]`), not the finest division. A record is emitted whenever that
-base division completes and at EOF if an additional base record is required.
-
-For coarser positive divisions, complete groups of base loudness records are
-averaged. Partial final groups are not emitted at the coarser loudness level.
-
-This behavior is why a `-'r'` layer's record count is not generally equal to the
-waveform bucket count for the mirrored positive division.
-
-## Adversarial whole-file confirmation
-
-The permanent live oracle compares complete REAPER/libreapeaks files over 16
-cases covering:
-
-```text
-22,050 / 32,000 / 44,100 / 48,000 / 88,200 / 96,000 Hz
-peakcachegenrs 150 / 300 / 500
-mono / stereo / 6-channel
-EOF +/- 1 sample
-400 ms window +/- 1 sample
-step / impulse / deterministic noise
-```
-
-All current cases are byte-identical with the strict-WDL mode-3 PCM16 writer.
-
-# FFmpeg decoder-path investigation
-
-## Why `TYPE=VIDEO` was not accepted as proof
-
-REAPER's source type string is too coarse to prove which backend performed the
-decode. A process may also preload FFmpeg libraries even while decoding another
-format, so checking `/proc/<pid>/maps` alone is insufficient.
-
-## Direct FFmpeg function-call provenance — Runtime trace
-
-A dedicated Linux workflow runs WAVE and ALAC/M4A inputs in separate REAPER
-processes under GDB and traces calls to:
+`GetMediaSourceType(...)=VIDEO` alone was not accepted as proof of FFmpeg use.
+A dedicated Linux runtime trace observed REAPER's `reaper_video.so` calling
+FFmpeg functions including:
 
 ```text
 avio_alloc_context
@@ -547,116 +395,57 @@ avcodec_send_packet
 avcodec_receive_frame
 ```
 
-For the ALAC/M4A test, calls were observed from REAPER's `reaper_video.so` into
-`libavformat.so.60` / `libavcodec.so.60`. The WAVE control process recorded zero
-calls to those monitored FFmpeg functions while building the cache.
-
-This establishes an actual FFmpeg demux/decode path for the tested REAPER 7.79
-Linux ALAC source. It does not prove that every REAPER `VIDEO` source on every
-platform uses the same backend.
-
-## Decoder-path equivalence isolation
-
-The same deterministic PCM was supplied to REAPER as WAVE and as lossless ALAC
-M4A. After excluding source metadata differences, their peak payloads matched in
-the diagnostic cases used to isolate the loudness mismatch.
-
-Separately, the permanent 8-case FFmpeg gate:
-
-1. generates deterministic PCM16;
-2. encodes it to ALAC with FFmpeg;
-3. decodes the ALAC with external FFmpeg and requires exact PCM16 round-trip;
-4. asks REAPER to build mode-3 peaks from the ALAC/VIDEO source;
-5. generates the same mode-3 cache with libreapeaks from the decoded PCM;
-6. compares the **entire files** byte-for-byte.
-
-The current signal set is:
-
-```text
-silence
-sine_997
-step
-impulse
-dc_tail
-low_level
-block_edge_impulse
-alternating
-```
+for the tested ALAC/M4A source. The WAVE control recorded zero calls to those
+monitored functions. This is evidence for that REAPER 7.79 Linux configuration,
+not a universal codec/platform claim.
 
 # Central-cache path policy
 
-Byte compatibility and path compatibility are separate problems.
+Byte compatibility and path compatibility are separate. REAPER may place caches
+beside the source, in a subdirectory, or in alternate storage. Exact central
+filenames must not be guessed from `altpeakspath`.
 
-REAPER's active configuration can place peak caches beside the source, in a
-subdirectory, or in an alternate/central location. The exact central filename
-is not safely derivable from `altpeakspath` alone.
-
-The canonical application-layer resolver therefore delegates path policy to
-REAPER's public:
+The canonical application-layer resolver delegates to the public REAPER API:
 
 ```text
 GetPeakFileNameEx(source, ..., forWrite)
 ```
 
-The repository contains helpers to:
+Repository helpers read the relevant `reaper.ini` values, can launch a
+short-lived REAPER process to query paths, persist answers in a versioned cache
+map, and reject malformed/unknown map formats instead of guessing. See
+[`REAPER_CENTRAL_CACHE.md`](REAPER_CENTRAL_CACHE.md).
 
-- read `peakcachegenrs`, `peakcachegenmode`, `altpeaks`, `altpeakspath`, and
-  `altpeaksopathlist` from `reaper.ini`;
-- launch a short-lived REAPER process solely to query read/write paths;
-- save those path-policy answers in a versioned JSON cache map;
-- reject unknown map versions and malformed path-query JSON rather than
-  guessing.
+# Current validation totals
 
-See [`REAPER_CENTRAL_CACHE.md`](REAPER_CENTRAL_CACHE.md) for the important
-distinction between the reusable policy helper and the current runnable demo
-CLI wiring.
-
-# Validation totals
-
-The deeper spectral/waveform totals are kept in
-[`validation-summary.json`](validation-summary.json). The two strongest current
-continuous whole-file gates are:
+Representative permanent totals are recorded in
+[`validation-summary.json`](validation-summary.json):
 
 ```text
-FFmpeg/ALAC mode-3:       8 / 8 whole files byte-identical
-adversarial mode-3:      16 / 16 whole files byte-identical
+FFmpeg/ALAC mode-3:                 8 / 8 whole files exact
+adversarial mode-3:               16 / 16 whole files exact
+spectrogram mode-3 strict-WDL:   122 / 122 whole files exact
+-'s' fresh-process primary:   10,112 / 10,112 codes exact
+-'s' independent fine total:  16,300 / 16,300 codes exact
+-'s' all-mipmap:              96,222 / 96,222 codes exact
+waveform primary:            122,516 / 122,516 buckets exact
 ```
 
-The spectral corpora additionally contain:
+# Intentionally unsupported / unproven areas
 
-```text
-357 fine cases / 16,300 spectral codes exact
-8 all-mipmap cases / 24 layers / 96,222 codes exact
-3,219 / 3,219 aggregate points exact
-```
+The major RPKN PCM16 mode-3 waveform, `-'s'`, `-'g'`, and `-'r'` algorithms are
+now represented in the implementation and live oracle suite. Remaining gaps
+include:
 
-# Format-dependent observations
+1. REAPER versions/platforms/architectures outside the named oracle matrices;
+2. f32/RPKL `-'g'` generation;
+3. complete mode-3/`-'g'` writer entry points in public C and Python APIs;
+4. legacy `-'l'` payload layout;
+5. RPKM compact waveform materialization;
+6. exact REAPER NaN/Inf/subnormal policy for arbitrary float media;
+7. broader codec/decoder matrices;
+8. mmap-backed parsing for extremely long files as a performance feature.
 
-For the same decoded 48 kHz stereo signal, historical REAPER 7.79 probes found
-identical wave/spectral/loudness payloads for integer lossless sources including
-WAV PCM16/24/32 and FLAC16/24. A float WAV used RPKL waveform encoding while
-retaining the corresponding spectral/loudness behavior. On the tested build,
-MP3, Vorbis, and Opus were also observed using RPKL waveform encoding.
-
-These are observations from a specific REAPER build, not a rule for selecting
-wave encoding solely from a file extension. libreapeaks therefore keeps decoded
-sample representation and chosen RPKN/RPKL output encoding separate.
-
-# Remaining work / intentionally unsupported areas
-
-The major waveform, `-'s'` spectral, and `-'r'` mode-3 loudness algorithms are
-now represented in the implementation and current oracle suite. Remaining work
-is primarily outside that proven surface:
-
-1. `-'g'` spectrogram generation;
-2. legacy `-'l'` payload layout;
-3. RPKM compact waveform payload materialization;
-4. exact REAPER policy for arbitrary NaN/Inf/subnormal float media;
-5. broader OS/architecture/REAPER-version/codec oracle matrices;
-6. complete mode-3 generation entry points in the public C and Python writer
-   APIs;
-7. mmap-backed parsing for extremely long files as a performance feature.
-
-Future golden-oracle additions should continue to use a fresh REAPER process per
-media source and should distinguish **observed REAPER behavior** from general
-DSP rules.
+Future oracle work should continue to use fresh REAPER processes and should
+label observed 7.79 behavior as such rather than silently promoting it to a
+general DSP/file-format rule.

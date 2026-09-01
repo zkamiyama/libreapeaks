@@ -1,0 +1,215 @@
+name: reaper-spectrogram-base-oracle
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/reaper-spectrogram-base-oracle.yml'
+      - 'tools/reaper_oracle/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-spectrogram-base-oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-base-oracle
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-base-oracle/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create 208-sample base-frame probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, math, struct, wave
+
+          root = Path('/tmp/spectrogram-base-oracle/media')
+          sr = 48_000
+          frames = 208
+          cases = [
+              dict(name='silence_208', kind='silence'),
+              dict(name='tone_6000_208', kind='tone', hz=6000.0, amp=0.5),
+              dict(name='tone_997_208', kind='tone', hz=997.0, amp=0.5),
+              dict(name='noise_208', kind='noise'),
+          ]
+          for position in (0, 1, 16, 32, 47, 48, 64, 96, 127, 159, 191, 207):
+              cases.append(dict(name=f'imp_{position:03d}', kind='impulse', position=position))
+          (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          def q16(value):
+              return max(-32768, min(32767, int(round(value))))
+
+          for case_index, case in enumerate(cases):
+              seed = (0x2468ACE1 ^ (case_index * 0x9E3779B9)) & 0xffffffff
+              payload = bytearray()
+              for frame in range(frames):
+                  if case['kind'] == 'silence':
+                      value = 0
+                  elif case['kind'] == 'tone':
+                      phase = 2.0 * math.pi * case['hz'] * frame / sr
+                      value = q16(case['amp'] * 32767.0 * math.sin(phase))
+                  elif case['kind'] == 'noise':
+                      seed = (1664525 * seed + 1013904223) & 0xffffffff
+                      value = (((seed >> 16) & 0xffff) - 32768) // 3
+                  elif case['kind'] == 'impulse':
+                      value = 32767 if frame == case['position'] else 0
+                  else:
+                      raise AssertionError(case)
+                  payload += struct.pack('<h', value)
+              wav_path = root / f"{case['name']}.wav"
+              with wave.open(str(wav_path), 'wb') as out:
+                  out.setnchannels(1)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+      - name: Build real REAPER base-frame caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess, tempfile, time
+
+          root = Path('/tmp/spectrogram-base-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':93'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.4)
+              for index, case in enumerate(cases):
+                  name = case['name']
+                  media = media_root / f'{name}.wav'
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-base-{index:02d}-'))
+                  config = case_dir / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=1345\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case_dir / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  with (results / f'{name}.reaper.log').open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{name}: REAPER failed rc={completed.returncode}: {status!r}')
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{name}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Decode direct base-frame values
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/spectrogram-base-oracle/results/report.txt
+          from pathlib import Path
+          import json, struct
+
+          root = Path('/tmp/spectrogram-base-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          TOKEN_G = -ord('g')
+
+          def decode(raw):
+              values = []
+              for off in range(0, 192, 3):
+                  first, packed, second = raw[off:off + 3]
+                  values.append((first << 4) | (packed >> 4))
+                  values.append((second << 4) | (packed & 0x0f))
+              return values
+
+          def first_g(path):
+              data = path.read_bytes()
+              channels = data[4]
+              layer_count = data[5]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              for division, count in headers:
+                  size = count * channels * 4
+                  payload = data[offset:offset + size]
+                  if division == TOKEN_G:
+                      if count != 48:
+                          raise AssertionError((path, headers))
+                      return headers, decode(payload[:192])
+                  offset += size
+              raise AssertionError((path, 'no -g layer'))
+
+          for case in cases:
+              name = case['name']
+              headers, bins = first_g(results / f'{name}.reaper.reapeaks')
+              top = sorted(range(128), key=lambda i: (-bins[i], i))[:8]
+              print(
+                  f"{name} min={min(bins)} max={max(bins)} code0={bins[0]} "
+                  f"unique={len(set(bins))} top={[(i, bins[i]) for i in top]} headers={headers}"
+              )
+          PY
+          cat /tmp/spectrogram-base-oracle/results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload base-frame evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-base-oracle-${{ github.sha }}
+          path: |
+            /tmp/spectrogram-base-oracle/results
+            /tmp/spectrogram-base-oracle/media/cases.json
+          if-no-files-found: error
+          retention-days: 7

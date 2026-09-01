@@ -166,7 +166,7 @@ jobs:
                       '[REAPER]\n'
                       'peakcachegenmode=3\n'
                       f"peakcachegenrs={case_info['pps']}\n"
-                      'showpeaks=64\n', encoding='utf-8')
+                      'showpeaks=1345\n', encoding='utf-8')
                   status_path = case_dir / 'result.txt'
                   env = os.environ.copy()
                   env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status_path))
@@ -239,8 +239,7 @@ jobs:
               off = 18 + 8*n
               layers = []
               for div,count in headers:
-                  if div > 0 or div in (-115,-114): size = count * channels * 4
-                  elif div == -103: size = count * channels * 192
+                  if div > 0 or div in (-115,-114,-103): size = count * channels * 4
                   else: raise ValueError((path, div))
                   layers.append((div,count,off,data[off:off+size]))
                   off += size

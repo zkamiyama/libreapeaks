@@ -1,0 +1,264 @@
+name: reaper-spectrogram-scheduler-oracle
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - .github/workflows/reaper-spectrogram-scheduler-oracle.yml
+      - tools/reaper_oracle/build_probe.lua
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-scheduler-oracle
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-scheduler-oracle/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Create scheduler and exact-bin tone probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, math, struct, wave
+
+          root = Path('/tmp/spectrogram-scheduler-oracle/media')
+          sr = 48_000
+          cases = []
+          for frames in (2399, 2400, 2401, 47999, 48000, 48001):
+              cases.append(dict(name=f'sched_{frames}', kind='scheduler', frames=frames, amp=0.5))
+          for label, amp in (
+              ('full', 1.0),
+              ('p90', 0.9),
+              ('p75', 0.75),
+              ('p60', 0.6),
+              ('half', 0.5),
+              ('p40', 0.4),
+              ('p30', 0.3),
+              ('quarter', 0.25),
+              ('p20', 0.2),
+              ('eighth', 0.125),
+              ('sixteenth', 0.0625),
+              ('p01', 0.01),
+          ):
+              cases.append(dict(name=f'amp_{label}', kind='amplitude', frames=sr, amp=amp))
+          (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          def q16(value):
+              return max(-32768, min(32767, int(round(value))))
+
+          for case in cases:
+              payload = bytearray()
+              frames = case['frames']
+              for frame in range(frames):
+                  phase = 2.0 * math.pi * 6000.0 * frame / sr
+                  sample = q16(case['amp'] * 32767.0 * math.sin(phase))
+                  payload += struct.pack('<h', sample)
+              wav_path = root / f"{case['name']}.wav"
+              with wave.open(str(wav_path), 'wb') as out:
+                  out.setnchannels(1)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+          PY
+      - name: Build real REAPER spectrogram caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess, tempfile, time
+
+          root = Path('/tmp/spectrogram-scheduler-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          display = ':99'
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          try:
+              time.sleep(0.4)
+              for index, case in enumerate(cases):
+                  name = case['name']
+                  media = media_root / f'{name}.wav'
+                  peak_name = media.name + '.reapeaks'
+                  for old in media_root.rglob(peak_name):
+                      old.unlink()
+                  case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-scheduler-{index:02d}-'))
+                  config = case_dir / 'reaper.ini'
+                  config.write_text(
+                      '[REAPER]\n'
+                      'peakcachegenmode=3\n'
+                      'peakcachegenrs=300\n'
+                      'showpeaks=1345\n',
+                      encoding='utf-8',
+                  )
+                  status_path = case_dir / 'result.txt'
+                  env = os.environ.copy()
+                  env.update(
+                      DISPLAY=display,
+                      REAPEAKS_MEDIA=str(media.resolve()),
+                      REAPEAKS_RESULT=str(status_path),
+                  )
+                  log_path = results / f'{name}.reaper.log'
+                  with log_path.open('wb') as log:
+                      completed = subprocess.run(
+                          [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                          env=env,
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                          timeout=90,
+                          check=False,
+                      )
+                  status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+                  (results / f'{name}.status.txt').write_text(status, encoding='utf-8')
+                  if completed.returncode != 0 or 'OK loops=' not in status:
+                      raise SystemExit(f'{name}: REAPER failed rc={completed.returncode}: {status!r}')
+                  peaks = list(media_root.rglob(peak_name))
+                  if len(peaks) != 1:
+                      raise SystemExit(f'{name}: expected one peak file, found {peaks}')
+                  shutil.copy2(peaks[0], results / f'{name}.reaper.reapeaks')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+      - name: Measure scheduler, quantizer, and window
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/spectrogram-scheduler-oracle/results/report.txt
+          from pathlib import Path
+          import json, math, struct
+
+          root = Path('/tmp/spectrogram-scheduler-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          cases = json.loads((media_root / 'cases.json').read_text())
+          WORDS_PER_FRAME = 48
+          BYTES_PER_FRAME = 192
+          TOKEN_G = -ord('g')
+
+          def decode_frame(raw):
+              if len(raw) != BYTES_PER_FRAME:
+                  raise AssertionError(len(raw))
+              bins = []
+              for offset in range(0, len(raw), 3):
+                  first, packed, second = raw[offset:offset + 3]
+                  bins.append((first << 4) | (packed >> 4))
+                  bins.append((second << 4) | (packed & 0x0f))
+              return bins
+
+          def parse(path):
+              data = path.read_bytes()
+              if data[:4] != b'RPKN':
+                  raise AssertionError((path, data[:4]))
+              channels = data[4]
+              layer_count = data[5]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  size = count * channels * 4
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise AssertionError((path, division, count, len(payload), size))
+                  layers.append((division, count, payload))
+                  offset += size
+              if offset != len(data):
+                  raise AssertionError((path, offset, len(data)))
+              return headers, [layer for layer in layers if layer[0] == TOKEN_G]
+
+          parsed = {}
+          print('SCHEDULER_BOUNDARIES')
+          for case in cases:
+              headers, g_layers = parse(results / f"{case['name']}.reaper.reapeaks")
+              parsed[case['name']] = (headers, g_layers)
+              if case['kind'] != 'scheduler':
+                  continue
+              g_words = [count for _, count, _ in g_layers]
+              g_frames = [count // WORDS_PER_FRAME for count in g_words]
+              print(
+                  f"samples={case['frames']} g_words={g_words} g_frames={g_frames} "
+                  f"floor2400={case['frames'] // 2400} ceil2400={(case['frames'] + 2399) // 2400} "
+                  f"floor48000={case['frames'] // 48000} ceil48000={(case['frames'] + 47999) // 48000} "
+                  f"headers={headers}"
+              )
+
+          print('EXACT_BIN_6000_QUANTIZER')
+          amp_rows = []
+          for case in cases:
+              if case['kind'] != 'amplitude':
+                  continue
+              _, g_layers = parsed[case['name']]
+              if not g_layers:
+                  raise AssertionError((case['name'], 'no spectrogram layer'))
+              _, count, payload = g_layers[0]
+              time_frames = count // WORDS_PER_FRAME
+              if time_frames == 0:
+                  raise AssertionError((case['name'], count))
+              selected = time_frames // 2
+              start = selected * BYTES_PER_FRAME
+              bins = decode_frame(payload[start:start + BYTES_PER_FRAME])
+              top = max(range(128), key=lambda i: (bins[i], -i))
+              code = bins[top]
+              model = 4095.0 + 123.0 * math.log2(case['amp'])
+              amp_rows.append((case['amp'], top, code, model, code - model, bins))
+              print(
+                  f"amp={case['amp']:.8f} top_bin={top} top_code={code} "
+                  f"model={model:.6f} residual={code - model:+.6f}"
+              )
+
+          half = next(row for row in amp_rows if row[0] == 0.5)
+          bins = half[5]
+          if half[1] != 31:
+              raise AssertionError(('6000 Hz expected FFT bin index 31', half[1]))
+          center = bins[31]
+          observed = [2.0 ** ((bins[31 + d] - center) / 123.0) for d in (1, 2, 3)]
+          a0, a1, a2, a3 = 0.35875, 0.48829, 0.14128, 0.01168
+          expected = [a1 / (2 * a0), a2 / (2 * a0), a3 / (2 * a0)]
+          print('BLACKMAN_HARRIS_4TERM')
+          for delta, obs, exp in zip((1, 2, 3), observed, expected):
+              print(f"delta={delta} observed_ratio={obs:.9f} expected_ratio={exp:.9f} error={obs-exp:+.9f}")
+              if abs(obs - exp) > 0.005:
+                  raise AssertionError((delta, obs, exp))
+          print('BLACKMAN_HARRIS_4TERM=confirmed')
+          PY
+          cat /tmp/spectrogram-scheduler-oracle/results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scheduler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-scheduler-oracle-${{ github.sha }}
+          path: /tmp/spectrogram-scheduler-oracle/results
+          if-no-files-found: error
+          retention-days: 7

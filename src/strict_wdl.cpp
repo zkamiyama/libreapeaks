@@ -82,6 +82,35 @@ int rpk_wdl_real_fft_1024(
     }
 }
 
+int rpk_wdl_real_fft_256(
+    const double *input,
+    double *out_re,
+    double *out_im) noexcept {
+    try {
+        if (!input || !out_re || !out_im) return kInvalidArgument;
+        rpk_wdl_fft_init_once();
+        double buf[256];
+        std::memcpy(buf, input, sizeof(buf));
+        WDL_real_fft(buf, 256, 0);
+
+        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buf);
+        out_re[0] = c[0].re;
+        out_im[0] = 0.0;
+        out_re[128] = c[0].im;
+        out_im[128] = 0.0;
+        int *perm = WDL_fft_permute_tab(128);
+        if (!perm) return kProcessingFailure;
+        for (int k = 1; k < 128; ++k) {
+            const int j = perm[k];
+            out_re[k] = c[j].re;
+            out_im[k] = c[j].im;
+        }
+        return 0;
+    } catch (...) {
+        return kCppException;
+    }
+}
+
 long long rpk_wdl_resample_all(
     const double *input,
     long long input_frames,
