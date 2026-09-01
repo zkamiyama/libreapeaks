@@ -44,6 +44,8 @@ pub mod wave;
 mod python;
 #[cfg(feature = "python")]
 mod python_reaper_generate;
+#[cfg(feature = "python")]
+mod python_spectrogram_view;
 
 pub use error::{ReaPeaksError, Result};
 pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
