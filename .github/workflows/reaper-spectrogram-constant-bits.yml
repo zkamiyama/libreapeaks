@@ -1,0 +1,86 @@
+name: reaper-spectrogram-constant-bits
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - '.github/workflows/reaper-spectrogram-constant-bits.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  constants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-constant-bits
+          mkdir -p "$root/reaper" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/reaper-constant-bits/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Decode recovered numeric constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          REAPER_BIN="$REAPER_BIN" python - <<'PY' | tee /tmp/reaper-constant-bits/results/report.txt
+          from pathlib import Path
+          import os, re, struct, subprocess
+
+          binary = Path(os.environ['REAPER_BIN'])
+          data = binary.read_bytes()
+          text = subprocess.check_output(['readelf', '-W', '-S', str(binary)], text=True)
+          sections = []
+          for line in text.splitlines():
+              m = re.match(r'\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)', line)
+              if m:
+                  name, va, off, size = m.groups()
+                  sections.append((name, int(va,16), int(off,16), int(size,16)))
+
+          def read_f64(va):
+              for name, sva, off, size in sections:
+                  if sva <= va < sva + size:
+                      file_off = off + (va - sva)
+                      raw = data[file_off:file_off+8]
+                      bits = int.from_bytes(raw, 'little')
+                      value = struct.unpack('<d', raw)[0]
+                      return name, file_off, bits, value
+              raise RuntimeError(hex(va))
+
+          # Addresses are direct RIP-relative targets in the pinned 7.79 binary.
+          targets = {
+              'quant_log_scale': 0xe72788,
+              'quant_bias': 0xe72790,
+              'bh_a1': 0xe727b8,
+              'bh_a0': 0xe727c0,
+              'bh_a2': 0xe727c8,
+              'bh_a3': 0xe727d0,
+              'two_pi': 0xddee60,
+              'three': 0xd8c130,
+              'one': 0xd86d08,
+              'zero_code_power_threshold': 0xe414f8,
+          }
+          for name, va in targets.items():
+              section, off, bits, value = read_f64(va)
+              print(f'{name} va=0x{va:x} section={section} off=0x{off:x} bits=0x{bits:016x} value={value:.17g} repr={value!r}')
+          PY
+          cat /tmp/reaper-constant-bits/results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-constant-bits-${{ github.sha }}
+          path: /tmp/reaper-constant-bits/results
+          if-no-files-found: error
+          retention-days: 7
