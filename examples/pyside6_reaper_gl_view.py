@@ -1,8 +1,9 @@
 """REAPER-style interaction wrapper for the direct GLSL analysis canvas.
 
 The wrapper is the public demo surface. It normalizes two binding/runtime
-quirks before the renderer is used: one Mesa-reserved GLSL identifier and the
-PySide6 6.11 requirement that scalar uniform names be passed as bytes.
+quirks before the renderer is used: one Mesa-reserved GLSL identifier and
+PySide6 6.11's scalar-uniform overload resolution by resolving names to integer
+uniform locations before calling ``setUniformValue``.
 """
 from __future__ import annotations
 
@@ -21,15 +22,27 @@ GpuAnalysisCanvas = _gl.GpuAnalysisCanvas
 
 
 class _UniformNameProxy:
-    """Delegate QOpenGLShaderProgram while encoding string uniform names."""
+    """Delegate QOpenGLShaderProgram with stable scalar uniform dispatch."""
 
     def __init__(self, program):
         self._program = program
+        self._locations = {}
+
+    def _location(self, name) -> int:
+        if isinstance(name, str):
+            key = name.encode("ascii")
+        elif isinstance(name, (bytes, bytearray, memoryview)):
+            key = bytes(name)
+        else:
+            return int(name)
+        location = self._locations.get(key)
+        if location is None:
+            location = int(self._program.uniformLocation(key))
+            self._locations[key] = location
+        return location
 
     def setUniformValue(self, name, *values):  # noqa: N802 - Qt API
-        if isinstance(name, str):
-            name = name.encode("ascii")
-        return self._program.setUniformValue(name, *values)
+        return self._program.setUniformValue(self._location(name), *values)
 
     def __getattr__(self, name):
         return getattr(self._program, name)
