@@ -15,6 +15,9 @@ const state = {
   follow: true,
   verticalScale: 1,
   renderSerial: 0,
+  renderRaf: 0,
+  overviewRaf: 0,
+  planAbortController: null,
 };
 
 class Lru {
@@ -24,7 +27,7 @@ class Lru {
     this.hits = 0;
     this.misses = 0;
   }
-  async get(key, loader) {
+  get(key, loader) {
     if (this.map.has(key)) {
       const value = this.map.get(key);
       this.map.delete(key);
@@ -32,9 +35,15 @@ class Lru {
       this.hits++;
       return value;
     }
-    const value = await loader();
-    this.map.set(key, value);
     this.misses++;
+    // Store the in-flight Promise itself. Rapid pan/zoom gestures can request
+    // the same tile from overlapping renders; sharing the Promise prevents
+    // duplicate HTTP work while preserving normal LRU behaviour afterwards.
+    const value = Promise.resolve().then(loader).catch((error) => {
+      this.map.delete(key);
+      throw error;
+    });
+    this.map.set(key, value);
     while (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
     return value;
   }
@@ -62,6 +71,9 @@ function formatTime(seconds) {
   const s = seconds % 60;
   return h ? `${h}:${String(m).padStart(2,'0')}:${s.toFixed(2).padStart(5,'0')}`
            : `${String(m).padStart(2,'0')}:${s.toFixed(2).padStart(5,'0')}`;
+}
+function clamp(value, lo, hi) {
+  return Math.max(lo, Math.min(hi, value));
 }
 function frameToX(frame, width) {
   return (frame - state.viewStart) / Math.max(1, state.viewEnd - state.viewStart) * width;
@@ -99,8 +111,8 @@ function drawTileBand(ctx, x0, x1, h, label, odd) {
   ctx.fillText(label, x0 + 4, 14);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || `${response.status}`);
   return body;
@@ -130,13 +142,26 @@ async function renderOverview() {
   drawOverlays();
 }
 
-async function renderWave(serial) {
+function scheduleOverview() {
+  if (!state.meta || state.overviewRaf) return;
+  state.overviewRaf = requestAnimationFrame(() => {
+    state.overviewRaf = 0;
+    renderOverview().catch((error) => {
+      $('tileInfo').textContent = `overview: ${String(error)}`;
+    });
+  });
+}
+
+async function renderWave(serial, signal) {
   const canvas = $('waveBase');
   const [w, h] = resizeCanvas(canvas);
   resizeCanvas($('waveOverlay'));
   const ctx = canvas.getContext('2d');
   clearAndGrid(ctx, w, h, state.meta.channels);
-  const plan = await fetchJson(`/api/plan?start=${Math.floor(state.viewStart)}&end=${Math.ceil(state.viewEnd)}&width=${w}`);
+  const plan = await fetchJson(
+    `/api/plan?start=${Math.floor(state.viewStart)}&end=${Math.ceil(state.viewEnd)}&width=${w}`,
+    {signal},
+  );
   if (serial !== state.renderSerial) return;
   state.plan = plan;
   const textures = await Promise.all(plan.tiles.map(({level_index, tile_index}) =>
@@ -228,17 +253,36 @@ async function renderSpectrum(serial) {
   }
 }
 
-async function renderView() {
-  if (!state.meta) return;
-  const serial = ++state.renderSerial;
+async function renderView(serial = state.renderSerial) {
+  if (!state.meta || serial !== state.renderSerial) return;
+  const controller = new AbortController();
+  state.planAbortController = controller;
   try {
-    await renderWave(serial);
+    await renderWave(serial, controller.signal);
+    if (serial !== state.renderSerial) return;
     await renderSpectrum(serial);
     if (serial === state.renderSerial) updateDiagnostics();
   } catch (error) {
-    $('tileInfo').textContent = String(error);
+    if (error?.name !== 'AbortError' && serial === state.renderSerial) {
+      $('tileInfo').textContent = String(error);
+    }
+  } finally {
+    if (state.planAbortController === controller) state.planAbortController = null;
+    drawOverlays();
   }
-  drawOverlays();
+}
+
+function scheduleRender() {
+  if (!state.meta) return;
+  // Invalidate an in-flight view immediately. A newer render can still reuse
+  // any tile Promises that are already in the LRU, but stale plan work stops.
+  state.renderSerial++;
+  state.planAbortController?.abort();
+  if (state.renderRaf) return;
+  state.renderRaf = requestAnimationFrame(() => {
+    state.renderRaf = 0;
+    renderView(state.renderSerial);
+  });
 }
 
 function drawOverlays() {
@@ -267,16 +311,33 @@ function setView(start, end, render = true) {
   let span = Math.max(minSpan, end - start);
   span = Math.min(span, state.meta.total_frames);
   start = Math.max(0, Math.min(start, state.meta.total_frames - span));
+  const nextEnd = start + span;
+  if (Math.abs(start - state.viewStart) < 0.01 && Math.abs(nextEnd - state.viewEnd) < 0.01) return;
   state.viewStart = start;
-  state.viewEnd = start + span;
-  if (render) renderView();
-  else drawOverlays();
+  state.viewEnd = nextEnd;
+  // Selection/playhead feedback moves immediately; cache planning and tile
+  // drawing are collapsed to at most one request per animation frame.
+  drawOverlays();
+  if (render) scheduleRender();
 }
 function zoom(factor, anchor = 0.5) {
+  anchor = clamp(anchor, 0, 1);
   const span = state.viewEnd - state.viewStart;
   const target = state.viewStart + span * anchor;
   const newSpan = span * factor;
   setView(target - newSpan * anchor, target + newSpan * (1-anchor));
+}
+function setVerticalScale(value, render = true) {
+  const next = clamp(Number(value), 0.1, 32);
+  if (!Number.isFinite(next)) return;
+  if (Math.abs(next - state.verticalScale) < 1e-6) return;
+  state.verticalScale = next;
+  const slider = $('verticalScale');
+  if (slider) slider.value = String(next);
+  const label = $('verticalValue');
+  if (label) label.textContent = next.toFixed(2);
+  if (render) scheduleRender();
+  else updateDiagnostics();
 }
 function seekFrame(frame) {
   frame = Math.max(0, Math.min(frame, state.meta.total_frames));
@@ -285,44 +346,75 @@ function seekFrame(frame) {
   drawOverlays();
 }
 
+function wheelSteps(event, element) {
+  let delta = event.deltaY;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) delta *= 40;
+  else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) delta *= Math.max(1, element.clientHeight);
+  // Conventional wheels are roughly 100–120 px/detent in browsers. Keeping
+  // this continuous makes precision trackpads zoom smoothly instead of
+  // turning every tiny movement into a full detent.
+  return clamp(-delta / 120, -4, 4);
+}
+
 function installCanvasInteraction(element) {
   let drag = null;
   element.addEventListener('wheel', (event) => {
     event.preventDefault();
+    const steps = wheelSteps(event, element);
+    if (!steps) return;
+    if (event.ctrlKey) {
+      // Match the desktop demo/REAPER convention: wheel up makes the waveform
+      // taller, represented here by a smaller full-scale value.
+      setVerticalScale(state.verticalScale * (1.15 ** (-steps)));
+      return;
+    }
     const rect = element.getBoundingClientRect();
-    zoom(event.deltaY < 0 ? 0.72 : 1/0.72, (event.clientX - rect.left) / rect.width);
+    const anchor = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    zoom(0.72 ** steps, anchor);
   }, {passive: false});
   element.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
     element.setPointerCapture(event.pointerId);
-    drag = {x: event.clientX, start: state.viewStart, end: state.viewEnd, moved: 0};
+    element.classList.add('isDragging');
+    drag = {pointerId: event.pointerId, x: event.clientX, start: state.viewStart, end: state.viewEnd, moved: 0};
   });
   element.addEventListener('pointermove', (event) => {
-    if (!drag) return;
+    if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.x; drag.moved = Math.max(drag.moved, Math.abs(dx));
     const framesPerPx = (drag.end - drag.start) / Math.max(1, element.clientWidth);
     const shift = -dx * framesPerPx;
     setView(drag.start + shift, drag.end + shift);
   });
-  element.addEventListener('pointerup', (event) => {
-    if (!drag) return;
-    if (drag.moved < 4) {
+  const finishPointer = (event, seek) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (seek && drag.moved < 4) {
       const rect = element.getBoundingClientRect();
-      const ratio = (event.clientX - rect.left) / rect.width;
+      const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
       seekFrame(state.viewStart + ratio * (state.viewEnd - state.viewStart));
     }
+    if (element.hasPointerCapture?.(event.pointerId)) element.releasePointerCapture(event.pointerId);
     drag = null;
+    element.classList.remove('isDragging');
+  };
+  element.addEventListener('pointerup', (event) => finishPointer(event, true));
+  element.addEventListener('pointercancel', (event) => finishPointer(event, false));
+  element.addEventListener('lostpointercapture', () => {
+    drag = null;
+    element.classList.remove('isDragging');
   });
 }
 
 function updateDiagnostics() {
   const p = state.plan;
-  if (!p) return;
+  if (!p || !state.meta) return;
   const waveTiles = p.tiles.map(t => `L${t.level_index}/T${t.tile_index}`).join(', ');
   const s = p.spectral;
   const div = s ? `S${s.layer_index} div=${s.division}` : 'none';
-  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | wave L${p.level_index} div=${p.division}, ${p.peaks_per_pixel.toFixed(2)} peaks/px | spectral ${div}`;
+  const span = Math.max(1, state.viewEnd - state.viewStart);
+  const horizontalZoom = state.meta.total_frames / span;
+  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× V-FS=${state.verticalScale.toFixed(2)} | wave L${p.level_index} div=${p.division}, ${p.peaks_per_pixel.toFixed(2)} peaks/px | spectral ${div}`;
   $('tileInfo').textContent = waveTiles || '(no wave tiles)';
-  $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident · hit=${tileCache.hits} miss=${tileCache.misses}`;
+  $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident/pending · hit=${tileCache.hits} miss=${tileCache.misses}`;
 }
 
 function updateTransport() {
@@ -359,20 +451,22 @@ async function init() {
   $('zoomInButton').onclick = () => zoom(.5);
   $('zoomOutButton').onclick = () => zoom(2);
   $('fullButton').onclick = () => setView(0, state.meta.total_frames);
-  $('showTiles').onchange = event => { state.showTiles = event.target.checked; renderView(); };
+  $('showTiles').onchange = event => { state.showTiles = event.target.checked; scheduleRender(); };
   $('followPlayhead').onchange = event => { state.follow = event.target.checked; };
-  $('verticalScale').oninput = event => {
-    state.verticalScale = Number(event.target.value); $('verticalValue').textContent = state.verticalScale.toFixed(2); renderView();
-  };
+  $('verticalScale').oninput = event => setVerticalScale(event.target.value);
   $('positionSlider').oninput = event => seekFrame(Number(event.target.value)/100000 * state.meta.total_frames);
   $('audio').addEventListener('play', () => $('playButton').textContent = 'Pause');
   $('audio').addEventListener('pause', () => $('playButton').textContent = 'Play');
   $('audio').addEventListener('timeupdate', updateTransport);
 
-  const ro = new ResizeObserver(() => { renderOverview(); renderView(); });
+  const ro = new ResizeObserver(() => {
+    scheduleOverview();
+    scheduleRender();
+  });
   ro.observe(document.querySelector('main'));
   await renderOverview();
-  await renderView();
+  state.renderSerial++;
+  await renderView(state.renderSerial);
   updateTransport();
 
   const tick = () => { if (!$('audio').paused) updateTransport(); requestAnimationFrame(tick); };
