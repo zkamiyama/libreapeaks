@@ -1,3 +1,4 @@
+use crate::format::Version;
 use crate::{GpuCacheView, GpuLayerKind};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -46,6 +47,15 @@ impl PyGpuCacheView {
     #[getter]
     pub fn channels(&self) -> u8 {
         self.view.channels
+    }
+
+    #[getter]
+    pub fn wave_encoding(&self) -> &'static str {
+        match self.view.version {
+            Version::Rpkn => "RPKN",
+            Version::Rpkl => "RPKL",
+            Version::Rpkm => "RPKM",
+        }
     }
 
     #[getter]
