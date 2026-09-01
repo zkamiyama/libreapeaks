@@ -18,6 +18,7 @@ pub mod format;
 pub mod generate;
 pub mod loudness;
 pub mod pyramid;
+pub mod reaper_generate;
 
 // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
 // deliberately bypasses its public source-domain scheduler entrypoints. Those
@@ -48,6 +49,7 @@ pub use generate::{
     generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
+pub use reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
 pub use spectrogram::{
     decode_spectrogram_frame, encode_spectrogram_frame, parse_spectrogram_layers, SpectrogramFrame,
     SpectrogramLayer, SPECTROGRAM_BINS, SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
