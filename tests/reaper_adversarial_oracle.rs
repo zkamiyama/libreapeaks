@@ -144,7 +144,7 @@ fn assert_spectrogram_extension(
         oracle_parsed.spectrogram_layers.len(),
         spectrogram_headers.len()
     );
-    assert!(positive_divisions.len() >= spectrogram_headers.len() + 1);
+    assert!(positive_divisions.len() > spectrogram_headers.len());
 
     for (index, header) in spectrogram_headers.iter().enumerate() {
         let words = header.peak_count as usize;

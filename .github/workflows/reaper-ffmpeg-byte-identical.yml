@@ -162,7 +162,7 @@ jobs:
                       '[REAPER]\n'
                       'peakcachegenmode=3\n'
                       'peakcachegenrs=300\n'
-                      'showpeaks=1345\n',
+                      'showpeaks=64\n',
                       encoding='utf-8',
                   )
                   status_path = case / 'result.txt'
