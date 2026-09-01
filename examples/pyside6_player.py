@@ -13,6 +13,7 @@ without materializing every analysis layer on the CPU.
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import sys
 
@@ -46,6 +47,14 @@ from pyside6_gpu_overview import build_gpu_overview_image
 from pyside6_prepare import CachePreparationDialog
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 from pyside6_views import OverviewWidget, PeaksCanvas
+from source_pcm import (
+    DEFAULT_PCM_CACHE_BYTES,
+    DEFAULT_PCM_MAX_WINDOW_BYTES,
+    DEFAULT_PCM_TARGET_PAGE_BYTES,
+    PcmRangeEvent,
+    SourcePcmService,
+    open_pcm_window_reader,
+)
 
 
 class PlayerWindow(QMainWindow):
@@ -60,6 +69,14 @@ class PlayerWindow(QMainWindow):
         render_backend: str,
         cache_decoder: str,
         playback_decoder: str,
+        source_pcm_enabled: bool,
+        pcm_decoder: str,
+        ffmpeg: str,
+        ffprobe: str,
+        decode_timeout: float,
+        pcm_cache_bytes: int,
+        pcm_max_window_bytes: int,
+        pcm_target_page_bytes: int,
     ):
         super().__init__()
         self.audio_path = audio_path
@@ -108,12 +125,10 @@ class PlayerWindow(QMainWindow):
                 or exact_audio_frames(audio_path, self.sample_rate)
                 or estimated_frames
             )
-            self.canvas = ReaperGpuAnalysisCanvas(
-                str(peaks_path), self.total_frames
-            )
             overview_image = build_gpu_overview_image(self.gpu, 1200, 84)
             native_count = len(waveform_levels)
             derived_count = 0
+            qpainter_native_levels = []
         else:
             self.rp = reapeaks.ReaPeaks.open(str(peaks_path))
             levels = self.rp.levels()
@@ -130,9 +145,8 @@ class PlayerWindow(QMainWindow):
                 or exact_audio_frames(audio_path, self.sample_rate)
                 or estimated_frames
             )
-            self.canvas = PeaksCanvas(self.rp, self.total_frames)
             # Only advertise spectral layers that are actually readable.
-            self.canvas.native_levels = [
+            qpainter_native_levels = [
                 (level_index, division, peak_count)
                 for _layer, level_index, division, peak_count in available_spectral_levels(
                     self.rp, levels
@@ -155,6 +169,48 @@ class PlayerWindow(QMainWindow):
             ).copy()
             native_count = sum(1 for _division, _count, native in levels if native)
             derived_count = len(levels) - native_count
+
+        self.source_pcm: SourcePcmService | None = None
+        self.source_pcm_error = "disabled by --no-source-pcm"
+        if source_pcm_enabled:
+            pcm_path = playback_path if playback_decoder == "ffmpeg" else audio_path
+            try:
+                reader = open_pcm_window_reader(
+                    pcm_path,
+                    decoder=pcm_decoder,  # type: ignore[arg-type]
+                    ffmpeg=ffmpeg,
+                    ffprobe=ffprobe,
+                    timeout=decode_timeout,
+                    total_frames_hint=self.total_frames,
+                )
+                self.source_pcm = SourcePcmService(
+                    reader,
+                    cache_bytes=pcm_cache_bytes,
+                    max_window_bytes=pcm_max_window_bytes,
+                    target_page_bytes=pcm_target_page_bytes,
+                    expected_sample_rate=self.sample_rate,
+                    expected_channels=self.channels,
+                )
+                self.source_pcm_error = ""
+            except Exception as exc:
+                # Extreme zoom should degrade to the existing peak renderer,
+                # not prevent playback when an optional decoder is missing.
+                self.source_pcm_error = f"{type(exc).__name__}: {exc}"
+
+        if self.render_backend == "glsl":
+            self.canvas = ReaperGpuAnalysisCanvas(
+                str(peaks_path),
+                self.total_frames,
+                pcm_service=self.source_pcm,
+            )
+        else:
+            assert self.rp is not None
+            self.canvas = PeaksCanvas(
+                self.rp,
+                self.total_frames,
+                pcm_service=self.source_pcm,
+            )
+            self.canvas.native_levels = qpainter_native_levels
 
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -227,6 +283,10 @@ class PlayerWindow(QMainWindow):
         self.time_label = QLabel("00:00.00 / 00:00.00")
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
+        self.pcm_range_label = QLabel("PCM range events: none")
+        self.pcm_range_label.setWordWrap(True)
+        self.pcm_range_access_count = 0
+        self.pcm_range_decode_count = 0
         self.api_label = QLabel()
         self.api_label.setWordWrap(True)
         self.gesture_label = QLabel(
@@ -260,6 +320,7 @@ class PlayerWindow(QMainWindow):
         layout.addWidget(self.position_slider)
         layout.addWidget(self.gesture_label)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.pcm_range_label)
         layout.addWidget(self.api_label)
         central = QWidget()
         central.setLayout(layout)
@@ -275,8 +336,21 @@ class PlayerWindow(QMainWindow):
         self.player.errorOccurred.connect(
             lambda _error, text: self.statusBar().showMessage(text)
         )
+        pcm_loader = getattr(self.canvas, "pcm_loader", None)
+        if pcm_loader is not None:
+            pcm_loader.rangeAccess.connect(self._pcm_range_access)
+            pcm_loader.rangeDecoded.connect(self._pcm_range_decoded)
 
         defaults = reapeaks.default_divisions(self.sample_rate)
+        if self.source_pcm is not None:
+            source_summary = (
+                f"source_pcm={self.source_pcm.info.backend}/"
+                f"{self.source_pcm.info.codec} "
+                f"LRU={self.source_pcm.cache.capacity_bytes / 1048576:g}MiB "
+                f"window≤{self.source_pcm.max_window_bytes / 1048576:g}MiB"
+            )
+        else:
+            source_summary = f"source_pcm=unavailable ({self.source_pcm_error})"
         if self.render_backend == "glsl":
             assert self.gpu is not None
             layer_summary = ", ".join(
@@ -291,7 +365,8 @@ class PlayerWindow(QMainWindow):
                 f"encoding={self.wave_encoding} channels={self.channels} "
                 f"sr={self.sample_rate} | raw_cache={self.gpu.raw_bytes:,} bytes | "
                 f"{layer_summary} | default_divisions={defaults} | "
-                "display transforms stay on GPU (gain/palette/overlays are uniforms)"
+                "display transforms stay on GPU (gain/palette/overlays are uniforms) | "
+                f"{source_summary}"
             )
         else:
             assert self.rp is not None
@@ -307,7 +382,8 @@ class PlayerWindow(QMainWindow):
                 f"levels={native_count + derived_count} "
                 f"(native={native_count}, lazy-derived={derived_count}) | "
                 f"default_divisions={defaults} | coarsest envelope_texture="
-                f"{env_w}×{env_h} ({len(bytes(env_raw))} RGBA8 bytes)"
+                f"{env_w}×{env_h} ({len(bytes(env_raw))} RGBA8 bytes) | "
+                f"{source_summary}"
             )
 
         self.ui_timer = QTimer(self)
@@ -320,6 +396,27 @@ class PlayerWindow(QMainWindow):
         self.vertical_scale.blockSignals(True)
         self.vertical_scale.setValue(float(value))
         self.vertical_scale.blockSignals(False)
+
+    def _pcm_range_access(self, event: PcmRangeEvent) -> None:
+        self.pcm_range_access_count += 1
+        if event.reader_ran:
+            self.pcm_range_decode_count += 1
+        raw_end = event.raw_first_frame + event.raw_frame_count
+        self.pcm_range_label.setText(
+            f"PCM range events: accesses={self.pcm_range_access_count} "
+            f"decoded={self.pcm_range_decode_count} | #{event.event_id} "
+            f"{event.cache_disposition} {event.backend} "
+            f"frames {event.raw_first_frame}…{raw_end} "
+            f"reader={event.reader_ms:.2f}ms"
+        )
+
+    def _pcm_range_decoded(self, event: PcmRangeEvent) -> None:
+        raw_end = event.raw_first_frame + event.raw_frame_count
+        self.statusBar().showMessage(
+            f"source PCM range decode #{event.event_id}: "
+            f"{event.raw_first_frame}…{raw_end} ({event.reader_ms:.2f} ms)",
+            4000,
+        )
 
     def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -405,6 +502,20 @@ def parse_divisions(value: str) -> list[int]:
     return values
 
 
+def parse_mib(value: str, *, allow_zero: bool) -> int:
+    try:
+        mib = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("MiB value must be numeric") from exc
+    if not math.isfinite(mib) or mib < 0 or (mib == 0 and not allow_zero):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise argparse.ArgumentTypeError(f"MiB value must be {qualifier}")
+    result = int(mib * 1024 * 1024)
+    if result == 0 and not allow_zero:
+        raise argparse.ArgumentTypeError("MiB value rounds to zero bytes")
+    return result
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", type=Path)
@@ -448,6 +559,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--divisions", type=parse_divisions)
     parser.add_argument("--fine-peaks-per-second", type=int, default=300)
     parser.add_argument("--lock-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--no-source-pcm",
+        action="store_true",
+        help="disable automatic high-zoom source PCM windows",
+    )
+    parser.add_argument(
+        "--pcm-decoder",
+        choices=("auto", "wav", "ffmpeg"),
+        default="auto",
+        help="decoder used only for high-zoom source windows",
+    )
+    parser.add_argument(
+        "--pcm-cache-mib",
+        dest="pcm_cache_bytes",
+        type=lambda value: parse_mib(value, allow_zero=True),
+        default=DEFAULT_PCM_CACHE_BYTES,
+        metavar="MIB",
+        help="byte-bounded decoded-window LRU (default: 64 MiB)",
+    )
+    parser.add_argument(
+        "--pcm-window-mib",
+        dest="pcm_max_window_bytes",
+        type=lambda value: parse_mib(value, allow_zero=False),
+        default=DEFAULT_PCM_MAX_WINDOW_BYTES,
+        metavar="MIB",
+        help="hard limit for one decoded source window (default: 16 MiB)",
+    )
+    parser.add_argument(
+        "--pcm-page-mib",
+        dest="pcm_target_page_bytes",
+        type=lambda value: parse_mib(value, allow_zero=False),
+        default=DEFAULT_PCM_TARGET_PAGE_BYTES,
+        metavar="MIB",
+        help="target prefetch-page size (default: 1 MiB)",
+    )
     return parser.parse_args(argv)
 
 
@@ -500,6 +646,14 @@ def main(argv: list[str] | None = None) -> int:
             render_backend=args.renderer,
             cache_decoder=args.cache_decoder,
             playback_decoder=args.playback_decoder,
+            source_pcm_enabled=not args.no_source_pcm,
+            pcm_decoder=args.pcm_decoder,
+            ffmpeg=args.ffmpeg,
+            ffprobe=args.ffprobe,
+            decode_timeout=args.decode_timeout,
+            pcm_cache_bytes=args.pcm_cache_bytes,
+            pcm_max_window_bytes=args.pcm_max_window_bytes,
+            pcm_target_page_bytes=args.pcm_target_page_bytes,
         )
         window.show()
         return app.exec()

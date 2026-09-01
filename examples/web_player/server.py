@@ -32,6 +32,16 @@ from player_common import (  # noqa: E402
     prepare_playback_audio,
 )
 from player_native_cache import ensure_reapeaks_native  # noqa: E402
+from source_pcm import (  # noqa: E402
+    DEFAULT_PCM_CACHE_BYTES,
+    DEFAULT_PCM_MAX_WINDOW_BYTES,
+    DEFAULT_PCM_TARGET_PAGE_BYTES,
+    DEFAULT_SOURCE_ENTER_PIXELS_PER_PEAK,
+    DEFAULT_SOURCE_EXIT_PIXELS_PER_PEAK,
+    MIN_SAMPLE_VIEW_FRAMES,
+    SourcePcmService,
+    open_pcm_window_reader,
+)
 from webgl2_api import RawGpuService  # noqa: E402
 
 
@@ -45,6 +55,14 @@ class TileService:
         *,
         cache_decoder: str,
         playback_decoder: str,
+        source_pcm_enabled: bool,
+        pcm_decoder: str,
+        ffmpeg: str,
+        ffprobe: str,
+        decode_timeout: float,
+        pcm_cache_bytes: int,
+        pcm_max_window_bytes: int,
+        pcm_target_page_bytes: int,
     ):
         self.audio_path = audio_path
         self.playback_path = playback_path
@@ -84,6 +102,36 @@ class TileService:
             "height": env_h,
             "bytes": len(bytes(env_raw)),
         }
+        self.source_pcm: SourcePcmService | None = None
+        self.source_pcm_error = "disabled by --no-source-pcm"
+        if source_pcm_enabled:
+            # If playback was explicitly decoded to a temporary float WAV,
+            # reuse that seekable disk-backed file. Otherwise read/decode the
+            # original source in bounded windows.
+            pcm_path = playback_path if playback_decoder == "ffmpeg" else audio_path
+            try:
+                reader = open_pcm_window_reader(
+                    pcm_path,
+                    decoder=pcm_decoder,  # type: ignore[arg-type]
+                    ffmpeg=ffmpeg,
+                    ffprobe=ffprobe,
+                    timeout=decode_timeout,
+                    total_frames_hint=self.total_frames,
+                )
+                self.source_pcm = SourcePcmService(
+                    reader,
+                    cache_bytes=pcm_cache_bytes,
+                    max_window_bytes=pcm_max_window_bytes,
+                    target_page_bytes=pcm_target_page_bytes,
+                    expected_sample_rate=int(self.rp.sample_rate),
+                    expected_channels=int(self.rp.channels),
+                )
+                self.source_pcm_error = ""
+            except Exception as exc:
+                # Source PCM is an extreme-zoom enhancement. A decoder that is
+                # unavailable for this media must not take down the peak-cache
+                # player; the client receives the reason and stays on reapeaks.
+                self.source_pcm_error = f"{type(exc).__name__}: {exc}"
 
     def meta(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -111,6 +159,16 @@ class TileService:
             ],
             "native_spectral_levels": self.native_levels,
             "coarsest_envelope_texture": self.coarsest_texture,
+            "source_pcm": (
+                self.source_pcm.meta()
+                if self.source_pcm is not None
+                else {"available": False, "error": self.source_pcm_error}
+            ),
+            "source_lod": {
+                "enter_pixels_per_fine_peak": DEFAULT_SOURCE_ENTER_PIXELS_PER_PEAK,
+                "exit_pixels_per_fine_peak": DEFAULT_SOURCE_EXIT_PIXELS_PER_PEAK,
+                "min_view_frames": MIN_SAMPLE_VIEW_FRAMES,
+            },
         }
         payload.update(self.gpu_api.meta())
         return payload
@@ -151,7 +209,7 @@ class DemoHTTPServer(ThreadingHTTPServer):
 
 
 class DemoHandler(BaseHTTPRequestHandler):
-    server_version = "libreapeaks-demo/3"
+    server_version = "libreapeaks-demo/4"
 
     @property
     def service(self) -> TileService:
@@ -300,6 +358,8 @@ class DemoHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"missing query parameter {name}")
             value = default
         else:
+            if len(values) != 1:
+                raise ValueError(f"query parameter {name} must appear exactly once")
             value = int(values[0])
         if minimum is not None and value < minimum:
             raise ValueError(f"query parameter {name} must be >= {minimum}")
@@ -310,12 +370,21 @@ class DemoHandler(BaseHTTPRequestHandler):
         values = query.get(name)
         if not values or not values[0]:
             raise ValueError(f"missing query parameter {name}")
+        if len(values) != 1:
+            raise ValueError(f"query parameter {name} must appear exactly once")
         return values[0]
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
         try:
+            parsed = urlparse(self.path)
+            # Keep blank values so ``count=&count=1`` remains a duplicate and
+            # cannot evade the exactly-once checks.  Parsing itself belongs in
+            # this error boundary because max_num_fields intentionally raises.
+            query = parse_qs(
+                parsed.query,
+                keep_blank_values=True,
+                max_num_fields=32,
+            )
             if parsed.path in ("/", "/index.html"):
                 return self.send_static(HERE / "index.html")
             if parsed.path == "/app.js":
@@ -342,6 +411,65 @@ class DemoHandler(BaseHTTPRequestHandler):
                 count = self._int_arg(query, "count", minimum=1)
                 response = self.service.gpu_api.records(kind, layer, first, count)
                 return self.send_bytes(response.data, headers=response.headers)
+            if parsed.path == "/api/pcm-window":
+                if self.service.source_pcm is None:
+                    return self.send_json(
+                        {
+                            "error": self.service.source_pcm_error
+                            or "source PCM is unavailable"
+                        },
+                        HTTPStatus.NOT_FOUND,
+                    )
+                first = self._int_arg(query, "first", minimum=0)
+                count = self._int_arg(query, "count", minimum=1)
+                division = self._int_arg(query, "division", minimum=1)
+                if first >= self.service.total_frames:
+                    raise ValueError("PCM first frame must be before source EOF")
+                if first % division:
+                    raise ValueError("PCM first frame must align to division")
+                frame_bytes = self.service.source_pcm.info.channels * 4
+                if count > self.service.source_pcm.max_window_bytes // frame_bytes:
+                    raise ValueError("PCM frame count exceeds the source window limit")
+                response = self.service.source_pcm.display_window(
+                    first, count, division
+                )
+                event = response.range_event
+                if event is None:
+                    raise PlayerCacheError("source PCM response has no range event")
+                if event.reader_ran:
+                    self.log_message(
+                        "PCM_RANGE_DECODE id=%d backend=%s raw=%d+%d reader_ms=%.3f",
+                        event.event_id,
+                        event.backend,
+                        event.raw_first_frame,
+                        event.raw_frame_count,
+                        event.reader_ms,
+                    )
+                stats = self.service.source_pcm.cache.stats()
+                return self.send_bytes(
+                    response.data_f32le,
+                    headers={
+                        "X-Pcm-First-Frame": str(response.first_frame),
+                        "X-Pcm-Frame-Count": str(response.frame_count),
+                        "X-Pcm-Division": str(response.division),
+                        "X-Pcm-Record-Count": str(response.record_count),
+                        "X-Pcm-Channels": str(response.channels),
+                        "X-Pcm-Components": str(response.components),
+                        "X-Pcm-Mode": response.mode,
+                        "X-Pcm-Backend": response.backend,
+                        "X-Pcm-Raw-Cache-Hit": "1" if response.raw_cache_hit else "0",
+                        "X-Pcm-Cache-Disposition": event.cache_disposition,
+                        "X-Pcm-Range-Reader-Ran": "1" if event.reader_ran else "0",
+                        "X-Pcm-Range-Decode-Ran": "1" if event.reader_ran else "0",
+                        "X-Pcm-Range-Reader-Ms": f"{event.reader_ms:.3f}",
+                        "X-Pcm-Raw-First-Frame": str(event.raw_first_frame),
+                        "X-Pcm-Raw-Frame-Count": str(event.raw_frame_count),
+                        "X-Pcm-Range-Event-Id": str(event.event_id),
+                        "X-Pcm-Range-Event-Unix-Ms": str(event.occurred_unix_ms),
+                        "X-Pcm-Cache-Bytes": str(stats["resident_bytes"]),
+                        "X-Pcm-Payload-Bytes": str(response.byte_count),
+                    },
+                )
             if parsed.path == "/api/wave-tile":
                 level = self._int_arg(query, "level", minimum=0)
                 tile = self._int_arg(query, "tile", minimum=0)
@@ -420,6 +548,20 @@ def parse_divisions(value: str) -> list[int]:
     return values
 
 
+def parse_mib(value: str, *, allow_zero: bool) -> int:
+    try:
+        mib = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("MiB value must be numeric") from exc
+    if not math.isfinite(mib) or mib < 0 or (mib == 0 and not allow_zero):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise argparse.ArgumentTypeError(f"MiB value must be {qualifier}")
+    result = int(mib * 1024 * 1024)
+    if result == 0 and not allow_zero:
+        raise argparse.ArgumentTypeError("MiB value rounds to zero bytes")
+    return result
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", type=Path)
@@ -462,6 +604,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="deprecated compatibility alias for --generation-mode waveform",
     )
     parser.add_argument("--lock-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--no-source-pcm",
+        action="store_true",
+        help="disable automatic high-zoom source PCM windows",
+    )
+    parser.add_argument(
+        "--pcm-decoder",
+        choices=("auto", "wav", "ffmpeg"),
+        default="auto",
+        help="decoder used only for high-zoom source windows",
+    )
+    parser.add_argument(
+        "--pcm-cache-mib",
+        dest="pcm_cache_bytes",
+        type=lambda value: parse_mib(value, allow_zero=True),
+        default=DEFAULT_PCM_CACHE_BYTES,
+        metavar="MIB",
+        help="byte-bounded decoded-window LRU (default: 64 MiB)",
+    )
+    parser.add_argument(
+        "--pcm-window-mib",
+        dest="pcm_max_window_bytes",
+        type=lambda value: parse_mib(value, allow_zero=False),
+        default=DEFAULT_PCM_MAX_WINDOW_BYTES,
+        metavar="MIB",
+        help="hard limit for one decoded source window (default: 16 MiB)",
+    )
+    parser.add_argument(
+        "--pcm-page-mib",
+        dest="pcm_target_page_bytes",
+        type=lambda value: parse_mib(value, allow_zero=False),
+        default=DEFAULT_PCM_TARGET_PAGE_BYTES,
+        metavar="MIB",
+        help="target prefetch-page size before texture limits (default: 1 MiB)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args(argv)
@@ -508,6 +685,14 @@ def main(argv: list[str] | None = None) -> int:
             generated,
             cache_decoder=args.cache_decoder,
             playback_decoder=args.playback_decoder,
+            source_pcm_enabled=not args.no_source_pcm,
+            pcm_decoder=args.pcm_decoder,
+            ffmpeg=args.ffmpeg,
+            ffprobe=args.ffprobe,
+            decode_timeout=args.decode_timeout,
+            pcm_cache_bytes=args.pcm_cache_bytes,
+            pcm_max_window_bytes=args.pcm_max_window_bytes,
+            pcm_target_page_bytes=args.pcm_target_page_bytes,
         )
         server = DemoHTTPServer((args.host, args.port), DemoHandler)
         server.service = service  # type: ignore[attr-defined]

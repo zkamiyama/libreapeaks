@@ -60,11 +60,19 @@ jobs:
             tools/reaper_oracle/run_fresh.py \
             examples/player_common.py \
             examples/player_native_cache.py \
+            examples/source_pcm.py \
+            examples/benchmark_gl_renderer.py \
+            examples/pyside6_pcm_loader.py \
+            examples/pyside6_gl_view.py \
+            examples/pyside6_reaper_gl_view.py \
             examples/pyside6_views.py \
             examples/pyside6_player.py \
             examples/web_player/server.py \
+            examples/web_player/benchmark_webgl2.py \
             examples/web_player/webgl2_api.py \
-            tests/python/test_player_common.py
+            tests/python/test_player_common.py \
+            tests/python/test_source_pcm.py \
+            tests/python/test_web_pcm_server.py
       - name: validate browser demo JavaScript syntax
         run: |
           node --check examples/web_player/app.js

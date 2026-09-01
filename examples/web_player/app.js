@@ -26,6 +26,10 @@ const state = {
   renderRaf: 0,
   overviewRaf: 0,
   planAbortController: null,
+  pcmRangeAccessCount: 0,
+  pcmRangeDecodeCount: 0,
+  lastPcmRangeAccess: null,
+  lastPcmRangeDecode: null,
 };
 
 class Lru {
@@ -354,7 +358,12 @@ function drawOverlays() {
 }
 
 function setView(start, end, render = true) {
-  const minSpan = Math.max(64, state.meta.sample_rate / 50);
+  const sourceZoom = state.rendererMode === 'webgl2'
+    && state.webglRenderer
+    && state.meta.source_pcm?.available === true;
+  const minSpan = sourceZoom
+    ? Math.max(4, Number(state.meta.source_lod?.min_view_frames) || 4)
+    : Math.max(64, state.meta.sample_rate / 50);
   let span = Math.max(minSpan, end - start);
   span = Math.min(span, state.meta.total_frames);
   start = Math.max(0, Math.min(start, state.meta.total_frames - span));
@@ -463,7 +472,14 @@ function setRendererMode(requested, render = true) {
   $('webglPanel').classList.toggle('hidden', mode !== 'webgl2');
   $('wavePanel').classList.toggle('hidden', mode !== 'canvas2d');
   $('spectrumPanel').classList.toggle('hidden', mode !== 'canvas2d');
-  if (render) scheduleRender();
+  if (render) {
+    const canvasMinimum = Math.max(64, state.meta.sample_rate / 50);
+    if (mode === 'canvas2d' && state.viewEnd - state.viewStart < canvasMinimum) {
+      setView(state.viewStart, state.viewStart + canvasMinimum);
+    } else {
+      scheduleRender();
+    }
+  }
   updateDiagnostics();
 }
 
@@ -471,7 +487,9 @@ function updateDiagnostics() {
   if (!state.meta) return;
   const span = Math.max(1, state.viewEnd - state.viewStart);
   const horizontalZoom = state.meta.total_frames / span;
-  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× V-FS=${state.verticalScale.toFixed(2)}×`;
+  const activeCanvas = state.rendererMode === 'webgl2' ? $('analysisGl') : $('waveBase');
+  const framesPerPixel = span / Math.max(1, activeCanvas.clientWidth);
+  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× ${framesPerPixel.toFixed(3)} frames/px V-FS=${state.verticalScale.toFixed(2)}×`;
   if (state.rendererMode === 'webgl2' && state.webglRenderer) {
     const g = state.meta.gpu_layers?.spectrogram?.length || 0;
     const r = state.meta.gpu_layers?.loudness?.length || 0;
@@ -489,6 +507,42 @@ function updateDiagnostics() {
   }
   document.documentElement.dataset.renderer = state.rendererMode;
   document.documentElement.dataset.webgl2Ready = state.webglRenderer ? '1' : '0';
+}
+
+function updatePcmRangeInfo() {
+  const element = $('pcmRangeInfo');
+  const access = state.lastPcmRangeAccess;
+  const decoded = state.lastPcmRangeDecode;
+  if (!access) {
+    element.textContent = state.meta?.source_pcm?.available
+      ? 'waiting for extreme zoom'
+      : 'source PCM unavailable';
+    return;
+  }
+  const latest = `last access #${access.eventId}=${access.cacheDisposition}`;
+  if (!decoded) {
+    element.textContent = `accesses=${state.pcmRangeAccessCount}, decoded=0 | ${latest}`;
+    return;
+  }
+  const end = decoded.rawFirstFrame + decoded.rawFrameCount;
+  const when = new Date(decoded.occurredUnixMs).toISOString().slice(11, 23);
+  element.textContent = `accesses=${state.pcmRangeAccessCount}, decoded=${state.pcmRangeDecodeCount} | last decode #${decoded.eventId} ${decoded.backend} frames ${decoded.rawFirstFrame}…${end} ${decoded.readerMs.toFixed(2)}ms @${when}Z | ${latest}`;
+}
+
+function handlePcmRangeEvent(event) {
+  const detail = event.detail;
+  state.pcmRangeAccessCount++;
+  state.lastPcmRangeAccess = detail;
+  if (detail.readerRan) {
+    state.pcmRangeDecodeCount++;
+    state.lastPcmRangeDecode = detail;
+    console.debug('[libreapeaks] source PCM range decode', detail);
+    const element = $('pcmRangeInfo');
+    element.classList.remove('rangeDecoded');
+    void element.offsetWidth;
+    element.classList.add('rangeDecoded');
+  }
+  updatePcmRangeInfo();
 }
 
 function updateTransport() {
@@ -509,6 +563,7 @@ async function initWebGL2() {
   try {
     const module = await import('/webgl2_renderer.mjs');
     state.webglRenderer = new module.WebGL2PackedRenderer($('analysisGl'), state.meta);
+    $('analysisGl').addEventListener('libreapeaks:pcm-range', handlePcmRangeEvent);
     state.webglError = '';
     return true;
   } catch (error) {
@@ -523,9 +578,16 @@ async function initWebGL2() {
 async function init() {
   state.meta = await fetchJson('/api/meta');
   state.viewStart = 0; state.viewEnd = state.meta.total_frames;
-  $('mediaInfo').textContent = `${state.meta.audio_name} · ${state.meta.sample_rate} Hz · ${state.meta.channels} ch · ${state.meta.wave_encoding}`;
+  const pcm = state.meta.source_pcm?.available
+    ? `source PCM=${state.meta.source_pcm.backend}/${state.meta.source_pcm.codec}`
+    : `source PCM unavailable${state.meta.source_pcm?.error ? ` (${state.meta.source_pcm.error})` : ''}`;
+  $('mediaInfo').textContent = `${state.meta.audio_name} · ${state.meta.sample_rate} Hz · ${state.meta.channels} ch · ${state.meta.wave_encoding} · ${pcm}`;
   const gpuCounts = ['waveform','spectral','spectrogram','loudness'].map(kind => `${kind}=${state.meta.gpu_layers?.[kind]?.length || 0}`).join(' ');
-  $('apiInfo').textContent = `raw=${state.meta.gpu_raw_bytes || 0} bytes; ${gpuCounts}; tile_peaks=${state.meta.tile_peaks}; divisions=[${state.meta.default_divisions.join(', ')}]; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
+  const sourceBudget = state.meta.source_pcm?.available
+    ? `; PCM LRU=${(state.meta.source_pcm.cache_bytes / 1048576).toFixed(0)}MiB window≤${(state.meta.source_pcm.max_window_bytes / 1048576).toFixed(0)}MiB`
+    : '';
+  $('apiInfo').textContent = `raw=${state.meta.gpu_raw_bytes || 0} bytes; ${gpuCounts}; tile_peaks=${state.meta.tile_peaks}; divisions=[${state.meta.default_divisions.join(', ')}]${sourceBudget}; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
+  updatePcmRangeInfo();
 
   installCanvasInteraction($('webglStack'));
   installCanvasInteraction($('waveStack'));

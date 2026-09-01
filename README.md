@@ -22,6 +22,13 @@ use libreapeaks to:
 The core works on decoded PCM. The example players can use FFmpeg as an external
 decoder.
 
+At extreme zoom the WebGL2 and PySide6 reference players automatically switch
+from `.reapeaks` min/max records to a bounded source-PCM window, allowing them
+to draw real sample points without retaining the full decoded file. See
+[`docs/SOURCE_PCM_LOD.md`](docs/SOURCE_PCM_LOD.md).
+The shared source helper also exposes structured range-decode events and a
+draw plan for exact connected sample lines and optional point markers.
+
 ## Compatibility status
 
 The primary oracle is **REAPER 7.79 x86_64 Linux**. Compatibility claims in this

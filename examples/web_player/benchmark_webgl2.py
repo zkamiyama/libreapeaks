@@ -32,6 +32,17 @@ def raw_resource_stats(driver) -> dict[str, float | int]:
     )
 
 
+def pcm_resource_count(driver) -> int:
+    return int(
+        driver.execute_script(
+            """
+            return performance.getEntriesByType('resource')
+              .filter(e => e.name.includes('/api/pcm-window')).length;
+            """
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url")
@@ -140,6 +151,41 @@ def main() -> int:
 
         diagnostics = driver.find_element("id", "rendererInfo").text
         resource_stats = raw_resource_stats(driver)
+
+        # Reach one-sample-per-record LOD. The debounce should collapse this
+        # wheel burst to the final source request, and the resulting R32F
+        # texture exercises the exact line/dot renderer in a real WebGL2
+        # context.
+        for _index in range(26):
+            driver.execute_script(
+                """
+                const stack = document.getElementById('webglStack');
+                const rect = stack.getBoundingClientRect();
+                stack.dispatchEvent(new WheelEvent('wheel', {
+                    deltaY: -120, clientX: rect.left + rect.width * 0.5,
+                    bubbles: true, cancelable: true
+                }));
+                """
+            )
+            time.sleep(0.015)
+        wait.until(
+            lambda d: "PCM samples"
+            in d.find_element("id", "rendererInfo").text
+        )
+        sample_diagnostics = driver.find_element("id", "rendererInfo").text
+        range_diagnostics = driver.find_element("id", "pcmRangeInfo").text
+        pcm_requests = pcm_resource_count(driver)
+        if pcm_requests < 1:
+            raise RuntimeError("exact sample LOD made no source PCM request")
+        decode_match = re.search(r"\bdecoded=(\d+)\b", range_diagnostics)
+        if (
+            decode_match is None
+            or int(decode_match.group(1)) < 1
+            or "last decode #" not in range_diagnostics
+        ):
+            raise RuntimeError(
+                f"range-decode debug notification is missing: {range_diagnostics!r}"
+            )
         info = driver.execute_script(
             """
             const canvas = document.getElementById('analysisGl');
@@ -175,6 +221,9 @@ def main() -> int:
             "uniform_uploads": uniform_uploads,
             "uniform_raw_resources": uniform_resources,
             "diagnostics": diagnostics,
+            "sample_diagnostics": sample_diagnostics,
+            "range_diagnostics": range_diagnostics,
+            "pcm_requests": pcm_requests,
             "uniform_stress_ms": uniform_seconds * 1000.0,
             "paged_stress_ms": paged_seconds * 1000.0,
             "paged_raw_resources": resource_stats,

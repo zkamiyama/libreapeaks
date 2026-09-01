@@ -23,6 +23,12 @@ The GUI path is designed for DAW-style interaction:
 - no second application-specific persistent waveform pyramid when compatible
   `.reapeaks` waveform data already exists.
 
+The last point does not imply that `.reapeaks` contains individual samples.
+When the finest peak bucket becomes visibly wider than a pixel, the reference
+players switch to a bounded decoded source window. See
+[`SOURCE_PCM_LOD.md`](SOURCE_PCM_LOD.md) for the exact-sample LOD, decoder, and
+memory policy.
+
 ## Pyramid structure
 
 `WavePyramid` has two kinds of levels:
