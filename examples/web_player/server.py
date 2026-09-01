@@ -1,8 +1,9 @@
 """Local HTTP tile server for the libreapeaks JavaScript player demo.
 
-The waveform/spectral data remains native and tiled. Audio playback can either
-serve the original file or an explicitly FFmpeg-decoded temporary float WAV,
-independently from the decoder used to generate a missing peak cache.
+The Canvas2D fallback uses decoded waveform/spectral display textures. The
+WebGL2 path instead serves exact on-disk `.reapeaks` record windows so the
+browser can upload waveform, `-'s'`, packed `-'g'`, and `-'r'` directly to GPU
+textures and perform display-domain decoding in shaders.
 """
 from __future__ import annotations
 
@@ -27,10 +28,11 @@ from player_common import (  # noqa: E402
     DEFAULT_MAX_DECODE_BYTES,
     PlayerCacheError,
     available_spectral_levels,
-    ensure_reapeaks,
     exact_audio_frames,
     prepare_playback_audio,
 )
+from player_native_cache import ensure_reapeaks_native  # noqa: E402
+from webgl2_api import RawGpuService  # noqa: E402
 
 
 class TileService:
@@ -51,6 +53,7 @@ class TileService:
         self.cache_decoder = cache_decoder
         self.playback_decoder = playback_decoder
         self.rp = reapeaks.ReaPeaks.open(str(peaks_path))
+        self.gpu_api = RawGpuService(str(peaks_path))
         self.levels = self.rp.levels()
         if not self.levels:
             raise PlayerCacheError(
@@ -83,7 +86,7 @@ class TileService:
         }
 
     def meta(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "audio_name": self.audio_path.name,
             "playback_name": self.playback_path.name,
             "peaks_name": self.peaks_path.name,
@@ -109,6 +112,8 @@ class TileService:
             "native_spectral_levels": self.native_levels,
             "coarsest_envelope_texture": self.coarsest_texture,
         }
+        payload.update(self.gpu_api.meta())
+        return payload
 
     def choose_spectral(self, desired_division: int):
         if not self.native_levels:
@@ -146,7 +151,7 @@ class DemoHTTPServer(ThreadingHTTPServer):
 
 
 class DemoHandler(BaseHTTPRequestHandler):
-    server_version = "libreapeaks-demo/2"
+    server_version = "libreapeaks-demo/3"
 
     @property
     def service(self) -> TileService:
@@ -300,6 +305,13 @@ class DemoHandler(BaseHTTPRequestHandler):
             raise ValueError(f"query parameter {name} must be >= {minimum}")
         return value
 
+    @staticmethod
+    def _str_arg(query: dict[str, list[str]], name: str) -> str:
+        values = query.get(name)
+        if not values or not values[0]:
+            raise ValueError(f"missing query parameter {name}")
+        return values[0]
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -308,6 +320,8 @@ class DemoHandler(BaseHTTPRequestHandler):
                 return self.send_static(HERE / "index.html")
             if parsed.path == "/app.js":
                 return self.send_static(HERE / "app.js")
+            if parsed.path == "/webgl2_renderer.mjs":
+                return self.send_static(HERE / "webgl2_renderer.mjs")
             if parsed.path == "/style.css":
                 return self.send_static(HERE / "style.css")
             if parsed.path == "/audio":
@@ -321,6 +335,13 @@ class DemoHandler(BaseHTTPRequestHandler):
                 if end <= start:
                     raise ValueError("end must be greater than start")
                 return self.send_json(self.service.plan(start, end, width))
+            if parsed.path == "/api/gpu-records":
+                kind = self._str_arg(query, "kind")
+                layer = self._int_arg(query, "layer", minimum=0)
+                first = self._int_arg(query, "first", minimum=0)
+                count = self._int_arg(query, "count", minimum=1)
+                response = self.service.gpu_api.records(kind, layer, first, count)
+                return self.send_bytes(response.data, headers=response.headers)
             if parsed.path == "/api/wave-tile":
                 level = self._int_arg(query, "level", minimum=0)
                 tile = self._int_arg(query, "tile", minimum=0)
@@ -429,7 +450,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--divisions", type=parse_divisions)
     parser.add_argument("--fine-peaks-per-second", type=int, default=300)
-    parser.add_argument("--no-spectral", action="store_true")
+    parser.add_argument(
+        "--generation-mode",
+        choices=("waveform", "spectral", "spectrogram"),
+        default="spectral",
+        help="REAPER-native cache richness; spectrogram gives wave+s+g+r",
+    )
+    parser.add_argument(
+        "--no-spectral",
+        action="store_true",
+        help="deprecated compatibility alias for --generation-mode waveform",
+    )
     parser.add_argument("--lock-timeout", type=float, default=30.0)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -441,12 +472,13 @@ def main(argv: list[str] | None = None) -> int:
     audio = args.audio.expanduser().resolve(strict=False)
     prepared = None
     server = None
+    generation_mode = "waveform" if args.no_spectral else args.generation_mode
     try:
-        peaks, generated = ensure_reapeaks(
+        peaks, generated = ensure_reapeaks_native(
             audio,
             args.peaks,
+            generation_mode=generation_mode,
             rebuild=args.rebuild_cache,
-            spectral=not args.no_spectral,
             decoder=args.cache_decoder,
             cache_mode=args.cache_mode,
             cache_directory=args.cache_dir,
@@ -482,7 +514,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"libreapeaks web player: http://{args.host}:{args.port}/")
         print(f"audio={audio}")
         print(f"playback={prepared.path} decoder={prepared.decoder}")
-        print(f"peaks={peaks}{' (generated)' if generated else ' (reused)'}")
+        print(
+            f"peaks={peaks}{' (generated)' if generated else ' (reused)'} "
+            f"mode={generation_mode}"
+        )
         server.serve_forever()
     except KeyboardInterrupt:
         pass
