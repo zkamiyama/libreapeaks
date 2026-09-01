@@ -1,6 +1,6 @@
 use reapeaks::{
     decode_spectrogram_frame, default_divisions, encode_spectrogram_frame,
-    generate_pcm16_mode3_with_spectrogram, GenerateOptions, ReaPeaks, SpectrogramFrame,
+    generate_pcm16_mode3_with_spectrogram, GenerateOptions, ReaPeaks,
     SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
 };
 use std::sync::Arc;
