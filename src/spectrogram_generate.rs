@@ -105,8 +105,8 @@ fn blackman_harris_window() -> ([f64; FFT_SIZE], f64) {
     let mut sum = 0.0;
     for (n, value) in window.iter_mut().enumerate() {
         let phase = 2.0 * PI * n as f64 / (FFT_SIZE - 1) as f64;
-        *value = BH_A0 - BH_A1 * phase.cos() + BH_A2 * (2.0 * phase).cos()
-            - BH_A3 * (3.0 * phase).cos();
+        *value =
+            BH_A0 - BH_A1 * phase.cos() + BH_A2 * (2.0 * phase).cos() - BH_A3 * (3.0 * phase).cos();
         sum += *value;
     }
     (window, sum)
@@ -126,7 +126,9 @@ fn analysis_shift(fine_division: u32) -> i64 {
 
 fn base_frame_count(frames: usize, fine_division: u32) -> Result<usize> {
     if fine_division == 0 {
-        return Err(ReaPeaksError::InvalidArgument("spectrogram fine division=0"));
+        return Err(ReaPeaksError::InvalidArgument(
+            "spectrogram fine division=0",
+        ));
     }
     let frames = i64::try_from(frames)
         .map_err(|_| ReaPeaksError::InvalidArgument("frame count exceeds i64"))?;
@@ -282,11 +284,12 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     let (window, window_sum) = blackman_harris_window();
 
     let first_count = counts[0];
-    let first_capacity = first_count
-        .checked_mul(channels)
-        .ok_or(ReaPeaksError::InvalidArgument(
-            "spectrogram frame capacity overflow",
-        ))?;
+    let first_capacity =
+        first_count
+            .checked_mul(channels)
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "spectrogram frame capacity overflow",
+            ))?;
     let mut current_frames = Vec::with_capacity(first_capacity);
     let first_ratio = ratios[0];
     for time_frame in 0..first_count {
@@ -324,9 +327,12 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     for &ratio in ratios.iter().skip(1) {
         let previous_time_frames = current_frames.len() / channels;
         let output_time_frames = previous_time_frames / ratio;
-        let capacity = output_time_frames.checked_mul(channels).ok_or(
-            ReaPeaksError::InvalidArgument("spectrogram frame capacity overflow"),
-        )?;
+        let capacity =
+            output_time_frames
+                .checked_mul(channels)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "spectrogram frame capacity overflow",
+                ))?;
         let mut next_frames = Vec::with_capacity(capacity);
         for output_frame in 0..output_time_frames {
             let first = output_frame * ratio;
@@ -407,13 +413,8 @@ mod tests {
             let phase = 2.0 * PI * 6_000.0 * frame as f64 / sample_rate as f64;
             pcm.push((0.5 * 32_767.0 * phase.sin()).round() as i16);
         }
-        let layers = build_spectrogram_layers_pcm16(
-            &pcm,
-            sample_rate,
-            1,
-            &[160, 2_400, 48_000],
-        )
-        .unwrap();
+        let layers =
+            build_spectrogram_layers_pcm16(&pcm, sample_rate, 1, &[160, 2_400, 48_000]).unwrap();
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].header.peak_count, 20 * 48);
         assert_eq!(layers[1].header.peak_count, 48);
@@ -431,16 +432,11 @@ mod tests {
     fn impulse_matches_reaper779_fine_and_coarse_aggregation() {
         let mut pcm = vec![0i16; 48_000];
         pcm[24_000] = 32_767;
-        let layers = build_spectrogram_layers_pcm16(
-            &pcm,
-            48_000,
-            1,
-            &[160, 2_400, 48_000],
-        )
-        .unwrap();
+        let layers =
+            build_spectrogram_layers_pcm16(&pcm, 48_000, 1, &[160, 2_400, 48_000]).unwrap();
         let frame9 = decode_spectrogram_frame(
-            &layers[0].bytes[9 * SPECTROGRAM_BYTES_PER_CHANNEL_FRAME
-                ..10 * SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
+            &layers[0].bytes
+                [9 * SPECTROGRAM_BYTES_PER_CHANNEL_FRAME..10 * SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
         )
         .unwrap();
         let frame10 = decode_spectrogram_frame(
@@ -448,10 +444,9 @@ mod tests {
                 ..11 * SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
         )
         .unwrap();
-        let coarse = decode_spectrogram_frame(
-            &layers[1].bytes[..SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
-        )
-        .unwrap();
+        let coarse =
+            decode_spectrogram_frame(&layers[1].bytes[..SPECTROGRAM_BYTES_PER_CHANNEL_FRAME])
+                .unwrap();
         assert!(frame9.bins.iter().all(|&code| code == 197));
         assert!(frame10.bins.iter().all(|&code| code == 198));
         assert!(coarse.bins.iter().all(|&code| code == 19));
