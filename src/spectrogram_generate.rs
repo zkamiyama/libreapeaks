@@ -210,10 +210,18 @@ fn validate_divisions(divisions: &[u32]) -> Result<Vec<usize>> {
 fn time_counts(frames: usize, divisions: &[u32]) -> Result<Vec<usize>> {
     let ratios = validate_divisions(divisions)?;
     let base_count = base_frame_count(frames, divisions[0])?;
+    let first_ratio = ratios[0];
     let first_count = if base_count == 0 {
         0
+    } else if analysis_shift(divisions[0]) >= 0 {
+        // At high sample rates the 256-point analysis window starts on or
+        // after the media origin. REAPER only emits a fine spectrogram frame
+        // after a complete base-frame group is available, and drops an EOF
+        // partial group. Lower-rate negative shifts are edge-truncated and
+        // retain the partial-group behavior recovered at 32/44.1/48 kHz.
+        base_count / first_ratio
     } else {
-        1 + (base_count - 1) / ratios[0]
+        1 + (base_count - 1) / first_ratio
     };
     let mut counts = Vec::with_capacity(ratios.len());
     counts.push(first_count);
@@ -442,6 +450,17 @@ mod tests {
         assert_eq!(time_counts(1_877, &d32).unwrap(), vec![2, 0]);
         assert_eq!(time_counts(30_708, &d32).unwrap(), vec![18, 0]);
         assert_eq!(time_counts(30_709, &d32).unwrap(), vec![19, 1]);
+
+        let d96 = [320, 4_800, 96_000];
+        assert_eq!(time_counts(4_767, &d96).unwrap(), vec![0, 0]);
+        assert_eq!(time_counts(4_768, &d96).unwrap(), vec![1, 0]);
+        assert_eq!(time_counts(9_567, &d96).unwrap(), vec![1, 0]);
+        assert_eq!(time_counts(9_568, &d96).unwrap(), vec![2, 0]);
+        assert_eq!(time_counts(95_967, &d96).unwrap(), vec![19, 0]);
+        assert_eq!(time_counts(95_968, &d96).unwrap(), vec![20, 1]);
+        assert_eq!(time_counts(288_319, &d96).unwrap(), vec![60, 3]);
+        assert_eq!(time_counts(292_767, &d96).unwrap(), vec![60, 3]);
+        assert_eq!(time_counts(292_768, &d96).unwrap(), vec![61, 3]);
     }
 
     #[test]
