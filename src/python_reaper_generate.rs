@@ -1,6 +1,4 @@
-use crate::{
-    generate_f32_reaper, generate_pcm16_reaper, GenerateOptions, ReaperPeakMode,
-};
+use crate::{generate_f32_reaper, generate_pcm16_reaper, GenerateOptions, ReaperPeakMode};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
@@ -79,7 +77,8 @@ fn py_generate_f32_reaper<'py>(
         source_size_low32,
         spectral: false,
     };
-    let bytes = generate_f32_reaper(&pcm, &options, large_range, parse_mode(mode)?).map_err(py_err)?;
+    let bytes =
+        generate_f32_reaper(&pcm, &options, large_range, parse_mode(mode)?).map_err(py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }
 
