@@ -16,8 +16,10 @@ fn read_pcm16(path: &Path) -> Vec<i16> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     assert_eq!(bytes.len() % 2, 0, "{} has odd byte length", path.display());
     bytes
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample))
         .collect()
 }
 
