@@ -41,9 +41,56 @@
         "exact 400 ms window",
         "400 ms window + 1 sample"
       ],
-      "signal_classes": ["step", "impulse", "deterministic multichannel noise"],
       "comparison": "complete file byte identity"
+    },
+    "spectrogram_pcm16_stress": {
+      "cases": 122,
+      "strict_wdl_exact_files": 122,
+      "portable_default_fft_exact_g_cases": 122,
+      "source_container": "WAVE PCM16",
+      "fresh_reaper_process_per_case": true,
+      "sample_rate_range_hz": [8000, 192000],
+      "channel_count_range": [1, 8],
+      "peakcachegenrs_core_values": [100, 150, 300, 500, 1000],
+      "special_rate_boundaries_hz": [76799, 76800, 76801],
+      "fine_division_boundary_scope": "values around 255/256/257",
+      "comparison_strict_wdl": "header + layer table + every non-spectrogram payload + decoded spectrogram bins + packed spectrogram payload + complete file byte identity",
+      "comparison_portable_default_fft": "exact spectrogram (-g) output on the same case matrix"
     }
+  },
+  "spectrogram_g": {
+    "token": -103,
+    "bins_per_channel_frame": 128,
+    "bits_per_bin": 12,
+    "bytes_per_channel_frame": 192,
+    "u32_words_per_channel_frame": 48,
+    "header_peak_count_semantics": "u32 word count per channel, not logical frame count",
+    "payload_order": "time-major, channel-inner",
+    "fft_size": 256,
+    "stored_fft_bins": "1..128 inclusive",
+    "blackman_harris": [0.35875, 0.48829, 0.14128, 0.01168],
+    "power_quantizer": {
+      "power": "re*re + im*im",
+      "sqrt": false,
+      "power_log_scale": 88.92179516969081,
+      "code_bias": 4095.5,
+      "code_range": [0, 4095]
+    },
+    "analysis_shift": "if fine_division >= 256: fine_division - 256; else: (fine_division - 256) / 2 with signed truncation toward zero",
+    "leading_edge": "resize symmetric Blackman-Harris window to available real samples, then zero-pad FFT input",
+    "aggregation": "average already-quantized base codes; higher mipmaps average complete groups of prior stored frames",
+    "portable_fft_scale": "2x conventional DFT output to match the recovered WDL real-FFT scale",
+    "property_stress": [
+      "exhaustive 12-bit packing",
+      "arbitrary 192-byte frame decode/encode bijection",
+      "truncation/header/bitflip parser safety",
+      "fine divisions 254/255/256/257/258",
+      "255 channels accepted and 256 rejected",
+      "channel permutation/sign/mono-lane invariants",
+      "parallel and mixed-configuration determinism",
+      "scheduler and nested-mipmap stress",
+      "spectrogram toggle preserves pre-existing mode-3 layers"
+    ]
   },
   "wave": {
     "pcm16_exhaustive_input_values": 65536,
@@ -68,9 +115,10 @@
     "frequency_exact": 34040,
     "density_exact": 31848,
     "full_code_exact": 31776,
-    "note": "historical handwritten model; not the current strict compatibility result"
+    "note": "historical handwritten -s model; not the current strict compatibility result"
   },
   "spectral_strict_wdl": {
+    "layer": "-'s' spectral peaks, distinct from -'g' spectrogram",
     "fresh_process_primary_cases": 188,
     "fresh_process_primary_codes": 10112,
     "fresh_process_primary_exact_codes": 10112,
@@ -116,7 +164,11 @@
     "partial_final_25ms_block": "not flushed",
     "base_record_division": "second positive waveform division",
     "coarse_policy": "average complete groups of base loudness records",
-    "validated_by": ["8-case FFmpeg/ALAC whole-file gate", "16-case adversarial whole-file gate"]
+    "validated_by": [
+      "8-case FFmpeg/ALAC whole-file gate",
+      "16-case adversarial whole-file gate",
+      "122-case spectrogram whole-file stress gate"
+    ]
   },
   "division_rule": {
     "fine": "max(1, floor(sample_rate / peakcachegenrs))",
@@ -140,7 +192,7 @@
     "note": "TYPE=VIDEO alone is not treated as proof of FFmpeg use"
   },
   "strict_compatibility_quirks": {
-    "source_rate_le_22050": "spectral layers are present but payload codes are zero",
+    "source_rate_le_22050": "-'s' spectral layers are present but payload codes are zero",
     "wdl_resampler_feed_samples": 2048,
     "wdl_resampler_feed_frames": "max(1, 2048 / channels)",
     "wdl_fft_init": "wrapped in std::call_once because concurrent first use of upstream WDL initialization is unsafe"
@@ -151,14 +203,18 @@
     "legacy_cache_map_v1_readable": true,
     "unknown_declared_cache_map_versions_rejected": true,
     "live_query_non_object_json_rejected": true,
-    "live_query_non_string_source_type_rejected": true,
-    "note": "current runnable demo CLI uses --cache-mode reaper + --reaper-cache-map for exact mapped paths; its --cache-mode central is the older private SHA namespace"
+    "live_query_non_string_source_type_rejected": true
   },
   "public_writer_surface": {
-    "rust_complete_mode3": ["generate_pcm16_mode3", "generate_f32_mode3"],
-    "rust_legacy_wave_spectral": ["generate_pcm16", "generate_f32"],
-    "python_wave_spectral_only": ["generate_pcm16", "generate_f32"],
-    "c_wave_spectral_only": ["rpk_generate_pcm16", "rpk_generate_f32"],
+    "rust_complete_mode3": [
+      "generate_pcm16_mode3",
+      "generate_f32_mode3",
+      "generate_pcm16_mode3_with_spectrogram"
+    ],
+    "rust_pcm16_spectrogram_mode3": "generate_pcm16_mode3_with_spectrogram",
+    "rust_legacy_wave_spectral_s": ["generate_pcm16", "generate_f32"],
+    "python_wave_spectral_s_only": ["generate_pcm16", "generate_f32"],
+    "c_wave_spectral_s_only": ["rpk_generate_pcm16", "rpk_generate_f32"],
     "c_division_helper": "rpk_default_divisions"
   },
   "format_observations": {
@@ -169,21 +225,16 @@
       "FLAC16",
       "FLAC24"
     ],
-    "rpkl_sources_observed_historical": [
-      "WAV float32",
-      "MP3",
-      "Vorbis",
-      "Opus"
-    ]
+    "rpkl_sources_observed_historical": ["WAV float32", "MP3", "Vorbis", "Opus"]
   },
   "not_in_current_byte_exact_claim": [
     "REAPER versions other than 7.79 unless separately tested",
     "Windows/macOS or non-x86_64 behavior unless separately tested",
     "every lossy codec/decoder build",
-    "spectrogram (-g) generation",
+    "float32/RPKL spectrogram (-g) generation",
+    "complete mode-3/-g generation through current C/Python writer APIs",
     "legacy loudness (-l) payload layout",
     "RPKM compact waveform materialization",
-    "exact REAPER NaN/Inf/subnormal float-media policy",
-    "complete mode-3 generation through current C/Python writer APIs"
+    "exact REAPER NaN/Inf/subnormal float-media policy"
   ]
 }
