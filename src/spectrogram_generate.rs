@@ -102,11 +102,16 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     out
 }
 
-fn blackman_harris_window() -> ([f64; FFT_SIZE], f64) {
+fn blackman_harris_window(length: usize) -> ([f64; FFT_SIZE], f64) {
+    debug_assert!((1..=FFT_SIZE).contains(&length));
     let mut window = [0.0f64; FFT_SIZE];
     let mut sum = 0.0;
-    for (n, value) in window.iter_mut().enumerate() {
-        let phase = 2.0 * PI * n as f64 / (FFT_SIZE - 1) as f64;
+    for (n, value) in window[..length].iter_mut().enumerate() {
+        let phase = if length == 1 {
+            0.0
+        } else {
+            2.0 * PI * n as f64 / (length - 1) as f64
+        };
         *value =
             BH_A0 - BH_A1 * phase.cos() + BH_A2 * (2.0 * phase).cos() - BH_A3 * (3.0 * phase).cos();
         sum += *value;
@@ -189,18 +194,39 @@ fn analyze_base_frame(
     channel: usize,
     base_index: usize,
     fine_division: u32,
-    window: &[f64; FFT_SIZE],
-    window_sum: f64,
+    full_window: &[f64; FFT_SIZE],
+    full_window_sum: f64,
 ) -> SpectrogramFrame {
     let start = base_index as i64 * i64::from(fine_division) + analysis_shift(fine_division);
     let mut input = [0.0f64; FFT_SIZE];
-    for n in 0..FFT_SIZE {
-        let source_frame = start + n as i64;
-        if source_frame >= 0 && source_frame < frames as i64 {
-            let sample_index = source_frame as usize * channels + channel;
-            input[n] = f64::from(pcm[sample_index]) * (1.0 / 32768.0) * window[n];
+
+    // REAPER does not synthesize leading zero samples for the first analysis
+    // window.  At 48 kHz the recovered start is -48, so when the first frame
+    // becomes available at source sample 208 it applies a symmetric 208-point
+    // Blackman-Harris window to source samples 0..207 and zero-pads that
+    // windowed vector to the 256-point FFT.  Impulse probes at positions
+    // 0/207, 16/191 and 48/159 produce exactly equal codes, and all measured
+    // positions are byte-exact under this resized-window model.
+    let window_sum = if start < 0 {
+        let available = usize::try_from(FFT_SIZE as i64 + start)
+            .expect("negative spectrogram leading-window length");
+        debug_assert!(available <= frames);
+        let (leading_window, leading_sum) = blackman_harris_window(available);
+        for n in 0..available {
+            let sample_index = n * channels + channel;
+            input[n] = f64::from(pcm[sample_index]) * (1.0 / 32768.0) * leading_window[n];
         }
-    }
+        leading_sum
+    } else {
+        for n in 0..FFT_SIZE {
+            let source_frame = start + n as i64;
+            if source_frame < frames as i64 {
+                let sample_index = source_frame as usize * channels + channel;
+                input[n] = f64::from(pcm[sample_index]) * (1.0 / 32768.0) * full_window[n];
+            }
+        }
+        full_window_sum
+    };
 
     let spectrum = real_fft_256(&input);
     let mut bins = [0u16; SPECTROGRAM_BINS];
@@ -283,7 +309,7 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     let ratios = validate_divisions(divisions)?;
     let counts = time_counts(frames, divisions)?;
     let base_count = base_frame_count(frames, divisions[0])?;
-    let (window, window_sum) = blackman_harris_window();
+    let (window, window_sum) = blackman_harris_window(FFT_SIZE);
 
     let first_count = counts[0];
     let first_capacity =
@@ -405,6 +431,35 @@ mod tests {
         }
         assert_eq!(quantize_amplitude(0.0), 0);
         assert_eq!(quantize_amplitude(1.0e-12), 0);
+    }
+
+    #[test]
+    fn leading_edge_resizes_window_to_available_samples() {
+        let expected = [
+            (0usize, 1723u16),
+            (1, 1758),
+            (16, 2521),
+            (32, 2894),
+            (47, 3124),
+            (48, 3137),
+            (64, 3299),
+            (96, 3447),
+            (127, 3399),
+            (159, 3137),
+            (191, 2521),
+            (207, 1723),
+        ];
+        for (position, code) in expected {
+            let mut pcm = vec![0i16; 208];
+            pcm[position] = 32_767;
+            let layers =
+                build_spectrogram_layers_pcm16(&pcm, 208, 1, &[160, 2_400, 48_000]).unwrap();
+            let frame = decode_spectrogram_frame(
+                &layers[0].bytes[..SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
+            )
+            .unwrap();
+            assert!(frame.bins.iter().all(|&actual| actual == code));
+        }
     }
 
     #[test]
