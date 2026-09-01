@@ -44,7 +44,8 @@ mod python;
 pub use error::{ReaPeaksError, Result};
 pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
 pub use generate::{
-    generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3, GenerateOptions,
+    generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3,
+    generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
 pub use spectrogram::{
