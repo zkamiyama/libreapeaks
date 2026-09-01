@@ -14,6 +14,7 @@
 
 pub mod error;
 pub mod ffi;
+mod ffi_reaper_generate;
 pub mod format;
 pub mod generate;
 pub mod loudness;
@@ -41,6 +42,8 @@ pub mod wave;
 
 #[cfg(feature = "python")]
 mod python;
+#[cfg(feature = "python")]
+mod python_reaper_generate;
 
 pub use error::{ReaPeaksError, Result};
 pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
