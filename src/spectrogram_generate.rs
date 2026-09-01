@@ -12,8 +12,13 @@ const BH_A0: f64 = 0.35875;
 const BH_A1: f64 = 0.48829;
 const BH_A2: f64 = 0.14128;
 const BH_A3: f64 = 0.01168;
-const CODE_MAX: f64 = 4095.0;
-const CODES_PER_DECADE: f64 = 409.5;
+const PCM_SCALE_F32: f32 = 1.0 / 32768.0;
+// REAPER quantizes squared FFT magnitude directly.  Because the WDL real FFT
+// is 2x the conventional DFT scale and the Blackman-Harris coefficients are
+// normalized to unit sum, an exact-bin sine of amplitude A produces power A^2.
+const POWER_LOG_SCALE: f64 = 88.92179516969081;
+const CODE_BIAS: f64 = 4095.5;
+const CODE_MAX: u16 = 4095;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct C64 {
@@ -75,7 +80,12 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     }
 
     let mut out = [C64::default(); FFT_BINS];
-    out.copy_from_slice(&values[..FFT_BINS]);
+    for bin in 0..FFT_BINS {
+        out[bin] = C64 {
+            re: values[bin].re * 2.0,
+            im: values[bin].im * 2.0,
+        };
+    }
     out
 }
 
@@ -90,41 +100,69 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
     assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
 
-    // WDL_real_fft's forward real transform is exactly 2x the conventional
-    // DFT scale used by the recovered spectrogram amplitude calibration.
     let mut out = [C64::default(); FFT_BINS];
     for bin in 0..FFT_BINS {
         out[bin] = C64 {
-            re: re[bin] * 0.5,
-            im: im[bin] * 0.5,
+            re: re[bin],
+            im: im[bin],
         };
     }
     out
 }
 
-fn blackman_harris_window(length: usize) -> ([f64; FFT_SIZE], f64) {
+fn blackman_harris_window(length: usize) -> [f32; FFT_SIZE] {
     debug_assert!((1..=FFT_SIZE).contains(&length));
-    let mut window = [0.0f64; FFT_SIZE];
-    let mut sum = 0.0;
-    for (n, value) in window[..length].iter_mut().enumerate() {
-        let phase = if length == 1 {
-            0.0
-        } else {
-            2.0 * PI * n as f64 / (length - 1) as f64
-        };
-        *value =
-            BH_A0 - BH_A1 * phase.cos() + BH_A2 * (2.0 * phase).cos() - BH_A3 * (3.0 * phase).cos();
-        sum += *value;
+
+    // REAPER 7.79 builds this cache in a mixed double/single-precision path:
+    // phase/cosines and the unnormalized sum are double, each raw coefficient
+    // is stored as float, 1/sum is converted to float, then normalization is
+    // a float multiply.  The phase is advanced by repeated addition rather
+    // than recomputed from n.  This exact sequence is visible in the pinned
+    // binary at 0x94a890..0x94aa25 and is required for coherent-tone bins.
+    let mut window = [0.0f32; FFT_SIZE];
+    let mut sum = 0.0f64;
+    let step = if length == 1 {
+        0.0
+    } else {
+        2.0 * PI / (length - 1) as f64
+    };
+    let mut phase = 0.0f64;
+    for value in &mut window[..length] {
+        let cos1 = phase.cos();
+        let cos2 = (phase + phase).cos();
+        let cos3 = (3.0 * phase).cos();
+        let mut raw = BH_A0 - BH_A1 * cos1;
+        raw += BH_A2 * cos2;
+        raw -= BH_A3 * cos3;
+        sum += raw;
+        *value = raw as f32;
+        phase += step;
     }
-    (window, sum)
+
+    let normalize = (1.0 / sum) as f32;
+    for value in &mut window[..length] {
+        *value *= normalize;
+    }
+    window
 }
 
-fn quantize_amplitude(amplitude: f64) -> u16 {
-    if !amplitude.is_finite() || amplitude <= 0.0 {
+fn quantize_power(power: f64) -> u16 {
+    if !power.is_finite() || power <= 0.0 {
         return 0;
     }
-    let raw = CODE_MAX + CODES_PER_DECADE * amplitude.log10();
-    raw.round().clamp(0.0, CODE_MAX) as u16
+    if power >= 1.0 {
+        return CODE_MAX;
+    }
+
+    // REAPER calls log(), multiplies by a precomputed natural-log scale, adds
+    // 4095.5, and converts with truncation (cvttsd2si).  Operating on power
+    // avoids the sqrt/hypot rounding that otherwise changes low sidelobes.
+    let raw = power.ln() * POWER_LOG_SCALE + CODE_BIAS;
+    if raw <= 0.0 {
+        0
+    } else {
+        raw.trunc() as u16
+    }
 }
 
 fn analysis_shift(fine_division: u32) -> i64 {
@@ -194,46 +232,42 @@ fn analyze_base_frame(
     channel: usize,
     base_index: usize,
     fine_division: u32,
-    full_window: &[f64; FFT_SIZE],
-    full_window_sum: f64,
+    full_window: &[f32; FFT_SIZE],
 ) -> SpectrogramFrame {
     let start = base_index as i64 * i64::from(fine_division) + analysis_shift(fine_division);
     let mut input = [0.0f64; FFT_SIZE];
 
     // REAPER does not synthesize leading zero samples for the first analysis
-    // window.  At 48 kHz the recovered start is -48, so when the first frame
-    // becomes available at source sample 208 it applies a symmetric 208-point
-    // Blackman-Harris window to source samples 0..207 and zero-pads that
-    // windowed vector to the 256-point FFT.  Impulse probes at positions
-    // 0/207, 16/191 and 48/159 produce exactly equal codes, and all measured
-    // positions are byte-exact under this resized-window model.
-    let window_sum = if start < 0 {
+    // window. At 48 kHz the recovered start is -48, so the first available
+    // 208 samples receive a symmetric 208-point Blackman-Harris window and are
+    // then zero-padded to the 256-point FFT.
+    if start < 0 {
         let available = usize::try_from(FFT_SIZE as i64 + start)
             .expect("negative spectrogram leading-window length");
         debug_assert!(available <= frames);
-        let (leading_window, leading_sum) = blackman_harris_window(available);
+        let leading_window = blackman_harris_window(available);
         for n in 0..available {
             let sample_index = n * channels + channel;
-            input[n] = f64::from(pcm[sample_index]) * (1.0 / 32768.0) * leading_window[n];
+            let sample = f32::from(pcm[sample_index]) * PCM_SCALE_F32;
+            input[n] = f64::from(sample * leading_window[n]);
         }
-        leading_sum
     } else {
         for n in 0..FFT_SIZE {
             let source_frame = start + n as i64;
             if source_frame < frames as i64 {
                 let sample_index = source_frame as usize * channels + channel;
-                input[n] = f64::from(pcm[sample_index]) * (1.0 / 32768.0) * full_window[n];
+                let sample = f32::from(pcm[sample_index]) * PCM_SCALE_F32;
+                input[n] = f64::from(sample * full_window[n]);
             }
         }
-        full_window_sum
-    };
+    }
 
     let spectrum = real_fft_256(&input);
     let mut bins = [0u16; SPECTROGRAM_BINS];
     for stored_bin in 0..SPECTROGRAM_BINS {
         let value = spectrum[stored_bin + 1];
-        let amplitude = 2.0 * value.re.hypot(value.im) / window_sum;
-        bins[stored_bin] = quantize_amplitude(amplitude);
+        let power = value.re * value.re + value.im * value.im;
+        bins[stored_bin] = quantize_power(power);
     }
     SpectrogramFrame { bins }
 }
@@ -309,7 +343,7 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     let ratios = validate_divisions(divisions)?;
     let counts = time_counts(frames, divisions)?;
     let base_count = base_frame_count(frames, divisions[0])?;
-    let (window, window_sum) = blackman_harris_window(FFT_SIZE);
+    let window = blackman_harris_window(FFT_SIZE);
 
     let first_count = counts[0];
     let first_capacity =
@@ -335,7 +369,6 @@ pub(crate) fn build_spectrogram_layers_pcm16(
                     base_index,
                     divisions[0],
                     &window,
-                    window_sum,
                 );
                 for bin in 0..SPECTROGRAM_BINS {
                     sums[bin] += u64::from(frame.bins[bin]);
@@ -427,10 +460,10 @@ mod tests {
             (0.0625, 3602),
             (0.01, 3276),
         ] {
-            assert_eq!(quantize_amplitude(amplitude), expected);
+            assert_eq!(quantize_power(amplitude * amplitude), expected);
         }
-        assert_eq!(quantize_amplitude(0.0), 0);
-        assert_eq!(quantize_amplitude(1.0e-12), 0);
+        assert_eq!(quantize_power(0.0), 0);
+        assert_eq!(quantize_power(1.0e-24), 0);
     }
 
     #[test]
@@ -454,10 +487,9 @@ mod tests {
             pcm[position] = 32_767;
             let layers =
                 build_spectrogram_layers_pcm16(&pcm, 208, 1, &[160, 2_400, 48_000]).unwrap();
-            let frame = decode_spectrogram_frame(
-                &layers[0].bytes[..SPECTROGRAM_BYTES_PER_CHANNEL_FRAME],
-            )
-            .unwrap();
+            let frame =
+                decode_spectrogram_frame(&layers[0].bytes[..SPECTROGRAM_BYTES_PER_CHANNEL_FRAME])
+                    .unwrap();
             assert!(frame.bins.iter().all(|&actual| actual == code));
         }
     }
