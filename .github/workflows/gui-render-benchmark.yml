@@ -10,8 +10,11 @@ on:
       - 'examples/benchmark_gui_paths.py'
       - 'examples/benchmark_gl_renderer.py'
       - 'examples/pyside6_gl_view.py'
+      - 'examples/pyside6_pcm_loader.py'
       - 'examples/pyside6_reaper_gl_view.py'
       - 'examples/pyside6_player.py'
+      - 'examples/pyside6_views.py'
+      - 'examples/source_pcm.py'
       - '.github/workflows/gui-render-benchmark.yml'
   pull_request:
     paths:
@@ -21,8 +24,11 @@ on:
       - 'examples/benchmark_gui_paths.py'
       - 'examples/benchmark_gl_renderer.py'
       - 'examples/pyside6_gl_view.py'
+      - 'examples/pyside6_pcm_loader.py'
       - 'examples/pyside6_reaper_gl_view.py'
       - 'examples/pyside6_player.py'
+      - 'examples/pyside6_views.py'
+      - 'examples/source_pcm.py'
       - '.github/workflows/gui-render-benchmark.yml'
   workflow_dispatch:
 

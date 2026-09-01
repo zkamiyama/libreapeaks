@@ -23,6 +23,12 @@ The GUI path is designed for DAW-style interaction:
 - no second application-specific persistent waveform pyramid when compatible
   `.reapeaks` waveform data already exists.
 
+The last point does not imply that `.reapeaks` contains individual samples.
+When the finest peak bucket becomes visibly wider than a pixel, the reference
+players switch to a bounded decoded source window. See
+[`SOURCE_PCM_LOD.md`](SOURCE_PCM_LOD.md) for the exact-sample LOD, decoder, and
+memory policy.
+
 ## Pyramid structure
 
 `WavePyramid` has two kinds of levels:
@@ -44,6 +50,30 @@ so the scan is effectively constant-time for media-size purposes.
 therefore estimates an upper bound from the finest native level. The reference
 players prefer an exact duration/frame count from the playback media when that
 information is available.
+
+## High-zoom handoff to source PCM
+
+Peak tiles and source PCM are separate LOD domains. Keep using the persistent
+RGBA8 `.reapeaks` pyramid until a finest peak spans about 1.5 pixels; then use
+`plan_pcm_lod()` / `planPcmLod()` to request a bounded transient source page.
+The planner accepts finite fractional UI coordinates, clamps them to the source
+timeline, and rounds the source interval outwards to integer frame boundaries.
+This preserves a partially visible endpoint sample after cursor-anchored wheel
+zoom while keeping every decoder request integer-indexed and division-aligned.
+
+At `division > 1`, the transient source page is reduced to exact on-demand
+max/min `RG32F` records. At `division == 1`, it is an interleaved exact-sample
+`R32F` texture. `plan_pcm_draw()` / `planPcmDraw()` maps its visible record
+range to `x_origin`/`x_step`, identifies the value offset for each channel, and
+enables connected lines and (from 3 px/frame by default) circular points. The
+plan allocates no segment/point list, so CPU and shader renderers can share the
+same geometry contract.
+
+Use the range-access event separately from paint invalidation. A successful
+access may be `decoded`, `cache-hit`, or `coalesced`; only `reader_ran=true`
+means a real file read/decoder miss occurred. See
+[`SOURCE_PCM_LOD.md`](SOURCE_PCM_LOD.md) for the event fields, memory limits,
+host playback-cache adapter, and failure behavior.
 
 ## Tile identity
 

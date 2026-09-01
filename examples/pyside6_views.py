@@ -4,11 +4,19 @@ from __future__ import annotations
 from collections import OrderedDict
 import math
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 import reapeaks
+from pyside6_pcm_loader import PcmWindowLoader
+from source_pcm import (
+    MIN_SAMPLE_VIEW_FRAMES,
+    PcmDisplayWindow,
+    SourcePcmService,
+    pcm_display_values,
+    plan_pcm_draw,
+)
 
 BG = QColor(17, 20, 26)
 GRID = QColor(54, 62, 75)
@@ -19,6 +27,7 @@ TILE_A = QColor(255, 255, 255, 10)
 TILE_B = QColor(80, 160, 255, 12)
 TILE_EDGE = QColor(230, 120, 255, 150)
 TEXT = QColor(210, 218, 230)
+SOURCE_PCM = QColor(250, 229, 72)
 
 
 def signed_i16(lo: int, hi: int) -> int:
@@ -82,7 +91,14 @@ class PeaksCanvas(QWidget):
     seekRequested = Signal(int)
     verticalScaleChanged = Signal(float)
 
-    def __init__(self, rp: reapeaks.ReaPeaks, total_frames: int, parent=None):
+    def __init__(
+        self,
+        rp: reapeaks.ReaPeaks,
+        total_frames: int,
+        parent=None,
+        *,
+        pcm_service: SourcePcmService | None = None,
+    ):
         super().__init__(parent)
         self.rp = rp
         self.total_frames = max(1, total_frames)
@@ -101,6 +117,11 @@ class PeaksCanvas(QWidget):
         self.drag_last_x: float | None = None
         self.drag_distance = 0.0
         self.diagnostics = ""
+        self.pcm_loader = (
+            PcmWindowLoader(pcm_service, self) if pcm_service is not None else None
+        )
+        if self.pcm_loader is not None:
+            self.pcm_loader.changed.connect(self.update)
         self.setMinimumHeight(430)
         self.setMouseTracking(True)
 
@@ -113,7 +134,11 @@ class PeaksCanvas(QWidget):
             self.set_view(self.view_start, min(self.view_end, self.total_frames), emit=False)
 
     def set_view(self, start: int, end: int, *, emit: bool = True):
-        minimum_span = max(64, self.rp.sample_rate // 50)
+        minimum_span = (
+            MIN_SAMPLE_VIEW_FRAMES
+            if self.pcm_loader is not None
+            else max(64, self.rp.sample_rate // 50)
+        )
         span = max(minimum_span, int(end) - int(start))
         span = min(span, self.total_frames)
         start = max(0, min(int(start), self.total_frames - span))
@@ -140,7 +165,11 @@ class PeaksCanvas(QWidget):
     def zoom(self, factor: float, anchor_ratio: float = 0.5):
         span = self.view_end - self.view_start
         new_span = int(span * factor)
-        minimum_span = max(64, self.rp.sample_rate // 50)
+        minimum_span = (
+            MIN_SAMPLE_VIEW_FRAMES
+            if self.pcm_loader is not None
+            else max(64, self.rp.sample_rate // 50)
+        )
         new_span = max(minimum_span, min(new_span, self.total_frames))
         anchor = self.view_start + span * anchor_ratio
         new_start = int(anchor - new_span * anchor_ratio)
@@ -271,6 +300,82 @@ class PeaksCanvas(QWidget):
 
         return (level_index, division, first_peak, peak_count, ppp), visible
 
+    def _draw_source_pcm(
+        self,
+        painter: QPainter,
+        top: float,
+        height: float,
+        window: PcmDisplayWindow,
+    ) -> None:
+        channels = max(1, int(window.channels))
+        self._draw_background(painter, top, height, channels)
+        values = pcm_display_values(window)
+        draw = plan_pcm_draw(
+            window,
+            self.view_start,
+            self.view_end,
+            max(1, self.width()),
+        )
+        band_h = height / channels
+        minimum_y = top - height
+        maximum_y = top + height * 2.0
+
+        def display_y(sample: float, center: float, scale: float) -> float:
+            value = float(sample)
+            if not math.isfinite(value):
+                value = 0.0
+            return max(minimum_y, min(maximum_y, center - value * scale))
+
+        painter.setPen(QPen(SOURCE_PCM, draw.line_width_px))
+        if window.mode == "envelope":
+            for local_record in range(draw.visible_record_count):
+                x = int(round(draw.x_for_local_record(local_record)))
+                for channel in range(channels):
+                    maximum = float(values[draw.value_offset(local_record, channel, 0)])
+                    minimum = float(values[draw.value_offset(local_record, channel, 1)])
+                    center = top + band_h * (channel + 0.5)
+                    scale = band_h * 0.45 / self.vertical_full_scale
+                    painter.drawLine(
+                        x,
+                        int(display_y(maximum, center, scale)),
+                        x,
+                        int(display_y(minimum, center, scale)),
+                    )
+            return
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for channel in range(channels):
+            center = top + band_h * (channel + 0.5)
+            scale = band_h * 0.45 / self.vertical_full_scale
+            path = QPainterPath()
+            points: list[QPointF] = []
+            started = False
+            for local_record in range(draw.visible_record_count):
+                sample = float(values[draw.sample_offset(local_record, channel)])
+                point = QPointF(
+                    draw.x_for_local_record(local_record),
+                    display_y(sample, center, scale),
+                )
+                if not started:
+                    path.moveTo(point)
+                    started = True
+                else:
+                    path.lineTo(point)
+                if draw.draw_points:
+                    points.append(point)
+            if started and draw.draw_lines:
+                painter.drawPath(path)
+            if points:
+                painter.setBrush(SOURCE_PCM)
+                for point in points:
+                    painter.drawEllipse(
+                        point,
+                        draw.point_radius_px,
+                        draw.point_radius_px,
+                    )
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
     def _nearest_spectral_level(self, desired_division: int):
         if not self.native_levels:
             return None
@@ -339,6 +444,24 @@ class PeaksCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         h = self.height()
+        if self.pcm_loader is not None and self.levels:
+            pcm_plan = self.pcm_loader.plan(
+                self.view_start,
+                self.view_end,
+                max(1, self.width()),
+                self.total_frames,
+                int(self.levels[0][0]),
+            )
+            pcm_window = self.pcm_loader.ensure(pcm_plan)
+            if pcm_plan.active and pcm_window is not None:
+                self._draw_source_pcm(painter, 0, h, pcm_window)
+                x = self._x_for_frame(self.playhead)
+                if 0 <= x <= self.width():
+                    painter.setPen(QPen(PLAYHEAD, 2))
+                    painter.drawLine(int(x), 0, int(x), h)
+                self.diagnostics = self.pcm_loader.diagnostics()
+                painter.end()
+                return
         wave_h = h * 0.60
         spec_top = wave_h + 4
         spec_h = h - spec_top
@@ -358,6 +481,8 @@ class PeaksCanvas(QWidget):
                 f"tiles [{', '.join(spectral_tiles)}] | LRU {len(self.cache.items)}/{self.cache.capacity} "
                 f"hit={self.cache.hits} miss={self.cache.misses}"
             )
+            if self.pcm_loader is not None:
+                self.diagnostics += f" | {self.pcm_loader.diagnostics()}"
         painter.end()
 
 

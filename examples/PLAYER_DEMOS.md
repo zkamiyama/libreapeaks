@@ -57,6 +57,19 @@ Playback decoding is separate from cache decoding. `--playback-decoder native`
 lets the platform/browser backend open the source directly;
 `--playback-decoder ffmpeg` creates a temporary float WAV for playback.
 
+Extreme-zoom waveform decoding is a third, bounded path. It reads only an
+aligned window around the viewport and stores decoded float32 pages in a
+byte-limited LRU; it does not keep the complete source PCM in memory. Direct
+PCM16/float32 WAV seeking is built in, while compressed sources use accurate
+FFmpeg window seeks. See
+[`../docs/SOURCE_PCM_LOD.md`](../docs/SOURCE_PCM_LOD.md).
+
+The native playback backend may already hold a short PCM read-ahead ring, but
+the demos do not assume it contains an arbitrary waveform viewport or original
+source-rate/pre-DSP samples. If a host DAW exposes that exact random-access
+cache, `CallbackPcmWindowReader` can reuse it and report whether the host hit or
+decoded each requested range.
+
 ## 1. PySide6 desktop player
 
 ```bash
@@ -98,7 +111,18 @@ Interaction is REAPER-oriented:
 - click: move the playhead; the next Play starts at that time.
 
 The GPU debug strip shows which waveform / `-'s'` / `-'g'` / `-'r'` windows are
-resident and which areas are currently unloaded.
+resident and which areas are currently unloaded. A fifth row shows transient
+source PCM residency. At extreme zoom the renderer suppresses cached analysis,
+draws exact source-derived max/min, then exact connected sample points. PySide6
+loads those windows off the UI thread; the QPainter fallback implements the
+same source/sample LOD.
+
+Each source access reports whether a real range read/decode ran or whether the
+raw page was a cache hit/coalesced request. The Web player emits
+`libreapeaks:pcm-range` on the WebGL canvas and shows the last decode in its
+diagnostics; PySide6 exposes `rangeAccess`/`rangeDecoded` signals and a visible
+status notification. `plan_pcm_draw()` (and mirrored `planPcmDraw()`) supplies
+the record-to-x mapping and exact-sample line/dot decision for custom GUIs.
 
 ## 2. Browser / JavaScript player
 
@@ -152,6 +176,22 @@ The browser uploads those response bodies directly:
   -> WebGL2 integer/float texture
   -> GLSL ES 3.00 decode + composite
 ```
+
+When the finest waveform record reaches 1.5 pixels, WebGL2 instead requests:
+
+```text
+GET /api/pcm-window?first=F&count=N&division=D
+```
+
+The source path has 1.1-pixel exit hysteresis. It first uploads exact transient
+max/min (`RG32F`), then at one frame/pixel uploads exact samples (`R32F`) and
+draws connected lines plus dots. Canvas2D remains capped at peak-cache scale so
+it never presents enlarged cache records as individual samples.
+
+Cursor-anchored browser zoom naturally produces fractional frame coordinates.
+The LOD planner accepts those continuous viewport bounds and rounds the actual
+PCM read outwards to integer frames, preventing an endpoint sample from being
+dropped while keeping the HTTP request integral and aligned.
 
 For `-'g'`, the HTTP body remains the exact 192 bytes per channel/time record.
 The shader performs the 12-bit unpack:
@@ -222,6 +262,34 @@ Both renderers share the same interaction model:
 The wheel math is regression-tested directly from `app.js`, including
 fractional high-resolution trackpad deltas and cursor-anchor preservation.
 
+### Source PCM limits
+
+Both runnable players accept:
+
+```text
+--no-source-pcm
+--pcm-decoder auto|wav|ffmpeg
+--pcm-cache-mib 64
+--pcm-window-mib 16
+--pcm-page-mib 1
+```
+
+`--pcm-cache-mib 0` retains no decoded pages. Failures automatically fall back
+to `.reapeaks` and remain visible in diagnostics.
+
+The 64 MiB cache option limits retained raw pages, not total process RSS. At
+defaults, no single raw reader result exceeds 16 MiB and at most two reader
+calls run concurrently; response/display buffers, FFmpeg/OS buffers, and GPU
+textures are separate. PySide6 schedules one UI loader task at a time, while
+the shared cache independently enforces the reader/pending limits.
+
+An application with its own source-rate playback block cache can inject it via
+`CallbackPcmWindowReader` and set this LRU to zero. Qt 6.8+
+`QAudioBufferOutput` can opportunistically contribute the sequential buffers
+passing the playhead, but neither stock `QMediaPlayer` nor a browser media
+element exposes arbitrary frame lookup into its internal decoded ring. The
+runnable demos therefore use the independent bounded source reader.
+
 ## Browser WebGL2 CI benchmark
 
 `.github/workflows/webgl2-web-player-benchmark.yml` creates a deterministic
@@ -238,6 +306,8 @@ The gate verifies all of the following in an actual WebGL2 context:
 - repeated spectrogram-gain and `Ctrl`-wheel changes do not add raw HTTP
   requests or texture uploads;
 - horizontal zoom can select and upload new raw pages;
+- extreme zoom fetches a bounded source window and uploads an exact-sample
+  `R32F` texture;
 - no browser console errors are produced by the player path.
 
 The workflow records renderer/vendor/version, `MAX_TEXTURE_SIZE`, timer-query
@@ -299,6 +369,10 @@ See [`../docs/REAPER_CENTRAL_CACHE.md`](../docs/REAPER_CENTRAL_CACHE.md).
 | `render_rgba()` | overview | overview | small full-file CPU overview |
 | `default_divisions()` | yes | yes | diagnostics/cache generation |
 | native REAPER-mode Python writer | yes | when needed | build one of the three REAPER-observed cache shapes |
+| `SourcePcmService.display_window()` | yes | server | bounded exact source records plus `PcmRangeEvent` |
+| `CallbackPcmWindowReader` | host integration | host integration | reuse a DAW/player source-rate block cache |
+| `plan_pcm_lod()` / `planPcmLod()` | yes | yes | hysteretic cache-to-source LOD and bounded request geometry |
+| `plan_pcm_draw()` / `planPcmDraw()` | yes | yes | exact sample line/dot placement and interleaved offsets |
 
 ## Data-texture decoding summary
 

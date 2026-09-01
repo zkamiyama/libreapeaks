@@ -26,7 +26,7 @@
 
     <section class="panel" id="webglPanel">
       <div class="panelTitle">
-        Packed WebGL2 composite — raw waveform + <code>-'s'</code> + packed 12-bit <code>-'g'</code> + <code>-'r'</code>
+        Packed WebGL2 composite — raw cache analyses + automatic source-PCM sample LOD
       </div>
       <div class="canvasStack webglStack" id="webglStack"
            title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
@@ -96,6 +96,7 @@
       <div><strong>Viewport:</strong> <span id="viewportInfo"></span></div>
       <div><strong>Visible / resident:</strong> <span id="tileInfo"></span></div>
       <div><strong>CPU tile LRU:</strong> <span id="cacheInfo"></span></div>
+      <div><strong>PCM range events:</strong> <span id="pcmRangeInfo" aria-live="polite">none</span></div>
       <div><strong>Cache/API:</strong> <span id="apiInfo"></span></div>
       <div class="hint">
         <kbd>Wheel</kbd> horizontal zoom at pointer · <kbd>Ctrl</kbd>+<kbd>Wheel</kbd> vertical waveform zoom · drag pan · click seek.

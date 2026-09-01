@@ -8,8 +8,10 @@ overlays, playhead drawing, and a realtime GPU-residency debug strip.
 """
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
 import math
+import sys
 import time
 
 from PySide6.QtCore import Qt, Signal
@@ -24,6 +26,13 @@ from PySide6.QtOpenGL import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 import reapeaks
+from pyside6_pcm_loader import PcmWindowLoader
+from source_pcm import (
+    MIN_SAMPLE_VIEW_FRAMES,
+    PcmDisplayWindow,
+    SourcePcmService,
+    plan_pcm_draw,
+)
 
 
 VERTEX_SHADER = r"""
@@ -73,12 +82,21 @@ uniform float u_rRecord0;
 uniform float u_rRecordsAcross;
 uniform int u_rCount;
 
+uniform int u_pcmMode;
+uniform sampler2D u_pcm;
+uniform float u_pcmRecord0;
+uniform float u_pcmRecordsAcross;
+uniform int u_pcmCount;
+uniform float u_pcmPixelsPerFrame;
+uniform int u_pcmDrawPoints;
+
 uniform int u_tileDebug;
 uniform vec2 u_viewGlobal;
 uniform vec2 u_waveResident;
 uniform vec2 u_sResident;
 uniform vec2 u_gResident;
 uniform vec2 u_rResident;
+uniform vec2 u_pcmResident;
 
 int s16(uint lo, uint hi) {
     uint value = lo | (hi << 8u);
@@ -95,6 +113,10 @@ float decodeWave(int code) {
         ? mag / 24576.0
         : exp2((mag - 24576.0) / 1024.0);
     return neg ? -amp : amp;
+}
+
+float finitePcm(float value) {
+    return value == value && abs(value) < 3.402823e38 ? value : 0.0;
 }
 
 int recordAt(float record0, float across, int count) {
@@ -135,11 +157,13 @@ vec3 debugRow(int row, float x) {
     vec2 r = row == 0 ? u_waveResident
            : row == 1 ? u_sResident
            : row == 2 ? u_gResident
-                      : u_rResident;
+           : row == 3 ? u_rResident
+                      : u_pcmResident;
     vec3 active = row == 0 ? vec3(0.30, 0.95, 0.56)
                 : row == 1 ? vec3(0.28, 0.62, 1.00)
                 : row == 2 ? vec3(0.95, 0.34, 0.90)
-                           : vec3(1.00, 0.58, 0.18);
+                : row == 3 ? vec3(1.00, 0.58, 0.18)
+                           : vec3(0.98, 0.90, 0.28);
     vec3 base = resident(r, x) ? active : vec3(0.10, 0.11, 0.14);
     if (x >= u_viewGlobal.x && x <= u_viewGlobal.y) {
         base = mix(base, vec3(1.0), 0.20);
@@ -148,8 +172,8 @@ vec3 debugRow(int row, float x) {
 }
 
 void main() {
-    if (u_tileDebug != 0 && v_uv.y < 0.080) {
-        int row = clamp(int(floor(v_uv.y / 0.020)), 0, 3);
+    if (u_tileDebug != 0 && v_uv.y < 0.100) {
+        int row = clamp(int(floor(v_uv.y / 0.020)), 0, 4);
         fragColor = vec4(debugRow(row, v_uv.x), 1.0);
         return;
     }
@@ -202,6 +226,46 @@ void main() {
         color = mix(color, vec3(0.43, 0.92, 0.67), inside);
     }
 
+    if (u_pcmMode == 1 && u_pcmCount > 0) {
+        int record = recordAt(u_pcmRecord0, u_pcmRecordsAcross, u_pcmCount);
+        vec2 rawExtrema = texelFetch(u_pcm, ivec2(channel, record), 0).rg;
+        vec2 extrema = vec2(finitePcm(rawExtrema.r), finitePcm(rawExtrema.g));
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float aa = max(fwidth(amplitude) * 1.5, 0.001);
+        float inside = smoothstep(extrema.g - aa, extrema.g + aa, amplitude)
+                     * (1.0 - smoothstep(extrema.r - aa, extrema.r + aa, amplitude));
+        color = mix(color, vec3(0.98, 0.90, 0.28), inside);
+    } else if (u_pcmMode == 2 && u_pcmCount > 0) {
+        float position = clamp(
+            u_pcmRecord0 + v_uv.x * u_pcmRecordsAcross,
+            0.0,
+            float(max(0, u_pcmCount - 1))
+        );
+        int left = clamp(int(floor(position)), 0, max(0, u_pcmCount - 1));
+        int right = min(left + 1, u_pcmCount - 1);
+        float leftSample = finitePcm(texelFetch(u_pcm, ivec2(channel, left), 0).r);
+        float rightSample = finitePcm(texelFetch(u_pcm, ivec2(channel, right), 0).r);
+        float lineSample = mix(leftSample, rightSample, fract(position));
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);
+        float line = 1.0 - smoothstep(
+            amplitudePerPixel * 0.75,
+            amplitudePerPixel * 1.75,
+            abs(amplitude - lineSample)
+        );
+        float alpha = line * 0.95;
+        if (u_pcmDrawPoints != 0) {
+            float nearestPosition = floor(position + 0.5);
+            int nearest = clamp(int(nearestPosition), 0, u_pcmCount - 1);
+            float pointSample = finitePcm(texelFetch(u_pcm, ivec2(channel, nearest), 0).r);
+            float dxPixels = abs(position - nearestPosition) * u_pcmPixelsPerFrame;
+            float dyPixels = abs(amplitude - pointSample) / amplitudePerPixel;
+            float dot = 1.0 - smoothstep(2.0, 3.0, length(vec2(dxPixels, dyPixels)));
+            alpha = max(alpha, dot);
+        }
+        color = mix(color, vec3(0.98, 0.90, 0.28), alpha);
+    }
+
     if (u_hasLoudness != 0 && u_rCount > 0) {
         int record = recordAt(u_rRecord0, u_rRecordsAcross, u_rCount);
         vec2 energy = texelFetch(u_loudness, ivec2(channel, record), 0).rg;
@@ -241,6 +305,26 @@ class UploadWindow:
         return max(0.0, start), min(1.0, end)
 
 
+@dataclass
+class PcmUploadWindow:
+    key: tuple[int, int, int]
+    first_frame: int
+    frame_count: int
+    division: int
+    record_count: int
+    mode: str
+    backend: str
+    texture: QOpenGLTexture
+    byte_count: int
+
+    def normalized_range(self, total_frames: int) -> tuple[float, float]:
+        denominator = max(1, total_frames)
+        return (
+            max(0.0, self.first_frame / denominator),
+            min(1.0, (self.first_frame + self.frame_count) / denominator),
+        )
+
+
 class GpuAnalysisCanvas(QOpenGLWidget):
     """Composite REAPER-style analysis display driven by packed cache bytes."""
 
@@ -248,7 +332,14 @@ class GpuAnalysisCanvas(QOpenGLWidget):
     seekRequested = Signal(int)
     PAGE_RECORDS = 512
 
-    def __init__(self, peaks_path: str, total_frames: int, parent=None):
+    def __init__(
+        self,
+        peaks_path: str,
+        total_frames: int,
+        parent=None,
+        *,
+        pcm_service: SourcePcmService | None = None,
+    ):
         super().__init__(parent)
         fmt = QSurfaceFormat()
         fmt.setVersion(3, 3)
@@ -275,6 +366,12 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         self._vao: QOpenGLVertexArrayObject | None = None
         self._gl = None
         self._uploads: dict[str, UploadWindow] = {}
+        self._pcm_upload: PcmUploadWindow | None = None
+        self.pcm_loader = (
+            PcmWindowLoader(pcm_service, self) if pcm_service is not None else None
+        )
+        if self.pcm_loader is not None:
+            self.pcm_loader.changed.connect(self.update)
         self._gpu_query: QOpenGLTimerQuery | None = None
         self._gpu_query_pending = False
         self._gpu_ms = 0.0
@@ -301,7 +398,11 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             )
 
     def set_view(self, start: int, end: int, *, emit: bool = True):
-        minimum_span = max(64, self.gpu.sample_rate // 50)
+        minimum_span = (
+            MIN_SAMPLE_VIEW_FRAMES
+            if self.pcm_loader is not None
+            else max(64, self.gpu.sample_rate // 50)
+        )
         span = max(minimum_span, int(end) - int(start))
         span = min(span, self.total_frames)
         start = max(0, min(int(start), self.total_frames - span))
@@ -343,8 +444,13 @@ class GpuAnalysisCanvas(QOpenGLWidget):
 
     def zoom(self, factor: float, anchor_ratio: float = 0.5):
         span = self.view_end - self.view_start
+        minimum_span = (
+            MIN_SAMPLE_VIEW_FRAMES
+            if self.pcm_loader is not None
+            else max(64, self.gpu.sample_rate // 50)
+        )
         new_span = max(
-            max(64, self.gpu.sample_rate // 50),
+            minimum_span,
             min(int(span * factor), self.total_frames),
         )
         anchor = self.view_start + span * anchor_ratio
@@ -519,6 +625,82 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             raise ValueError(f"unknown GPU texture kind {kind}")
         return texture
 
+    @staticmethod
+    def _upload_pcm_texture(window: PcmDisplayWindow) -> QOpenGLTexture:
+        expected = (
+            window.record_count * window.channels * window.components * 4
+        )
+        if len(window.data_f32le) != expected:
+            raise ValueError(
+                f"source PCM payload {len(window.data_f32le)} != expected {expected}"
+            )
+        payload = window.data_f32le
+        if sys.byteorder != "little":
+            converted = array("f")
+            converted.frombytes(payload)
+            converted.byteswap()
+            payload = converted.tobytes()
+        texture = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
+        texture.setMipLevels(1)
+        texture.setMinMagFilters(
+            QOpenGLTexture.Filter.Nearest,
+            QOpenGLTexture.Filter.Nearest,
+        )
+        texture.setWrapMode(QOpenGLTexture.WrapMode.ClampToEdge)
+        texture.setSize(window.channels, window.record_count)
+        if window.components == 1:
+            texture.setFormat(QOpenGLTexture.TextureFormat.R32F)
+            pixel_format = QOpenGLTexture.PixelFormat.Red
+        elif window.components == 2:
+            texture.setFormat(QOpenGLTexture.TextureFormat.RG32F)
+            pixel_format = QOpenGLTexture.PixelFormat.RG
+        else:
+            raise ValueError(
+                f"unexpected source PCM component count {window.components}"
+            )
+        texture.allocateStorage(pixel_format, QOpenGLTexture.PixelType.Float32)
+        texture.setData(pixel_format, QOpenGLTexture.PixelType.Float32, payload)
+        return texture
+
+    def _source_upload_for_view(self) -> PcmUploadWindow | None:
+        if self.pcm_loader is None:
+            return None
+        levels = self.gpu.levels("waveform")
+        if not levels:
+            return None
+        fine_division = min(max(1, int(level[0])) for level in levels)
+        plan = self.pcm_loader.plan(
+            self.view_start,
+            self.view_end,
+            max(1, self.width()),
+            self.total_frames,
+            fine_division,
+        )
+        window = self.pcm_loader.ensure(plan)
+        if not plan.active or plan.key is None or window is None:
+            return None
+        if self._pcm_upload is not None and self._pcm_upload.key == plan.key:
+            return self._pcm_upload
+        upload_start = time.perf_counter_ns()
+        texture = self._upload_pcm_texture(window)
+        if self._pcm_upload is not None:
+            self._pcm_upload.texture.destroy()
+        self._pcm_upload = PcmUploadWindow(
+            plan.key,
+            window.first_frame,
+            window.frame_count,
+            window.division,
+            window.record_count,
+            window.mode,
+            window.backend,
+            texture,
+            window.byte_count,
+        )
+        self._upload_ms = (time.perf_counter_ns() - upload_start) / 1e6
+        self._upload_bytes_total += window.byte_count
+        self._upload_count += 1
+        return self._pcm_upload
+
     def initializeGL(self):  # noqa: N802
         self._gl = self.context().functions()
         self._program = QOpenGLShaderProgram(self)
@@ -551,6 +733,9 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         for upload in self._uploads.values():
             upload.texture.destroy()
         self._uploads.clear()
+        if self._pcm_upload is not None:
+            self._pcm_upload.texture.destroy()
+            self._pcm_upload = None
         if self._vao is not None and self._vao.isCreated():
             self._vao.destroy()
         if self._gpu_query is not None and self._gpu_query.isCreated():
@@ -598,7 +783,24 @@ class GpuAnalysisCanvas(QOpenGLWidget):
 
         span = max(1, self.view_end - self.view_start)
         desired = span / max(1, self.width())
-        wave_choice = self._nearest_level(self.gpu.levels("waveform"), desired)
+        pcm_upload = self._source_upload_for_view()
+        pcm_draw = None
+        if (
+            pcm_upload is not None
+            and self.pcm_loader is not None
+            and self.pcm_loader.ready_window is not None
+        ):
+            pcm_draw = plan_pcm_draw(
+                self.pcm_loader.ready_window,
+                self.view_start,
+                self.view_end,
+                max(1, self.width()),
+            )
+        wave_choice = (
+            None
+            if pcm_upload is not None
+            else self._nearest_level(self.gpu.levels("waveform"), desired)
+        )
         wave = None
         target_division = desired
         if wave_choice is not None:
@@ -612,7 +814,7 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             )
 
         spectral = None
-        if self.show_spectral:
+        if pcm_upload is None and self.show_spectral:
             choice = self._nearest_level(
                 self.gpu.levels("spectral"),
                 target_division,
@@ -627,9 +829,13 @@ class GpuAnalysisCanvas(QOpenGLWidget):
                 )
 
         spectrogram = None
-        choice = self._nearest_level(
-            self.gpu.levels("spectrogram"),
-            target_division,
+        choice = (
+            None
+            if pcm_upload is not None
+            else self._nearest_level(
+                self.gpu.levels("spectrogram"),
+                target_division,
+            )
         )
         if choice is not None:
             index, (division, total, _bpc) = choice
@@ -641,7 +847,7 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             )
 
         loudness = None
-        if self.show_loudness:
+        if pcm_upload is None and self.show_loudness:
             choice = self._nearest_level(
                 self.gpu.levels("loudness"),
                 target_division,
@@ -706,6 +912,14 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             "u_rResident",
             self._resident_uniform("loudness"),
         )
+        if self._pcm_upload is None:
+            pcm_resident = QVector2D(0.0, 0.0)
+        else:
+            pcm_first, pcm_last = self._pcm_upload.normalized_range(
+                self.total_frames
+            )
+            pcm_resident = QVector2D(float(pcm_first), float(pcm_last))
+        self._program.setUniformValue("u_pcmResident", pcm_resident)
 
         bindings = [
             (wave, "u_wave", 0),
@@ -717,11 +931,42 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             if window is not None:
                 window.texture.bind(unit)
             self._program.setUniformValue(uniform, unit)
+        if pcm_upload is not None:
+            pcm_upload.texture.bind(4)
+        self._program.setUniformValue("u_pcm", 4)
 
         self._set_window_uniforms("Wave", "wave", wave)
         self._set_window_uniforms("Spectral", "s", spectral)
         self._set_window_uniforms("G", "g", spectrogram)
         self._set_window_uniforms("Loudness", "r", loudness)
+        if pcm_upload is None or pcm_draw is None:
+            self._program.setUniformValue("u_pcmMode", 0)
+            self._program.setUniformValue("u_pcmRecord0", 0.0)
+            self._program.setUniformValue("u_pcmRecordsAcross", 0.0)
+            self._program.setUniformValue("u_pcmCount", 0)
+            self._program.setUniformValue("u_pcmPixelsPerFrame", 0.0)
+            self._program.setUniformValue("u_pcmDrawPoints", 0)
+        else:
+            self._program.setUniformValue(
+                "u_pcmMode", 2 if pcm_upload.mode == "samples" else 1
+            )
+            self._program.setUniformValue(
+                "u_pcmRecord0",
+                float(pcm_draw.record0),
+            )
+            self._program.setUniformValue(
+                "u_pcmRecordsAcross",
+                float(pcm_draw.records_across),
+            )
+            self._program.setUniformValue(
+                "u_pcmCount", int(pcm_upload.record_count)
+            )
+            self._program.setUniformValue(
+                "u_pcmPixelsPerFrame", float(pcm_draw.pixels_per_frame)
+            )
+            self._program.setUniformValue(
+                "u_pcmDrawPoints", 1 if pcm_draw.draw_points else 0
+            )
 
         if self._gpu_query is not None and not self._gpu_query_pending:
             self._gpu_query.begin()
@@ -734,6 +979,8 @@ class GpuAnalysisCanvas(QOpenGLWidget):
         for window, _uniform, unit in bindings:
             if window is not None:
                 window.texture.release(unit)
+        if pcm_upload is not None:
+            pcm_upload.texture.release(4)
         self._vao.release()
         self._program.release()
 
@@ -744,8 +991,15 @@ class GpuAnalysisCanvas(QOpenGLWidget):
             for kind, value in self._uploads.items()
         )
         mib = self._upload_bytes_total / (1024.0 * 1024.0)
+        source = (
+            self.pcm_loader.diagnostics()
+            if self.pcm_loader is not None
+            else "PCM disabled"
+        )
         self.diagnostics = (
-            f"GLSL packed cpu={self._cpu_ms:.3f}ms gpu={self._gpu_ms:.3f}ms | "
+            f"GLSL {'source' if pcm_upload is not None else 'packed'} "
+            f"cpu={self._cpu_ms:.3f}ms gpu={self._gpu_ms:.3f}ms | "
             f"last read={self._read_ms:.3f}ms upload={self._upload_ms:.3f}ms | "
-            f"uploads={self._upload_count} {mib:.2f}MiB | resident [{windows}]"
+            f"uploads={self._upload_count} {mib:.2f}MiB | resident [{windows}] | "
+            f"{source}"
         )

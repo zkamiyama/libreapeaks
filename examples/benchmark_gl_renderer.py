@@ -12,12 +12,14 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import wave
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
 import reapeaks
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
+from source_pcm import SourcePcmService, WavPcmWindowReader
 
 
 # Keep this enabled in CI: if a Qt/OpenGL binding crashes inside native code,
@@ -25,7 +27,7 @@ from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 faulthandler.enable(all_threads=True)
 
 
-def make_cache(path: Path, seconds: int = 4) -> int:
+def make_cache(path: Path, audio_path: Path, seconds: int = 4) -> int:
     sample_rate = 48_000
     channels = 2
     frames = sample_rate * seconds + 137
@@ -35,8 +37,14 @@ def make_cache(path: Path, seconds: int = 4) -> int:
         pcm.append(((frame * 313) % 65_535) - 32_768)
     if sys.byteorder != "little":
         pcm.byteswap()
+    pcm_bytes = pcm.tobytes()
+    with wave.open(str(audio_path), "wb") as output:
+        output.setnchannels(channels)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(pcm_bytes)
     blob = reapeaks.generate_pcm16_reaper(
-        pcm.tobytes(),
+        pcm_bytes,
         sample_rate=sample_rate,
         channels=channels,
         divisions=reapeaks.default_divisions(sample_rate, 300),
@@ -50,8 +58,19 @@ def main() -> int:
     app = QApplication([sys.argv[0]])
     with tempfile.TemporaryDirectory(prefix="libreapeaks-gl-bench-") as directory:
         cache = Path(directory) / "fixture.reapeaks"
-        total_frames = make_cache(cache)
-        widget = ReaperGpuAnalysisCanvas(str(cache), total_frames)
+        audio = Path(directory) / "fixture.wav"
+        total_frames = make_cache(cache, audio)
+        pcm_service = SourcePcmService(
+            WavPcmWindowReader(audio),
+            expected_sample_rate=48_000,
+            expected_channels=2,
+        )
+        widget = ReaperGpuAnalysisCanvas(
+            str(cache), total_frames, pcm_service=pcm_service
+        )
+        decoded_events: list[object] = []
+        assert widget.pcm_loader is not None
+        widget.pcm_loader.rangeDecoded.connect(decoded_events.append)
         # This benchmark creates a parentless top-level QOpenGLWidget. Ensure it
         # and its GL context die while QApplication is still fully alive rather
         # than leaving Qt to tear them down during Python interpreter shutdown.
@@ -64,7 +83,7 @@ def main() -> int:
         if not widget.isValid():
             raise RuntimeError("QOpenGLWidget failed to create a valid OpenGL context")
 
-        spans = [total_frames, 48_000 * 10, 48_000 * 2, 48_000 // 2]
+        spans = [total_frames, 48_000 * 2, 48_000 // 2, 1200]
         for index in range(32):
             span = min(total_frames, spans[index % len(spans)])
             maximum_start = max(0, total_frames - span)
@@ -75,6 +94,23 @@ def main() -> int:
             app.processEvents()
             widget.grabFramebuffer()
             app.processEvents()
+
+        # Exercise the asynchronous loader and R32F exact-sample texture path,
+        # not only shader compilation with the source uniforms optimized in.
+        widget.set_view(1000, 1200)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            app.processEvents()
+            widget.grabFramebuffer()
+            if widget._pcm_upload is not None and widget._pcm_upload.mode == "samples":
+                break
+            time.sleep(0.01)
+        if widget._pcm_upload is None or widget._pcm_upload.mode != "samples":
+            raise RuntimeError(
+                f"source PCM sample texture did not become ready: {widget.diagnostics}"
+            )
+        if not decoded_events:
+            raise RuntimeError("PySide6 emitted no PCM rangeDecoded debug signal")
 
         print("GLSL_RENDER_BENCH " + widget.diagnostics, flush=True)
 
