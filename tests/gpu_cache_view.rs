@@ -37,13 +37,22 @@ fn direct_gpu_view_indexes_observed_mode3_layers_without_transforming_payloads()
     assert_eq!(gpu.layers(GpuLayerKind::Spectral).len(), 3);
     assert_eq!(gpu.layers(GpuLayerKind::Spectrogram).len(), 2);
     assert_eq!(gpu.layers(GpuLayerKind::Loudness).len(), 2);
-    assert_eq!(gpu.layers(GpuLayerKind::Waveform)[0].bytes_per_channel_record, 4);
-    assert_eq!(gpu.layers(GpuLayerKind::Spectral)[0].bytes_per_channel_record, 4);
+    assert_eq!(
+        gpu.layers(GpuLayerKind::Waveform)[0].bytes_per_channel_record,
+        4
+    );
+    assert_eq!(
+        gpu.layers(GpuLayerKind::Spectral)[0].bytes_per_channel_record,
+        4
+    );
     assert_eq!(
         gpu.layers(GpuLayerKind::Spectrogram)[0].bytes_per_channel_record,
         192
     );
-    assert_eq!(gpu.layers(GpuLayerKind::Loudness)[0].bytes_per_channel_record, 8);
+    assert_eq!(
+        gpu.layers(GpuLayerKind::Loudness)[0].bytes_per_channel_record,
+        8
+    );
 
     let wave = gpu.tile(GpuLayerKind::Waveform, 0, 0, 11).unwrap();
     for record in 0..wave.record_count {
@@ -84,7 +93,8 @@ fn direct_gpu_view_indexes_observed_mode3_layers_without_transforming_payloads()
     for record in 0..loudness.record_count {
         for channel in 0..channels {
             let offset = (record * channels + channel) * 8;
-            let momentary = f32::from_le_bytes(loudness.bytes[offset..offset + 4].try_into().unwrap());
+            let momentary =
+                f32::from_le_bytes(loudness.bytes[offset..offset + 4].try_into().unwrap());
             let short_term =
                 f32::from_le_bytes(loudness.bytes[offset + 4..offset + 8].try_into().unwrap());
             let expected = &decoded.loudness_layers[0].peaks[record * channels + channel];
@@ -101,7 +111,5 @@ fn direct_gpu_view_rejects_out_of_range_and_zero_record_requests() {
     assert!(gpu.tile(GpuLayerKind::Waveform, 0, 0, 0).is_err());
     assert!(gpu.tile(GpuLayerKind::Waveform, usize::MAX, 0, 1).is_err());
     let count = gpu.layers(GpuLayerKind::Waveform)[0].record_count;
-    assert!(gpu
-        .tile(GpuLayerKind::Waveform, 0, count, 1)
-        .is_err());
+    assert!(gpu.tile(GpuLayerKind::Waveform, 0, count, 1).is_err());
 }
