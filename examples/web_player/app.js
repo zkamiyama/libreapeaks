@@ -14,6 +14,14 @@ const state = {
   showTiles: true,
   follow: true,
   verticalScale: 1,
+  spectrogramGain: 1,
+  heatmap: true,
+  showSpectral: true,
+  showLoudness: true,
+  showGpuTiles: true,
+  rendererMode: 'canvas2d',
+  webglRenderer: null,
+  webglError: '',
   renderSerial: 0,
   renderRaf: 0,
   overviewRaf: 0,
@@ -250,8 +258,52 @@ async function renderSpectrum(serial) {
   }
 }
 
+function webglParams() {
+  return {
+    viewStart: state.viewStart,
+    viewEnd: state.viewEnd,
+    playhead: state.playhead,
+    totalFrames: state.meta.total_frames,
+    verticalScale: state.verticalScale,
+    spectrogramGain: state.spectrogramGain,
+    heatmap: state.heatmap,
+    showSpectral: state.showSpectral,
+    showLoudness: state.showLoudness,
+    tileDebug: state.showGpuTiles,
+  };
+}
+
+function lightweightRedraw() {
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    try {
+      state.webglRenderer.paint(webglParams());
+      updateDiagnostics();
+    } catch (error) {
+      state.webglError = String(error);
+      updateDiagnostics();
+    }
+  } else {
+    drawOverlays();
+  }
+}
+
 async function renderView(serial = state.renderSerial) {
   if (!state.meta || serial !== state.renderSerial) return;
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    try {
+      await state.webglRenderer.render(webglParams());
+      if (serial === state.renderSerial) updateDiagnostics();
+    } catch (error) {
+      if (error?.name !== 'AbortError' && serial === state.renderSerial) {
+        state.webglError = String(error);
+        $('tileInfo').textContent = state.webglError;
+        updateDiagnostics();
+      }
+    }
+    drawOverlays();
+    return;
+  }
+
   const controller = new AbortController();
   state.planAbortController = controller;
   try {
@@ -327,23 +379,28 @@ function zoom(factor, anchor = 0.5) {
 function verticalScaleFromWheel(current, steps) {
   return clamp(current * (1.15 ** (-steps)), 0.1, 32);
 }
-function setVerticalScale(value, render = true) {
+function setVerticalScale(value) {
   const next = clamp(Number(value), 0.1, 32);
-  if (!Number.isFinite(next)) return;
-  if (Math.abs(next - state.verticalScale) < 1e-6) return;
+  if (!Number.isFinite(next) || Math.abs(next - state.verticalScale) < 1e-6) return;
   state.verticalScale = next;
-  const slider = $('verticalScale');
-  if (slider) slider.value = String(next);
-  const label = $('verticalValue');
-  if (label) label.textContent = next.toFixed(2);
-  if (render) scheduleRender();
-  else updateDiagnostics();
+  $('verticalScale').value = String(next);
+  $('verticalValue').textContent = next.toFixed(2);
+  if (state.rendererMode === 'webgl2') lightweightRedraw(); else scheduleRender();
+}
+function setSpectrogramGain(value) {
+  const next = clamp(Number(value), 0.05, 8);
+  if (!Number.isFinite(next) || Math.abs(next - state.spectrogramGain) < 1e-6) return;
+  state.spectrogramGain = next;
+  $('spectrogramGain').value = String(next);
+  $('spectrogramGainValue').textContent = `${next.toFixed(2)}×`;
+  lightweightRedraw();
 }
 function seekFrame(frame) {
   frame = Math.max(0, Math.min(frame, state.meta.total_frames));
   $('audio').currentTime = frame / state.meta.sample_rate;
   state.playhead = frame;
   drawOverlays();
+  lightweightRedraw();
 }
 
 function wheelSteps(event, element) {
@@ -399,17 +456,39 @@ function installCanvasInteraction(element) {
   });
 }
 
+function setRendererMode(requested) {
+  const mode = requested === 'webgl2' && state.webglRenderer ? 'webgl2' : 'canvas2d';
+  state.rendererMode = mode;
+  $('rendererSelect').value = mode;
+  $('webglPanel').classList.toggle('hidden', mode !== 'webgl2');
+  $('wavePanel').classList.toggle('hidden', mode !== 'canvas2d');
+  $('spectrumPanel').classList.toggle('hidden', mode !== 'canvas2d');
+  scheduleRender();
+  updateDiagnostics();
+}
+
 function updateDiagnostics() {
-  const p = state.plan;
-  if (!p || !state.meta) return;
-  const waveTiles = p.tiles.map(t => `L${t.level_index}/T${t.tile_index}`).join(', ');
-  const s = p.spectral;
-  const div = s ? `S${s.layer_index} div=${s.division}` : 'none';
+  if (!state.meta) return;
   const span = Math.max(1, state.viewEnd - state.viewStart);
   const horizontalZoom = state.meta.total_frames / span;
-  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× V-FS=${state.verticalScale.toFixed(2)} | wave L${p.level_index} div=${p.division}, ${p.peaks_per_pixel.toFixed(2)} peaks/px | spectral ${div}`;
-  $('tileInfo').textContent = waveTiles || '(no wave tiles)';
-  $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident/pending · hit=${tileCache.hits} miss=${tileCache.misses}`;
+  $('viewportInfo').textContent = `${formatTime(state.viewStart/state.meta.sample_rate)}…${formatTime(state.viewEnd/state.meta.sample_rate)} | H=${horizontalZoom.toFixed(2)}× V-FS=${state.verticalScale.toFixed(2)}×`;
+  if (state.rendererMode === 'webgl2' && state.webglRenderer) {
+    const g = state.meta.gpu_layers?.spectrogram?.length || 0;
+    const r = state.meta.gpu_layers?.loudness?.length || 0;
+    $('rendererInfo').textContent = state.webglError || state.webglRenderer.diagnostics();
+    $('tileInfo').textContent = `raw GPU layers wave=${state.meta.gpu_layers?.waveform?.length || 0} s=${state.meta.gpu_layers?.spectral?.length || 0} g=${g} r=${r}`;
+    $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} Canvas fallback entries (idle in WebGL2 mode)`;
+  } else {
+    const p = state.plan;
+    const waveTiles = p?.tiles?.map(t => `L${t.level_index}/T${t.tile_index}`).join(', ') || '(no wave tiles)';
+    const s = p?.spectral;
+    const div = s ? `S${s.layer_index} div=${s.division}` : 'none';
+    $('rendererInfo').textContent = `Canvas2D tiled fallback | spectral ${div}`;
+    $('tileInfo').textContent = waveTiles;
+    $('cacheInfo').textContent = `${tileCache.map.size}/${tileCache.capacity} resident/pending · hit=${tileCache.hits} miss=${tileCache.misses}`;
+  }
+  document.documentElement.dataset.renderer = state.rendererMode;
+  document.documentElement.dataset.webgl2Ready = state.webglRenderer ? '1' : '0';
 }
 
 function updateTransport() {
@@ -422,6 +501,22 @@ function updateTransport() {
     setView(state.playhead - span * .25, state.playhead + span * .75);
   } else {
     drawOverlays();
+    lightweightRedraw();
+  }
+}
+
+async function initWebGL2() {
+  try {
+    const module = await import('/webgl2_renderer.mjs');
+    state.webglRenderer = new module.WebGL2PackedRenderer($('analysisGl'), state.meta);
+    state.webglError = '';
+    return true;
+  } catch (error) {
+    state.webglRenderer = null;
+    state.webglError = `WebGL2 unavailable: ${String(error)}`;
+    const option = [...$('rendererSelect').options].find(item => item.value === 'webgl2');
+    if (option) option.disabled = true;
+    return false;
   }
 }
 
@@ -429,8 +524,10 @@ async function init() {
   state.meta = await fetchJson('/api/meta');
   state.viewStart = 0; state.viewEnd = state.meta.total_frames;
   $('mediaInfo').textContent = `${state.meta.audio_name} · ${state.meta.sample_rate} Hz · ${state.meta.channels} ch · ${state.meta.wave_encoding}`;
-  $('apiInfo').textContent = `tile_peaks=${state.meta.tile_peaks}; levels=${state.meta.levels.length}; default_divisions=[${state.meta.default_divisions.join(', ')}]; coarsest envelope_texture=${state.meta.coarsest_envelope_texture.width}×${state.meta.coarsest_envelope_texture.height}/${state.meta.coarsest_envelope_texture.bytes} bytes; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
+  const gpuCounts = ['waveform','spectral','spectrogram','loudness'].map(kind => `${kind}=${state.meta.gpu_layers?.[kind]?.length || 0}`).join(' ');
+  $('apiInfo').textContent = `raw=${state.meta.gpu_raw_bytes || 0} bytes; ${gpuCounts}; tile_peaks=${state.meta.tile_peaks}; divisions=[${state.meta.default_divisions.join(', ')}]; cache=${state.meta.generated_cache ? 'generated by libreapeaks' : state.meta.peaks_name}`;
 
+  installCanvasInteraction($('webglStack'));
   installCanvasInteraction($('waveStack'));
   installCanvasInteraction($('spectrumStack'));
   $('overviewBase').parentElement.addEventListener('pointerdown', event => {
@@ -446,13 +543,22 @@ async function init() {
   $('zoomInButton').onclick = () => zoom(.5);
   $('zoomOutButton').onclick = () => zoom(2);
   $('fullButton').onclick = () => setView(0, state.meta.total_frames);
-  $('showTiles').onchange = event => { state.showTiles = event.target.checked; scheduleRender(); };
+  $('rendererSelect').onchange = event => setRendererMode(event.target.value);
+  $('showTiles').onchange = event => { state.showTiles = event.target.checked; if (state.rendererMode === 'canvas2d') scheduleRender(); };
   $('followPlayhead').onchange = event => { state.follow = event.target.checked; };
   $('verticalScale').oninput = event => setVerticalScale(event.target.value);
+  $('spectrogramGain').oninput = event => setSpectrogramGain(event.target.value);
+  $('heatmap').onchange = event => { state.heatmap = event.target.checked; lightweightRedraw(); };
+  $('showSpectral').onchange = event => { state.showSpectral = event.target.checked; scheduleRender(); };
+  $('showLoudness').onchange = event => { state.showLoudness = event.target.checked; scheduleRender(); };
+  $('showGpuTiles').onchange = event => { state.showGpuTiles = event.target.checked; lightweightRedraw(); };
   $('positionSlider').oninput = event => seekFrame(Number(event.target.value)/100000 * state.meta.total_frames);
   $('audio').addEventListener('play', () => $('playButton').textContent = 'Pause');
   $('audio').addEventListener('pause', () => $('playButton').textContent = 'Play');
   $('audio').addEventListener('timeupdate', updateTransport);
+
+  const webglReady = await initWebGL2();
+  setRendererMode(webglReady ? 'webgl2' : 'canvas2d');
 
   const ro = new ResizeObserver(() => {
     scheduleOverview();
