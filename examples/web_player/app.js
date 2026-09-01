@@ -36,9 +36,6 @@ class Lru {
       return value;
     }
     this.misses++;
-    // Store the in-flight Promise itself. Rapid pan/zoom gestures can request
-    // the same tile from overlapping renders; sharing the Promise prevents
-    // duplicate HTTP work while preserving normal LRU behaviour afterwards.
     const value = Promise.resolve().then(loader).catch((error) => {
       this.map.delete(key);
       throw error;
@@ -274,8 +271,6 @@ async function renderView(serial = state.renderSerial) {
 
 function scheduleRender() {
   if (!state.meta) return;
-  // Invalidate an in-flight view immediately. A newer render can still reuse
-  // any tile Promises that are already in the LRU, but stale plan work stops.
   state.renderSerial++;
   state.planAbortController?.abort();
   if (state.renderRaf) return;
@@ -315,17 +310,22 @@ function setView(start, end, render = true) {
   if (Math.abs(start - state.viewStart) < 0.01 && Math.abs(nextEnd - state.viewEnd) < 0.01) return;
   state.viewStart = start;
   state.viewEnd = nextEnd;
-  // Selection/playhead feedback moves immediately; cache planning and tile
-  // drawing are collapsed to at most one request per animation frame.
   drawOverlays();
   if (render) scheduleRender();
 }
-function zoom(factor, anchor = 0.5) {
+function zoomWindow(start, end, factor, anchor = 0.5) {
   anchor = clamp(anchor, 0, 1);
-  const span = state.viewEnd - state.viewStart;
-  const target = state.viewStart + span * anchor;
+  const span = end - start;
+  const target = start + span * anchor;
   const newSpan = span * factor;
-  setView(target - newSpan * anchor, target + newSpan * (1-anchor));
+  return [target - newSpan * anchor, target + newSpan * (1 - anchor)];
+}
+function zoom(factor, anchor = 0.5) {
+  const [start, end] = zoomWindow(state.viewStart, state.viewEnd, factor, anchor);
+  setView(start, end);
+}
+function verticalScaleFromWheel(current, steps) {
+  return clamp(current * (1.15 ** (-steps)), 0.1, 32);
 }
 function setVerticalScale(value, render = true) {
   const next = clamp(Number(value), 0.1, 32);
@@ -350,9 +350,6 @@ function wheelSteps(event, element) {
   let delta = event.deltaY;
   if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) delta *= 40;
   else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) delta *= Math.max(1, element.clientHeight);
-  // Conventional wheels are roughly 100–120 px/detent in browsers. Keeping
-  // this continuous makes precision trackpads zoom smoothly instead of
-  // turning every tiny movement into a full detent.
   return clamp(-delta / 120, -4, 4);
 }
 
@@ -363,9 +360,7 @@ function installCanvasInteraction(element) {
     const steps = wheelSteps(event, element);
     if (!steps) return;
     if (event.ctrlKey) {
-      // Match the desktop demo/REAPER convention: wheel up makes the waveform
-      // taller, represented here by a smaller full-scale value.
-      setVerticalScale(state.verticalScale * (1.15 ** (-steps)));
+      setVerticalScale(verticalScaleFromWheel(state.verticalScale, steps));
       return;
     }
     const rect = element.getBoundingClientRect();
@@ -473,4 +468,15 @@ async function init() {
   requestAnimationFrame(tick);
 }
 
-init().catch(error => { document.body.innerHTML += `<pre>${String(error)}</pre>`; });
+if (typeof globalThis !== 'undefined') {
+  globalThis.__libreapeaksInteractionMath = {
+    clamp,
+    wheelSteps,
+    zoomWindow,
+    verticalScaleFromWheel,
+  };
+}
+
+if (typeof document !== 'undefined') {
+  init().catch(error => { document.body.innerHTML += `<pre>${String(error)}</pre>`; });
+}
