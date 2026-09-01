@@ -77,6 +77,17 @@ def main() -> int:
             app.processEvents()
 
         print("GLSL_RENDER_BENCH " + widget.diagnostics, flush=True)
+
+        # QOpenGLWidget destruction on Mesa/PySide6 6.11 is safest when Qt GL
+        # wrappers are destroyed while the context is unquestionably healthy.
+        # Do that explicitly, then prevent the aboutToBeDestroyed callback from
+        # trying to enter the already-cleaned widget a second time.
+        context = widget.context()
+        widget.cleanup()
+        try:
+            context.aboutToBeDestroyed.disconnect(widget.cleanup)
+        except (RuntimeError, TypeError):
+            pass
         widget.close()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
