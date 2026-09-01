@@ -1,0 +1,79 @@
+name: gui-render-benchmark
+
+on:
+  push:
+    branches: [demo-player-native-modes]
+    paths:
+      - 'src/gpu_cache.rs'
+      - 'src/python_gpu_cache.rs'
+      - 'src/python.rs'
+      - 'examples/benchmark_gui_paths.py'
+      - 'examples/benchmark_gl_renderer.py'
+      - 'examples/pyside6_gl_view.py'
+      - '.github/workflows/gui-render-benchmark.yml'
+  pull_request:
+    paths:
+      - 'src/gpu_cache.rs'
+      - 'src/python_gpu_cache.rs'
+      - 'src/python.rs'
+      - 'examples/benchmark_gui_paths.py'
+      - 'examples/benchmark_gl_renderer.py'
+      - 'examples/pyside6_gl_view.py'
+      - '.github/workflows/gui-render-benchmark.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Mesa/Xvfb and Python build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1-mesa-dri libegl1 mesa-utils
+          python -m pip install --upgrade pip maturin PySide6
+      - name: Build and install libreapeaks Python wheel
+        shell: bash
+        run: |
+          maturin build --release --out dist
+          python -m pip install dist/*.whl
+      - name: Benchmark CPU-side GUI preparation paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python examples/benchmark_gui_paths.py \
+            --seconds 30 \
+            --open-iterations 20 \
+            --tile-iterations 300 | tee /tmp/gui-path-bench.txt
+          grep -Fq 'GUI_PATH_BENCH ' /tmp/gui-path-bench.txt
+      - name: Smoke and benchmark packed GLSL renderer with Mesa llvmpipe
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          QT_OPENGL: desktop
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s '-screen 0 1600x900x24' \
+            python examples/benchmark_gl_renderer.py | tee /tmp/glsl-render-bench.txt
+          grep -Fq 'GLSL_RENDER_BENCH ' /tmp/glsl-render-bench.txt
+      - name: Upload benchmark telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-render-benchmark-${{ github.sha }}
+          path: |
+            /tmp/gui-path-bench.txt
+            /tmp/glsl-render-bench.txt
+          if-no-files-found: warn
+          retention-days: 14
