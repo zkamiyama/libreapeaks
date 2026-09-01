@@ -58,8 +58,8 @@ fn tiny_and_empty_inputs_never_panic_and_remain_parseable() {
         (192_000, 1_000, 2),
     ];
     let lengths = [
-        0usize, 1, 2, 15, 16, 63, 64, 127, 128, 159, 160, 167, 168, 207, 208, 209, 254, 255,
-        256, 257, 318, 319, 320, 321, 511, 512, 513,
+        0usize, 1, 2, 15, 16, 63, 64, 127, 128, 159, 160, 167, 168, 207, 208, 209, 254, 255, 256,
+        257, 318, 319, 320, 321, 511, 512, 513,
     ];
 
     for (sample_rate, peak_rate, channels) in configurations {
@@ -129,9 +129,8 @@ fn custom_fine_divisions_around_256_are_total_and_parseable() {
             source_size_low32: !fine,
             spectral: true,
         };
-        let result = std::panic::catch_unwind(|| {
-            generate_pcm16_mode3_with_spectrogram(&pcm, &options)
-        });
+        let result =
+            std::panic::catch_unwind(|| generate_pcm16_mode3_with_spectrogram(&pcm, &options));
         let bytes = result
             .unwrap_or_else(|_| panic!("generation panicked fine={fine}"))
             .unwrap_or_else(|error| panic!("generation failed fine={fine}: {error}"));
@@ -169,9 +168,8 @@ fn invalid_division_and_pcm_shapes_return_errors_without_panicking() {
             source_size_low32: 2,
             spectral: true,
         };
-        let result = std::panic::catch_unwind(|| {
-            generate_pcm16_mode3_with_spectrogram(&pcm, &options)
-        });
+        let result =
+            std::panic::catch_unwind(|| generate_pcm16_mode3_with_spectrogram(&pcm, &options));
         assert!(result.is_ok(), "invalid divisions panicked");
         assert!(result.unwrap().is_err(), "invalid divisions were accepted");
     }
@@ -181,7 +179,10 @@ fn invalid_division_and_pcm_shapes_return_errors_without_panicking() {
         generate_pcm16_mode3_with_spectrogram(&malformed_pcm, &options(48_000, 300, 3))
     });
     assert!(result.is_ok(), "non-interleaved PCM length panicked");
-    assert!(result.unwrap().is_err(), "accepted PCM not divisible by channels");
+    assert!(
+        result.unwrap().is_err(),
+        "accepted PCM not divisible by channels"
+    );
 }
 
 #[test]
@@ -251,12 +252,19 @@ fn mixed_configuration_parallel_generation_matches_sequential_baselines() {
                 &options(sample_rate, peak_rate, channels),
             )
             .expect("generate mixed baseline");
-            (sample_rate, peak_rate, channels, Arc::new(pcm), Arc::new(baseline))
+            (
+                sample_rate,
+                peak_rate,
+                channels,
+                Arc::new(pcm),
+                Arc::new(baseline),
+            )
         })
         .collect();
 
     let mut workers = Vec::new();
-    for (worker, (sample_rate, peak_rate, channels, pcm, baseline)) in jobs.into_iter().enumerate() {
+    for (worker, (sample_rate, peak_rate, channels, pcm, baseline)) in jobs.into_iter().enumerate()
+    {
         workers.push(std::thread::spawn(move || {
             for round in 0..3 {
                 let actual = generate_pcm16_mode3_with_spectrogram(
@@ -292,7 +300,8 @@ fn source_metadata_changes_do_not_affect_spectrogram_payload() {
     second_options.source_size_low32 = u32::MAX - 1;
 
     let first = ReaPeaks::parse(
-        generate_pcm16_mode3_with_spectrogram(&pcm, &first_options).expect("generate first metadata"),
+        generate_pcm16_mode3_with_spectrogram(&pcm, &first_options)
+            .expect("generate first metadata"),
     )
     .expect("parse first metadata");
     let second = ReaPeaks::parse(

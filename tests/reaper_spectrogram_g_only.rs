@@ -92,14 +92,16 @@ fn reaper779_pcm16_default_fft_spectrogram_is_byte_identical() {
     }
     let generated_parsed = ReaPeaks::parse(generated.clone()).expect("parse default-FFT cache");
 
-    assert_eq!(oracle_parsed.header.channels, generated_parsed.header.channels);
+    assert_eq!(
+        oracle_parsed.header.channels,
+        generated_parsed.header.channels
+    );
     assert_eq!(
         oracle_parsed.header.sample_rate,
         generated_parsed.header.sample_rate
     );
     assert_eq!(
-        oracle_parsed.spectrogram_layers,
-        generated_parsed.spectrogram_layers,
+        oracle_parsed.spectrogram_layers, generated_parsed.spectrogram_layers,
         "decoded default-FFT spectrogram differs"
     );
 
