@@ -1,0 +1,229 @@
+name: reaper-spectrogram-phase-oracle
+
+on:
+  push:
+    branches:
+      - spectrogram-g-oracle
+    paths:
+      - .github/workflows/reaper-spectrogram-phase-oracle.yml
+      - tools/reaper_oracle/build_probe.lua
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-phase-oracle
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-phase-oracle/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Recover frame phase and scheduler thresholds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/spectrogram-phase-oracle/results/report.txt
+          from pathlib import Path
+          import math, os, shutil, struct, subprocess, tempfile, time, wave
+
+          root = Path('/tmp/spectrogram-phase-oracle')
+          media_root = root / 'media'
+          results = root / 'results'
+          reaper = Path(os.environ['REAPER_BIN'])
+          script = Path('tools/reaper_oracle/build_probe.lua').resolve()
+          sr = 48_000
+          TOKEN_G = -ord('g')
+          WORDS_PER_FRAME = 48
+          BYTES_PER_FRAME = 192
+          display = ':95'
+
+          def write_tone(path, frames):
+              payload = bytearray()
+              for frame in range(frames):
+                  value = int(round(0.5 * 32767.0 * math.sin(2.0 * math.pi * 6000.0 * frame / sr)))
+                  value = max(-32768, min(32767, value))
+                  payload += struct.pack('<h', value)
+              with wave.open(str(path), 'wb') as out:
+                  out.setnchannels(1)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+
+          def parse(path):
+              data = path.read_bytes()
+              channels = data[4]
+              layer_count = data[5]
+              headers = [struct.unpack_from('<iI', data, 18 + 8 * i) for i in range(layer_count)]
+              offset = 18 + 8 * layer_count
+              layers = []
+              for division, count in headers:
+                  size = count * channels * 4
+                  payload = data[offset:offset + size]
+                  if len(payload) != size:
+                      raise AssertionError((path, division, count, len(payload), size))
+                  layers.append((division, count, payload))
+                  offset += size
+              if offset != len(data):
+                  raise AssertionError((path, offset, len(data)))
+              return [layer for layer in layers if layer[0] == TOKEN_G]
+
+          def run_reaper(media, label):
+              peak_name = media.name + '.reapeaks'
+              for old in media_root.rglob(peak_name):
+                  old.unlink()
+              case_dir = Path(tempfile.mkdtemp(prefix=f'spectrogram-phase-{label}-'))
+              config = case_dir / 'reaper.ini'
+              config.write_text(
+                  '[REAPER]\n'
+                  'peakcachegenmode=3\n'
+                  'peakcachegenrs=300\n'
+                  'showpeaks=1345\n',
+                  encoding='utf-8',
+              )
+              status_path = case_dir / 'result.txt'
+              env = os.environ.copy()
+              env.update(DISPLAY=display, REAPEAKS_MEDIA=str(media.resolve()), REAPEAKS_RESULT=str(status_path))
+              with (results / f'{label}.reaper.log').open('wb') as log:
+                  completed = subprocess.run(
+                      [str(reaper), '-newinst', '-cfgfile', str(config), '-new', '-nosplash', str(script)],
+                      env=env,
+                      stdout=log,
+                      stderr=subprocess.STDOUT,
+                      timeout=90,
+                      check=False,
+                  )
+              status = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
+              if completed.returncode != 0 or 'OK loops=' not in status:
+                  raise RuntimeError(f'{label}: REAPER failed rc={completed.returncode}: {status!r}')
+              peaks = list(media_root.rglob(peak_name))
+              if len(peaks) != 1:
+                  raise RuntimeError(f'{label}: expected one peak file, found {peaks}')
+              copied = results / f'{label}.reaper.reapeaks'
+              shutil.copy2(peaks[0], copied)
+              return parse(copied)
+
+          xvfb_log = (results / 'xvfb.log').open('wb')
+          xvfb = subprocess.Popen(
+              ['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'],
+              stdout=xvfb_log,
+              stderr=subprocess.STDOUT,
+          )
+          time.sleep(0.4)
+
+          cache = {}
+          def counts_for(frames):
+              if frames in cache:
+                  return cache[frames]
+              media = media_root / f'length_{frames}.wav'
+              write_tone(media, frames)
+              layers = run_reaper(media, f'length_{frames}')
+              counts = tuple(count // WORDS_PER_FRAME for _, count, _ in layers)
+              cache[frames] = counts
+              return counts
+
+          def first_true(lo_false, hi_true, predicate):
+              if predicate(lo_false):
+                  raise AssertionError(('lo must be false', lo_false))
+              if not predicate(hi_true):
+                  raise AssertionError(('hi must be true', hi_true))
+              lo, hi = lo_false, hi_true
+              while lo + 1 < hi:
+                  mid = (lo + hi) // 2
+                  if predicate(mid):
+                      hi = mid
+                  else:
+                      lo = mid
+              return hi
+
+          try:
+              fine_two = first_true(2401, 3599, lambda n: counts_for(n)[0] >= 2)
+              coarse_one = first_true(24000, 47999, lambda n: counts_for(n)[1] >= 1)
+              print('SCHEDULER_THRESHOLDS')
+              for n in (fine_two - 1, fine_two, fine_two + 2399, fine_two + 2400):
+                  print(f'fine_probe samples={n} g_frames={counts_for(n)}')
+              for n in (coarse_one - 1, coarse_one, coarse_one + 47999, coarse_one + 48000):
+                  print(f'coarse_probe samples={n} g_frames={counts_for(n)}')
+              print(f'fine_first_two={fine_two} eof_credit={4800 - fine_two}')
+              print(f'coarse_first_one={coarse_one} eof_credit={48000 - coarse_one}')
+
+              phases = list(range(64, 2337, 16))
+              sweep_frames = len(phases) * 2400
+              payload = bytearray(sweep_frames * 2)
+              for block, phase in enumerate(phases):
+                  position = block * 2400 + phase
+                  struct.pack_into('<h', payload, position * 2, 32767)
+              media = media_root / 'phase_sweep.wav'
+              with wave.open(str(media), 'wb') as out:
+                  out.setnchannels(1)
+                  out.setsampwidth(2)
+                  out.setframerate(sr)
+                  out.writeframes(payload)
+              layers = run_reaper(media, 'phase_sweep')
+              _, fine_words, fine_payload = layers[0]
+              frame_count = fine_words // WORDS_PER_FRAME
+              if frame_count != len(phases):
+                  raise AssertionError(('phase frame count', frame_count, len(phases)))
+
+              codes = []
+              print('IMPULSE_PHASE_SWEEP')
+              for frame, phase in enumerate(phases):
+                  start = frame * BYTES_PER_FRAME
+                  raw = fine_payload[start:start + BYTES_PER_FRAME]
+                  bins = []
+                  for offset in range(0, BYTES_PER_FRAME, 3):
+                      first, packed, second = raw[offset:offset + 3]
+                      bins.append((first << 4) | (packed >> 4))
+                      bins.append((second << 4) | (packed & 0x0f))
+                  if min(bins) != max(bins):
+                      raise AssertionError(('impulse bins not flat', frame, phase, min(bins), max(bins)))
+                  code = bins[0]
+                  codes.append(code)
+                  print(f'phase={phase} code={code}')
+
+              candidates = []
+              code_by_phase = dict(zip(phases, codes))
+              for period in range(16, 641, 16):
+                  diffs = [
+                      abs(code_by_phase[p] - code_by_phase[p + period])
+                      for p in phases
+                      if p + period in code_by_phase
+                  ]
+                  if diffs:
+                      candidates.append((sum(diffs) / len(diffs), max(diffs), period, len(diffs)))
+              candidates.sort()
+              print('PHASE_PERIOD_CANDIDATES')
+              for mae, maxdiff, period, pairs in candidates[:12]:
+                  print(f'period={period} mae={mae:.6f} maxdiff={maxdiff} pairs={pairs}')
+          finally:
+              xvfb.terminate()
+              try:
+                  xvfb.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  xvfb.kill()
+              xvfb_log.close()
+          PY
+          cat /tmp/spectrogram-phase-oracle/results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload phase evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-phase-oracle-${{ github.sha }}
+          path: /tmp/spectrogram-phase-oracle/results
+          if-no-files-found: error
+          retention-days: 7
