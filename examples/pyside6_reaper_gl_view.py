@@ -1,7 +1,8 @@
 """REAPER-style interaction wrapper for the direct GLSL analysis canvas.
 
-The wrapper is the public demo surface. It also normalizes one identifier that
-Mesa reserves in GLSL before the first OpenGL context compiles the shader.
+The wrapper is the public demo surface. It normalizes two binding/runtime
+quirks before the renderer is used: one Mesa-reserved GLSL identifier and the
+PySide6 6.11 requirement that scalar uniform names be passed as bytes.
 """
 from __future__ import annotations
 
@@ -19,6 +20,21 @@ _gl.FRAGMENT_SHADER = _gl.FRAGMENT_SHADER.replace(
 GpuAnalysisCanvas = _gl.GpuAnalysisCanvas
 
 
+class _UniformNameProxy:
+    """Delegate QOpenGLShaderProgram while encoding string uniform names."""
+
+    def __init__(self, program):
+        self._program = program
+
+    def setUniformValue(self, name, *values):  # noqa: N802 - Qt API
+        if isinstance(name, str):
+            name = name.encode("ascii")
+        return self._program.setUniformValue(name, *values)
+
+    def __getattr__(self, name):
+        return getattr(self._program, name)
+
+
 def wheel_steps(event) -> float:
     delta = event.angleDelta().y()
     if delta:
@@ -33,6 +49,11 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
     """Packed GLSL canvas with REAPER-like horizontal/vertical wheel zoom."""
 
     verticalScaleChanged = Signal(float)
+
+    def initializeGL(self):  # noqa: N802 - Qt API
+        super().initializeGL()
+        if self._program is not None:
+            self._program = _UniformNameProxy(self._program)
 
     def set_vertical_full_scale(self, value: float):
         self.vertical_full_scale = max(0.1, min(32.0, float(value)))
