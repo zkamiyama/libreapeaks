@@ -34,6 +34,7 @@ pub mod spectral;
 mod spectral_base;
 
 pub mod spectrogram;
+mod spectrogram_generate;
 pub mod texture;
 pub mod wave;
 
