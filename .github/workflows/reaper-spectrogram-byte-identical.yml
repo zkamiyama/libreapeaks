@@ -35,7 +35,7 @@ concurrency:
 jobs:
   oracle:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,26 +66,38 @@ jobs:
           import json, math, struct, wave
 
           root = Path('/tmp/spectrogram-exact/media')
-          sr = 48_000
           cases = [
-              dict(name='silence', frames=48_000, ch=1, kind='silence'),
-              dict(name='tone_exact_6000', frames=48_000, ch=1, kind='tone', hz=6000.0, amp=0.5),
-              dict(name='tone_offbin_997', frames=48_000, ch=1, kind='tone', hz=997.0, amp=0.5),
-              dict(name='two_tone', frames=48_000, ch=1, kind='two_tone'),
-              dict(name='impulse_edges', frames=48_000, ch=1, kind='impulse'),
-              dict(name='noise', frames=48_000, ch=1, kind='noise'),
-              dict(name='split_stereo', frames=48_000, ch=2, kind='split'),
-              dict(name='short_2607', frames=2_607, ch=1, kind='tone', hz=6000.0, amp=0.5),
-              dict(name='short_2608', frames=2_608, ch=1, kind='tone', hz=6000.0, amp=0.5),
-              dict(name='partial_5007', frames=5_007, ch=1, kind='noise'),
-              dict(name='partial_5008', frames=5_008, ch=1, kind='noise'),
+              dict(name='silence', sr=48_000, frames=48_000, ch=1, kind='silence'),
+              dict(name='tone_exact_6000', sr=48_000, frames=48_000, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='tone_offbin_997', sr=48_000, frames=48_000, ch=1, kind='tone', hz=997.0, amp=0.5),
+              dict(name='two_tone', sr=48_000, frames=48_000, ch=1, kind='two_tone'),
+              dict(name='impulse_edges', sr=48_000, frames=48_000, ch=1, kind='impulse'),
+              dict(name='noise', sr=48_000, frames=48_000, ch=1, kind='noise'),
+              dict(name='split_stereo', sr=48_000, frames=48_000, ch=2, kind='split'),
+              dict(name='short_2607', sr=48_000, frames=2_607, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='short_2608', sr=48_000, frames=2_608, ch=1, kind='tone', hz=6000.0, amp=0.5),
+              dict(name='partial_5007', sr=48_000, frames=5_007, ch=1, kind='noise'),
+              dict(name='partial_5008', sr=48_000, frames=5_008, ch=1, kind='noise'),
+              dict(name='rate44100_exact5512_5', sr=44_100, frames=44_100, ch=1, kind='tone', hz=5512.5, amp=0.5),
+              dict(name='rate44100_long3', sr=44_100, frames=132_417, ch=3, kind='multitone'),
+              dict(name='rate32000_exact4000', sr=32_000, frames=32_000, ch=1, kind='tone', hz=4000.0, amp=0.5),
+              dict(name='rate32000_long4', sr=32_000, frames=96_257, ch=4, kind='multitone'),
+              dict(name='rate96000_exact12000', sr=96_000, frames=96_000, ch=1, kind='tone', hz=12000.0, amp=0.5),
+              dict(name='rate96000_long4', sr=96_000, frames=288_319, ch=4, kind='multitone'),
           ]
           (root / 'cases.json').write_text(json.dumps(cases, indent=2), encoding='utf-8')
+
+          rates = {case['sr'] for case in cases}
+          channels = {case['ch'] for case in cases}
+          assert {32_000, 44_100, 48_000, 96_000}.issubset(rates)
+          assert {1, 2, 3, 4}.issubset(channels)
+          assert any(case['frames'] > 3 * case['sr'] for case in cases)
 
           def q16(v):
               return max(-32768, min(32767, int(round(v))))
 
           for case_index, case in enumerate(cases):
+              sr = case['sr']
               seed = (0x13579BDF ^ (case_index * 0x9E3779B9)) & 0xffffffff
               payload = bytearray()
               impulse_points = {
@@ -115,6 +127,13 @@ jobs:
                           hz = 1000.0 if channel == 0 else 6000.0
                           amp = 0.5 if channel == 0 else 0.25
                           phase = 2.0 * math.pi * hz * frame / sr + channel * 0.23
+                          value = q16(amp * 32767.0 * math.sin(phase))
+                      elif kind == 'multitone':
+                          frequencies = (997.0, 3000.0, 6000.0, 11000.0)
+                          amplitudes = (0.43, 0.31, 0.22, 0.16)
+                          hz = frequencies[channel]
+                          amp = amplitudes[channel]
+                          phase = 2.0 * math.pi * hz * frame / sr + channel * 0.31
                           value = q16(amp * 32767.0 * math.sin(phase))
                       else:
                           raise AssertionError(kind)
