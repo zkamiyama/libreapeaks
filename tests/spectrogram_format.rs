@@ -1,5 +1,5 @@
 use reapeaks::{
-    decode_spectrogram_frame, parse_spectrogram_layers, ReaPeaksError, SPECTROGRAM_BINS,
+    decode_spectrogram_frame, parse_spectrogram_layers, ReaPeaks, ReaPeaksError, SPECTROGRAM_BINS,
     SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
 };
 
@@ -102,9 +102,24 @@ fn parses_g_header_count_as_32bit_words_not_time_frames() {
 }
 
 #[test]
+fn main_reapeaks_parser_exposes_spectrogram_layers() {
+    let raw = synthetic_file((SPECTROGRAM_WORDS_PER_CHANNEL_FRAME * 2) as u32, 0);
+    let parsed = ReaPeaks::parse(raw).unwrap();
+    assert_eq!(parsed.spectrogram_layers.len(), 2);
+    assert_eq!(parsed.spectrogram_layers[0].mirrored_division, 2400);
+    assert_eq!(parsed.spectrogram_layers[0].frame_count(2), 2);
+    assert_eq!(parsed.spectrogram_layers[1].mirrored_division, 48_000);
+    assert_eq!(parsed.spectrogram_layers[1].frame_count(2), 1);
+    assert_eq!(parsed.spectrogram_layers[0].frames[2].bins[127], 1127);
+    assert_eq!(parsed.spectrogram_layers[1].frames[1].bins[127], 3227);
+}
+
+#[test]
 fn rejects_spectrogram_word_count_not_divisible_by_48() {
     let raw = synthetic_file(49, 0);
     let err = parse_spectrogram_layers(&raw).unwrap_err();
+    assert!(matches!(err, ReaPeaksError::InvalidHeader(_)));
+    let err = ReaPeaks::parse(raw).unwrap_err();
     assert!(matches!(err, ReaPeaksError::InvalidHeader(_)));
 }
 
@@ -112,5 +127,8 @@ fn rejects_spectrogram_word_count_not_divisible_by_48() {
 fn rejects_truncated_spectrogram_payload() {
     let raw = synthetic_file((SPECTROGRAM_WORDS_PER_CHANNEL_FRAME * 2) as u32, 1);
     let err = parse_spectrogram_layers(&raw).unwrap_err();
+    assert!(matches!(err, ReaPeaksError::Truncated));
+    let raw = synthetic_file((SPECTROGRAM_WORDS_PER_CHANNEL_FRAME * 2) as u32, 1);
+    let err = ReaPeaks::parse(raw).unwrap_err();
     assert!(matches!(err, ReaPeaksError::Truncated));
 }
