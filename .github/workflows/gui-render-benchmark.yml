@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           xvfb-run -a -s '-screen 0 1600x900x24' \
-            python examples/benchmark_gl_renderer.py | tee /tmp/glsl-render-bench.txt
+            python examples/benchmark_gl_renderer.py 2>&1 | tee /tmp/glsl-render-bench.txt
           grep -Fq 'GLSL_RENDER_BENCH ' /tmp/glsl-render-bench.txt
       - name: Upload benchmark telemetry
         if: always()
