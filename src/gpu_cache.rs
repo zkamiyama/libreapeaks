@@ -1,6 +1,8 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{Version, TOKEN_LOUDNESS, TOKEN_SPECTRAL, TOKEN_SPECTROGRAM};
-use crate::spectrogram::{SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME};
+use crate::spectrogram::{
+    SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+};
 use std::fs;
 use std::path::Path;
 
@@ -78,9 +80,7 @@ impl GpuCacheView {
             Some(b"RPKN") => Version::Rpkn,
             Some(b"RPKL") => Version::Rpkl,
             Some(b"RPKM") => {
-                return Err(ReaPeaksError::Unsupported(
-                    "RPKM direct GPU payload view",
-                ))
+                return Err(ReaPeaksError::Unsupported("RPKM direct GPU payload view"))
             }
             Some(bytes) => {
                 let magic: [u8; 4] = bytes.try_into().map_err(|_| ReaPeaksError::Truncated)?;
@@ -129,55 +129,50 @@ impl GpuCacheView {
 
         for (division, count) in headers {
             let count = count as usize;
-            let (kind, mirrored_division, record_count, bytes_per_channel_record) =
-                if division > 0 {
-                    (GpuLayerKind::Waveform, division as u32, count, 4usize)
-                } else if division == TOKEN_SPECTRAL {
-                    let mirrored = positive_divisions.get(spectral_index).copied().ok_or(
-                        ReaPeaksError::InvalidHeader(
-                            "spectral layer without matching waveform layer",
-                        ),
-                    )?;
-                    spectral_index += 1;
-                    (GpuLayerKind::Spectral, mirrored, count, 4usize)
-                } else if division == TOKEN_SPECTROGRAM {
-                    if count % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME != 0 {
-                        return Err(ReaPeaksError::InvalidHeader(
-                            "spectrogram word count must be divisible by 48",
-                        ));
-                    }
-                    let mirrored = positive_divisions
-                        .get(spectrogram_index + 1)
-                        .copied()
-                        .ok_or(ReaPeaksError::InvalidHeader(
-                            "spectrogram layer without matching waveform layer",
-                        ))?;
-                    spectrogram_index += 1;
-                    (
-                        GpuLayerKind::Spectrogram,
-                        mirrored,
-                        count / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
-                        SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
-                    )
-                } else if division == TOKEN_LOUDNESS {
-                    if count % 2 != 0 {
-                        return Err(ReaPeaksError::InvalidHeader(
-                            "loudness value count must be even",
-                        ));
-                    }
-                    let mirrored = positive_divisions
-                        .get(loudness_index + 1)
-                        .copied()
-                        .ok_or(ReaPeaksError::InvalidHeader(
-                            "loudness layer without matching waveform layer",
-                        ))?;
-                    loudness_index += 1;
-                    (GpuLayerKind::Loudness, mirrored, count / 2, 8usize)
-                } else {
-                    return Err(ReaPeaksError::Unsupported(
-                        "unknown layer in direct GPU payload view",
+            let (kind, mirrored_division, record_count, bytes_per_channel_record) = if division > 0
+            {
+                (GpuLayerKind::Waveform, division as u32, count, 4usize)
+            } else if division == TOKEN_SPECTRAL {
+                let mirrored = positive_divisions.get(spectral_index).copied().ok_or(
+                    ReaPeaksError::InvalidHeader("spectral layer without matching waveform layer"),
+                )?;
+                spectral_index += 1;
+                (GpuLayerKind::Spectral, mirrored, count, 4usize)
+            } else if division == TOKEN_SPECTROGRAM {
+                if count % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME != 0 {
+                    return Err(ReaPeaksError::InvalidHeader(
+                        "spectrogram word count must be divisible by 48",
                     ));
-                };
+                }
+                let mirrored = positive_divisions
+                    .get(spectrogram_index + 1)
+                    .copied()
+                    .ok_or(ReaPeaksError::InvalidHeader(
+                        "spectrogram layer without matching waveform layer",
+                    ))?;
+                spectrogram_index += 1;
+                (
+                    GpuLayerKind::Spectrogram,
+                    mirrored,
+                    count / SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
+                    SPECTROGRAM_BYTES_PER_CHANNEL_FRAME,
+                )
+            } else if division == TOKEN_LOUDNESS {
+                if count % 2 != 0 {
+                    return Err(ReaPeaksError::InvalidHeader(
+                        "loudness value count must be even",
+                    ));
+                }
+                let mirrored = positive_divisions.get(loudness_index + 1).copied().ok_or(
+                    ReaPeaksError::InvalidHeader("loudness layer without matching waveform layer"),
+                )?;
+                loudness_index += 1;
+                (GpuLayerKind::Loudness, mirrored, count / 2, 8usize)
+            } else {
+                return Err(ReaPeaksError::Unsupported(
+                    "unknown layer in direct GPU payload view",
+                ));
+            };
 
             let payload_len = record_count
                 .checked_mul(channels_usize)
@@ -248,7 +243,9 @@ impl GpuCacheView {
         let layer = self
             .layers(kind)
             .get(layer_index)
-            .ok_or(ReaPeaksError::InvalidArgument("GPU layer index out of range"))?;
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "GPU layer index out of range",
+            ))?;
         if first_record >= layer.record_count {
             return Err(ReaPeaksError::InvalidArgument("GPU tile out of range"));
         }
