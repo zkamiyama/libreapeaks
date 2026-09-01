@@ -1,0 +1,247 @@
+name: reaper-individual-layer-oracle
+
+on:
+  push:
+    branches:
+      - individual-analysis-layers
+    paths:
+      - '.github/workflows/reaper-individual-layer-oracle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/individual-layer-oracle
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/individual-layer-oracle/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate deterministic source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import math, struct, wave
+          from pathlib import Path
+          root=Path('/tmp/individual-layer-oracle/media')
+          root.mkdir(parents=True, exist_ok=True)
+          sr=48000
+          frames=sr*2+137
+          values=[]
+          for i in range(frames):
+              left=round(0.73*32767*math.sin(2*math.pi*997*i/sr))
+              right=round(0.51*32767*math.sin(2*math.pi*6000*i/sr + 0.17))
+              if i in (0, 159, 160, 2399, 2400, frames-1):
+                  left = 32767 if i % 2 == 0 else -32768
+              values.extend((left, right))
+          with wave.open(str(root/'source.wav'),'wb') as w:
+              w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
+              w.writeframes(struct.pack('<'+'h'*len(values),*values))
+          PY
+      - name: Discover REAPER peak display actions and showpeaks values
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/individual-layer-oracle
+          cat >"$root/discover.lua" <<'LUA'
+          local out_path=os.getenv('REAPEAKS_RESULT')
+          local f=assert(io.open(out_path,'w'))
+          local section=reaper.SectionFromUniqueID(0)
+          f:write('APP\t',reaper.GetAppVersion(),'\n')
+          local ok0,base0=reaper.get_config_var_string('showpeaks')
+          f:write('BASE\t',tostring(ok0),'\t',tostring(base0),'\n')
+          for idx=0,30000 do
+            local cmd,name=reaper.kbd_enumerateActions(section,idx)
+            if not cmd or cmd==0 then break end
+            local lower=string.lower(name or '')
+            if string.find(lower,'peaks:',1,true) and
+               (string.find(lower,'spectral',1,true) or
+                string.find(lower,'spectrogram',1,true) or
+                string.find(lower,'lufs',1,true) or
+                string.find(lower,'loudness',1,true) or
+                string.find(lower,'normal',1,true)) then
+              reaper.set_config_var_string('showpeaks','1',0)
+              reaper.Main_OnCommand(cmd,0)
+              local ok,value=reaper.get_config_var_string('showpeaks')
+              f:write('ACTION\t',cmd,'\t',string.gsub(name or '','[\t\r\n]',' '),'\t',tostring(ok),'\t',tostring(value),'\n')
+            end
+          end
+          f:close()
+          reaper.Main_OnCommand(40004,0)
+          LUA
+          mkdir -p "$root/discover-cfg"
+          cat >"$root/discover-cfg/reaper.ini" <<'EOF'
+          [REAPER]
+          peakcachegenmode=3
+          peakcachegenrs=300
+          showpeaks=1
+          altpeaks=2
+          EOF
+          Xvfb :95 -screen 0 1280x720x24 -nolisten tcp >"$root/results/xvfb-discover.log" 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          DISPLAY=:95 REAPEAKS_RESULT="$root/results/action-map.tsv" \
+            timeout 60s "$REAPER_BIN" -newinst -cfgfile "$root/discover-cfg/reaper.ini" -new -nosplash "$root/discover.lua" \
+            >"$root/results/discover.log" 2>&1
+          kill "$xvfb_pid" 2>/dev/null || true
+          trap - EXIT
+          cat "$root/results/action-map.tsv"
+      - name: Build fresh-process layer matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/individual-layer-oracle
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/individual-layer-oracle')
+          values=set()
+          # Exhaust all 4 display-mode bits documented for showpeaks, with the
+          # historical always-spectral bit both off/on and display-global bit off/on.
+          display_bits=(32,256,512,1024)
+          for nibble in range(16):
+              mask=sum(bit for index,bit in enumerate(display_bits) if nibble & (1<<index))
+              for base in (0,1,64,65):
+                  values.add(base|mask)
+          # Preserve values observed after native REAPER peak-display actions too;
+          # this catches newer display modes if they use additional bits.
+          amap=root/'results/action-map.tsv'
+          if amap.exists():
+              for line in amap.read_text(errors='replace').splitlines():
+                  parts=line.split('\t')
+                  if len(parts)>=5 and parts[0]=='ACTION':
+                      try: values.add(int(parts[4],0))
+                      except ValueError: pass
+          values.update((1,64,65,1345))
+          (root/'results/showpeaks-values.txt').write_text('\n'.join(map(str,sorted(values)))+'\n')
+          print('SHOWPEAKS_CASES',len(values))
+          PY
+          cat >"$root/build.lua" <<'LUA'
+          local media=os.getenv('REAPEAKS_MEDIA')
+          local result=os.getenv('REAPEAKS_RESULT')
+          local src=reaper.PCM_Source_CreateFromFile(media)
+          local f=assert(io.open(result,'w'))
+          if not src then f:write('ERR create\n'); f:close(); reaper.Main_OnCommand(40004,0); return end
+          local r=reaper.PCM_Source_BuildPeaks(src,0)
+          local loops=0
+          while r~=0 and loops<100000 do
+            r=reaper.PCM_Source_BuildPeaks(src,1)
+            loops=loops+1
+          end
+          if r==0 then
+            reaper.PCM_Source_BuildPeaks(src,2)
+            local ok,sp=reaper.get_config_var_string('showpeaks')
+            f:write('OK loops=',loops,' showpeaks=',tostring(sp),'\n')
+          else
+            f:write('ERR build ',tostring(r),' loops=',loops,'\n')
+          end
+          f:close()
+          reaper.PCM_Source_Destroy(src)
+          reaper.Main_OnCommand(40004,0)
+          LUA
+          Xvfb :96 -screen 0 1280x720x24 -nolisten tcp >"$root/results/xvfb-build.log" 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          export DISPLAY=:96
+          total=$(wc -l <"$root/results/showpeaks-values.txt")
+          index=0
+          while read -r value; do
+            index=$((index+1))
+            rm -f "$root/media/source.wav.reapeaks"
+            cfg="$root/cfg-$value"
+            mkdir -p "$cfg"
+            cat >"$cfg/reaper.ini" <<EOF
+          [REAPER]
+          peakcachegenmode=3
+          peakcachegenrs=300
+          showpeaks=$value
+          altpeaks=2
+          EOF
+            REAPEAKS_MEDIA="$root/media/source.wav" \
+            REAPEAKS_RESULT="$root/results/status-$value.txt" \
+              timeout 60s "$REAPER_BIN" -newinst -cfgfile "$cfg/reaper.ini" -new -nosplash "$root/build.lua" \
+              >"$root/results/reaper-$value.log" 2>&1
+            test -f "$root/media/source.wav.reapeaks"
+            cp "$root/media/source.wav.reapeaks" "$root/results/showpeaks-$value.reapeaks"
+            if (( index % 10 == 0 || index == total )); then
+              echo "LAYER_PROBE_PROGRESS=$index/$total"
+            fi
+          done <"$root/results/showpeaks-values.txt"
+          kill "$xvfb_pid" 2>/dev/null || true
+          trap - EXIT
+      - name: Classify generated layer combinations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, struct
+          root=Path('/tmp/individual-layer-oracle/results')
+          rows=[]
+          groups={}
+          token_name={-115:'s',-103:'g',-114:'r',-108:'l'}
+          for value in map(int,(root/'showpeaks-values.txt').read_text().split()):
+              p=root/f'showpeaks-{value}.reapeaks'
+              data=p.read_bytes()
+              assert data[:4] in (b'RPKN',b'RPKL'), (value,data[:4])
+              count=data[5]
+              headers=[struct.unpack_from('<iI',data,18+8*i) for i in range(count)]
+              kinds=['w' if div>0 else token_name.get(div,str(div)) for div,_ in headers]
+              signature=''.join(kinds)
+              specials=sorted(set(k for k in kinds if k!='w'))
+              row={
+                  'showpeaks':value,
+                  'headers':headers,
+                  'kinds':kinds,
+                  'specials':specials,
+                  'signature':signature,
+                  'size':len(data),
+              }
+              rows.append(row)
+              groups.setdefault(tuple(specials),[]).append(value)
+          action_lines=[]
+          for line in (root/'action-map.tsv').read_text(errors='replace').splitlines():
+              parts=line.split('\t')
+              if len(parts)>=5 and parts[0]=='ACTION':
+                  action_lines.append({'command':int(parts[1]),'name':parts[2],'showpeaks':parts[4]})
+          report={
+              'oracle':'REAPER 7.79 x86_64 Linux',
+              'actions':action_lines,
+              'groups':{'+'.join(key) if key else 'wave-only':vals for key,vals in sorted(groups.items())},
+              'rows':rows,
+          }
+          (root/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+          print('REAPER_LAYER_GROUPS')
+          for key,vals in sorted(groups.items()):
+              label='+'.join(key) if key else 'wave-only'
+              print(f'{label}: {vals[:20]}'+(' ...' if len(vals)>20 else ''))
+          wanted={(),('s',),('g',),('r',)}
+          found=set(groups)
+          print('INDIVIDUAL_LAYER_SIGNATURES_FOUND',sorted(found & wanted))
+          missing=wanted-found
+          if missing:
+              print('INDIVIDUAL_LAYER_SIGNATURES_MISSING',sorted(missing))
+          PY
+      - name: Upload oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-individual-layer-oracle-${{ github.sha }}
+          path: /tmp/individual-layer-oracle/results
+          if-no-files-found: error
+          retention-days: 14
