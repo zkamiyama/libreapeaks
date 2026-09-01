@@ -16,8 +16,8 @@ fn options(sample_rate: u32, channels: usize, peak_rate: u32) -> GenerateOptions
 }
 
 fn lane_sample(frame: usize, channel: usize) -> i16 {
-    let a = ((frame as u64 * (97 + channel as u64 * 18_376) + channel as u64 * 1_000_003)
-        % 56_001) as i32
+    let a = ((frame as u64 * (97 + channel as u64 * 18_376) + channel as u64 * 1_000_003) % 56_001)
+        as i32
         - 28_000;
     let b = (((frame / (channel + 1).max(1)) % 257) as i32 - 128) * (channel as i32 + 1);
     (a + b).clamp(-30_000, 30_000) as i16
