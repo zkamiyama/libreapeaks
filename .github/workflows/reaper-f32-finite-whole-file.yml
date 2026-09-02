@@ -1,0 +1,78 @@
+name: reaper-f32-finite-whole-file
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-f32-finite-whole-file.yml'
+      - 'src/wave.rs'
+      - 'src/generate.rs'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/spectrogram_generate_f32.rs'
+      - 'src/loudness.rs'
+      - 'tests/reaper_spectrogram_f32_exact.rs'
+      - 'tools/reaper_oracle/spectrogram_f32_stress_cases.py'
+      - 'tools/reaper_oracle/spectrogram_f32_whole_stress_run.py'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-f32-finite-whole-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Formatting gate
+        run: cargo fmt --all -- --check
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/f32-finite-whole
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/f32-finite-whole/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate 128-case finite float32 corpus
+        run: python3 tools/reaper_oracle/spectrogram_f32_stress_cases.py /tmp/f32-finite-whole/media
+      - name: Run fresh-process complete RPKL oracle
+        run: python3 tools/reaper_oracle/spectrogram_f32_whole_stress_run.py /tmp/f32-finite-whole "$REAPER_BIN"
+      - name: Publish oracle summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/f32-finite-whole/results/summary.txt ]; then
+            tail -200 /tmp/f32-finite-whole/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload whole-file evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-f32-finite-whole-${{ github.sha }}
+          path: |
+            /tmp/f32-finite-whole/results
+            /tmp/f32-finite-whole/media/cases.json
+          if-no-files-found: warn
+          retention-days: 14
