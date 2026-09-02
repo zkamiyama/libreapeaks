@@ -107,12 +107,18 @@ fn reaper779_f32_rpkl_g_payload_is_byte_identical() {
     for (level, ((expected_count, expected), (actual_count, actual))) in
         oracle_g.iter().zip(&generated_g).enumerate()
     {
-        assert_eq!(expected_count, actual_count, "g word count differs at level {level}");
+        assert_eq!(
+            expected_count, actual_count,
+            "g word count differs at level {level}"
+        );
         assert_eq!(
             *expected_count as usize % SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
             0
         );
-        assert_eq!(expected, actual, "packed f32 g payload differs at level {level}");
+        assert_eq!(
+            expected, actual,
+            "packed f32 g payload differs at level {level}"
+        );
     }
 
     println!(
