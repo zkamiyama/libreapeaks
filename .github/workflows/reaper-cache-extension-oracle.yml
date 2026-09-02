@@ -6,6 +6,8 @@ on:
       - '.github/workflows/reaper-cache-extension-oracle.yml'
       - 'tools/reaper_oracle/cache_extension_oracle.py'
       - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
+      - 'tools/reaper_oracle/cache_read_matrix.py'
+      - 'tools/reaper_oracle/cache_read_probe.lua'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   pull_request:
@@ -13,6 +15,8 @@ on:
       - '.github/workflows/reaper-cache-extension-oracle.yml'
       - 'tools/reaper_oracle/cache_extension_oracle.py'
       - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
+      - 'tools/reaper_oracle/cache_read_matrix.py'
+      - 'tools/reaper_oracle/cache_read_probe.lua'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   workflow_dispatch:
@@ -47,7 +51,7 @@ jobs:
           test -n "$REAPER_BIN"
           echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
       - name: Validate oracle syntax
-        run: python3 -m py_compile tools/reaper_oracle/cache_extension_oracle.py tools/reaper_oracle/cache_extension_oracle_fixed.py
+        run: python3 -m py_compile tools/reaper_oracle/cache_extension_oracle.py tools/reaper_oracle/cache_extension_oracle_fixed.py tools/reaper_oracle/cache_read_matrix.py
       - name: Start Xvfb
         shell: bash
         run: |
@@ -57,11 +61,16 @@ jobs:
         env:
           DISPLAY: ':96'
         run: python3 tools/reaper_oracle/cache_extension_oracle_fixed.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 30
+      - name: Force waveform and spectral reads through accepted caches
+        env:
+          DISPLAY: ':96'
+        run: python3 tools/reaper_oracle/cache_read_matrix.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 20
       - name: Publish evidence summary
         if: always()
         shell: bash
         run: |
           report=/tmp/reaper-cache-extension/oracle/results/cache-extension-oracle.json
+          reads=/tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json
           if [ -f "$report" ]; then
             echo '## REAPER cache extension oracle' >> "$GITHUB_STEP_SUMMARY"
             python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -74,6 +83,19 @@ jobs:
           print('|---|---|---:|---:|')
           for c in d['cases']:
               print(f"| {c['name']} | {c['classification']} | {c['begin']} | {c['input_size']}→{c['output_size']} |")
+          PY
+          fi
+          if [ -f "$reads" ]; then
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Forced peak reads' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json'
+          d=json.load(open(p))
+          print('| case | read ok | same as control | cache unchanged |')
+          print('|---|---:|---:|---:|')
+          for c in d['cases']:
+              print(f"| {c['name']} | {c['read_ok']} | {c['read_signature_equals_control']} | {c['cache_unchanged']} |")
           PY
           fi
       - name: Stop Xvfb
