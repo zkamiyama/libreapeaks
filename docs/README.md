@@ -32,11 +32,14 @@ It records the oracle methodology and recovered behavior for:
 - FFmpeg decoder-path provenance;
 - REAPER central-cache path policy.
 
-The `-'g'` implementation is independently stress-tested in both portable and
-`strict-wdl` builds. The pinned REAPER 7.79 stress gate currently covers 122
-PCM16 cases; strict-WDL output is complete-file byte-identical for all 122, and
-the portable/default FFT path is checked for exact `-'g'` output on the same
-matrix.
+The `-'g'` implementation has two pinned live-oracle stress gates. The PCM16
+gate covers 122 cases: strict-WDL output is complete-file byte-identical for all
+122, and the portable/default FFT path is checked for exact `-'g'` output on the
+same matrix. The IEEE float32/RPKL gate covers 128 adversarial cases and matches
+REAPER 7.79 exactly for every decoded 128-bin `-'g'` frame and every packed
+`-'g'` payload byte. The float32 claim is deliberately `-'g'`-specific rather
+than a claim about arbitrary NaN/Inf behavior or every RPKL waveform rounding
+edge.
 
 A separate fresh-process oracle sweeps 71 REAPER `showpeaks` configurations and
 locks the three native cache shapes: waveform-only, waveform + `-'s'` + `-'r'`,
@@ -77,10 +80,10 @@ Read [`C_ABI.md`](C_ABI.md), then use
 [`../include/reapeaks.h`](../include/reapeaks.h) as the source of truth for the
 actual exported ABI.
 
-Rust, Python, and C now expose the same REAPER-oriented mode vocabulary:
-waveform, spectral (`wave + s + r`), and PCM16 spectrogram (`wave + s + g + r`).
-Float32 spectrogram generation remains unsupported until an exact float32
-`-'g'` implementation exists.
+Rust, Python, and C expose the same REAPER-oriented mode vocabulary: waveform,
+spectral (`wave + s + r`), and spectrogram (`wave + s + g + r`) for PCM16 and
+float32. With float32 `large_range=true`, the container is RPKL; its `-'g'`
+payload is covered by the permanent 128-case byte-exact REAPER 7.79 oracle.
 
 ## Source-of-truth order
 
