@@ -18,22 +18,30 @@ local function returned_path(a, b)
 end
 
 local f = assert(io.open(result, "wb"))
+local function record(line)
+  f:write(line, "\n")
+  f:flush()
+end
+
+record("SCRIPT=1")
 local src = reaper.PCM_Source_CreateFromFile(media)
 if not src then
-  f:write("ERR create\n")
+  record("ERR create")
   f:close()
   reaper.Main_OnCommand(40004, 0)
   return
 end
+record("SOURCE=1")
 
 local r1, r2 = reaper.GetPeakFileNameEx(src, "", false)
 local w1, w2 = reaper.GetPeakFileNameEx(src, "", true)
-f:write("PEAK_READ=" .. returned_path(r1, r2) .. "\n")
-f:write("PEAK_WRITE=" .. returned_path(w1, w2) .. "\n")
+record("PEAK_READ=" .. returned_path(r1, r2))
+record("PEAK_WRITE=" .. returned_path(w1, w2))
+record("BEFORE_BEGIN=1")
 
 local begin_result = reaper.PCM_Source_BuildPeaks(src, 0)
-f:write("BEGIN=" .. tostring(begin_result) .. "\n")
-f:write(begin_result == 0 and "REUSE=1\n" or "REUSE=0\n")
+record("BEGIN=" .. tostring(begin_result))
+record(begin_result == 0 and "REUSE=1" or "REUSE=0")
 
 if begin_result ~= 0 then
   local remaining = begin_result
@@ -44,12 +52,13 @@ if begin_result ~= 0 then
   end
   if remaining == 0 then
     reaper.PCM_Source_BuildPeaks(src, 2)
-    f:write("REBUILD_FINISHED=1\n")
+    record("REBUILD_FINISHED=1")
   else
-    f:write("ERR rebuild did not finish loops=" .. tostring(loops) .. "\n")
+    record("ERR rebuild did not finish loops=" .. tostring(loops))
   end
 end
 
-f:close()
 reaper.PCM_Source_Destroy(src)
+record("DESTROYED=1")
+f:close()
 reaper.Main_OnCommand(40004, 0)
