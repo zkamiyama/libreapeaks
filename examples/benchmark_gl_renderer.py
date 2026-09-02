@@ -108,6 +108,38 @@ def main() -> int:
             widget.grabFramebuffer()
             app.processEvents()
 
+        # Exercise the REAPER-like packed analysis branches and their uniforms,
+        # not merely shader compilation. Spectral peaks color the waveform;
+        # loudness supports both graph+peaks and color-peaks presentations.
+        widget.set_view(1000, 97_000)
+        widget.set_peak_display_zoom_db(3.0)
+        widget.set_analysis_opacity(0.85)
+        widget.set_display_mode("spectral")
+        widget.set_spectral_range_mode(0)
+        widget.set_spectral_reverse(False)
+        widget.set_spectral_fade_noise(True)
+        widget.grabFramebuffer()
+        widget.set_spectral_range_mode(1)
+        widget.set_spectral_reverse(True)
+        widget.grabFramebuffer()
+
+        widget.set_display_mode("loudness")
+        widget.set_loudness_metric(0)
+        widget.set_loudness_view(1)
+        widget.set_loudness_floor_lu(-48.0)
+        widget.set_loudness_ceiling_lu(0.0)
+        widget.set_loudness_offset_lu(0.0)
+        widget.set_loudness_transition_lu(1.5)
+        widget.grabFramebuffer()
+        widget.set_loudness_metric(1)
+        widget.set_loudness_view(0)
+        widget.grabFramebuffer()
+
+        widget.set_display_mode("spectrogram")
+        widget.grabFramebuffer()
+        widget.set_display_mode("waveform")
+        app.processEvents()
+
         # Exercise source-envelope min/max contour geometry, not just shader
         # compilation and packed-cache waveform contours.
         widget.set_view(1000, 97_000)

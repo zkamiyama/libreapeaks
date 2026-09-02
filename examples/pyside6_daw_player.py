@@ -4,19 +4,18 @@ This keeps the existing playback/cache preparation path, but adds display-only
 controls suitable for DAW inspection:
 
 - exclusive waveform / spectral / spectrogram / loudness views;
-- spectrogram gain in dB with a directly exposed intensity slider;
-- floor and ceiling in dB;
-- contrast/gamma;
-- heatmap toggle;
-- linear or logarithmic frequency axis.
+- REAPER-like spectral peaks: waveform color follows dominant frequency while
+  tonality controls how strongly the spectral color replaces the normal peak;
+- REAPER-like loudness peaks/graph with LUFS-M or LUFS-S, opacity, LU offset,
+  graph range, and band-transition controls;
+- spectrogram gain, floor/ceiling, contrast, heatmap, and frequency axis.
 
 When started without an audio path, the demo opens a modern drop target. Drop a
 local media file there and the same window immediately becomes a progress view,
 builds/reuses the complete cache, and opens the player without a second dialog.
 
 The cache is never rewritten by display controls. Multichannel material remains
-on one shared timeline with one vertically stacked lane per channel, matching
-the REAPER-style layout used by the base GLSL renderer.
+on one shared timeline with one vertically stacked lane per channel.
 
 Examples:
     python examples/pyside6_daw_player.py
@@ -48,7 +47,7 @@ import pyside6_player as _base
 from pyside6_prepare import CacheWorker
 from pyside6_zita_gl_view import ZitaGpuAnalysisCanvas
 
-# The DAW demo uses zita-scope-style source-PCM geometry while keeping the
+# The DAW demo uses geometry-based waveform rendering while keeping the
 # lower-level/reference player unchanged.
 _base.ReaperGpuAnalysisCanvas = ZitaGpuAnalysisCanvas
 _BasePlayerWindow = _base.PlayerWindow
@@ -73,6 +72,31 @@ class DawPlayerWindow(_BasePlayerWindow):
                 "set_spectrogram_frequency_log",
             )
         )
+        spectral_supported = all(
+            hasattr(self.canvas, name)
+            for name in (
+                "set_peak_display_zoom_db",
+                "set_analysis_opacity",
+                "set_spectral_low_hz",
+                "set_spectral_high_hz",
+                "set_spectral_range_mode",
+                "set_spectral_reverse",
+                "set_spectral_fade_noise",
+            )
+        )
+        loudness_supported = all(
+            hasattr(self.canvas, name)
+            for name in (
+                "set_peak_display_zoom_db",
+                "set_analysis_opacity",
+                "set_loudness_metric",
+                "set_loudness_view",
+                "set_loudness_floor_lu",
+                "set_loudness_ceiling_lu",
+                "set_loudness_offset_lu",
+                "set_loudness_transition_lu",
+            )
+        )
 
         self.display_mode_combo = QComboBox(self)
         mode_specs = (
@@ -93,10 +117,148 @@ class DawPlayerWindow(_BasePlayerWindow):
                 self.display_mode_combo.addItem(label, mode)
         self.display_mode_combo.setEnabled(display_supported)
 
+        view_label = QLabel("View", self)
+        toolbar.addWidget(view_label)
+        toolbar.addWidget(self.display_mode_combo)
+        toolbar.addSeparator()
+
+        # REAPER exposes display zoom and color opacity across colored peak
+        # modes. Keep these controls shared by spectral and loudness.
+        common_zoom_label = QLabel("Peak zoom", self)
+        self.analysis_zoom_db = QDoubleSpinBox(self)
+        self.analysis_zoom_db.setRange(-24.0, 24.0)
+        self.analysis_zoom_db.setDecimals(1)
+        self.analysis_zoom_db.setSingleStep(1.0)
+        self.analysis_zoom_db.setSuffix(" dB")
+        self.analysis_zoom_db.setValue(0.0)
+
+        common_opacity_label = QLabel("Opacity", self)
+        self.analysis_opacity = QDoubleSpinBox(self)
+        self.analysis_opacity.setRange(0.0, 100.0)
+        self.analysis_opacity.setDecimals(0)
+        self.analysis_opacity.setSingleStep(5.0)
+        self.analysis_opacity.setSuffix(" %")
+        self.analysis_opacity.setValue(92.0)
+
+        self._common_analysis_widgets = [
+            common_zoom_label,
+            self.analysis_zoom_db,
+            common_opacity_label,
+            self.analysis_opacity,
+        ]
+        for widget in self._common_analysis_widgets:
+            toolbar.addWidget(widget)
+        toolbar.addSeparator()
+
+        # Spectral peaks: frequency colors are painted inside the normal waveform
+        # silhouette. Density/tonality controls saturation, matching REAPER's
+        # spectral-peaks concept rather than plotting frequency as a Y trace.
+        spectral_range_label = QLabel("Range", self)
+        self.spectral_range = QComboBox(self)
+        self.spectral_range.addItem("Full spectrum", 0)
+        self.spectral_range.addItem("Every octave", 1)
+
+        spectral_low_label = QLabel("Low", self)
+        self.spectral_low_hz = QDoubleSpinBox(self)
+        self.spectral_low_hz.setRange(10.0, 20000.0)
+        self.spectral_low_hz.setDecimals(0)
+        self.spectral_low_hz.setSingleStep(10.0)
+        self.spectral_low_hz.setSuffix(" Hz")
+        self.spectral_low_hz.setValue(20.0)
+
+        spectral_high_label = QLabel("High", self)
+        self.spectral_high_hz = QDoubleSpinBox(self)
+        self.spectral_high_hz.setRange(20.0, 30000.0)
+        self.spectral_high_hz.setDecimals(0)
+        self.spectral_high_hz.setSingleStep(100.0)
+        self.spectral_high_hz.setSuffix(" Hz")
+        self.spectral_high_hz.setValue(10000.0)
+
+        self.spectral_reverse = QCheckBox("Reverse", self)
+        self.spectral_fade_noise = QCheckBox("Fade noise", self)
+        self.spectral_fade_noise.setChecked(True)
+
+        self._spectral_widgets = [
+            spectral_range_label,
+            self.spectral_range,
+            spectral_low_label,
+            self.spectral_low_hz,
+            spectral_high_label,
+            self.spectral_high_hz,
+            self.spectral_reverse,
+            self.spectral_fade_noise,
+        ]
+        for widget in self._spectral_widgets:
+            toolbar.addWidget(widget)
+        toolbar.addSeparator()
+
+        # Loudness mirrors REAPER's two useful presentations: color the peaks by
+        # one loudness measure, or retain normal peaks and overlay one LUFS graph.
+        loudness_metric_label = QLabel("Measure", self)
+        self.loudness_metric = QComboBox(self)
+        self.loudness_metric.addItem("LUFS-M", 0)
+        self.loudness_metric.addItem("LUFS-S", 1)
+
+        loudness_style_label = QLabel("Style", self)
+        self.loudness_style = QComboBox(self)
+        self.loudness_style.addItem("Graph + peaks", 1)
+        self.loudness_style.addItem("Colored peaks", 0)
+
+        loudness_low_label = QLabel("Low", self)
+        self.loudness_floor_lu = QDoubleSpinBox(self)
+        self.loudness_floor_lu.setRange(-70.0, -0.1)
+        self.loudness_floor_lu.setDecimals(1)
+        self.loudness_floor_lu.setSingleStep(1.0)
+        self.loudness_floor_lu.setSuffix(" LUFS")
+        self.loudness_floor_lu.setValue(-48.0)
+
+        loudness_high_label = QLabel("High", self)
+        self.loudness_ceiling_lu = QDoubleSpinBox(self)
+        self.loudness_ceiling_lu.setRange(-69.0, 6.0)
+        self.loudness_ceiling_lu.setDecimals(1)
+        self.loudness_ceiling_lu.setSingleStep(1.0)
+        self.loudness_ceiling_lu.setSuffix(" LUFS")
+        self.loudness_ceiling_lu.setValue(0.0)
+
+        loudness_offset_label = QLabel("Offset", self)
+        self.loudness_offset_lu = QDoubleSpinBox(self)
+        self.loudness_offset_lu.setRange(-24.0, 24.0)
+        self.loudness_offset_lu.setDecimals(1)
+        self.loudness_offset_lu.setSingleStep(1.0)
+        self.loudness_offset_lu.setSuffix(" LU")
+        self.loudness_offset_lu.setValue(0.0)
+
+        loudness_transition_label = QLabel("Transition", self)
+        self.loudness_transition_lu = QDoubleSpinBox(self)
+        self.loudness_transition_lu.setRange(0.05, 12.0)
+        self.loudness_transition_lu.setDecimals(2)
+        self.loudness_transition_lu.setSingleStep(0.25)
+        self.loudness_transition_lu.setSuffix(" LU")
+        self.loudness_transition_lu.setValue(1.5)
+
+        self._loudness_widgets = [
+            loudness_metric_label,
+            self.loudness_metric,
+            loudness_style_label,
+            self.loudness_style,
+            loudness_low_label,
+            self.loudness_floor_lu,
+            loudness_high_label,
+            self.loudness_ceiling_lu,
+            loudness_offset_label,
+            self.loudness_offset_lu,
+            loudness_transition_label,
+            self.loudness_transition_lu,
+        ]
+        for widget in self._loudness_widgets:
+            toolbar.addWidget(widget)
+        toolbar.addSeparator()
+
+        # Spectrogram controls.
         self.spec_heatmap = QCheckBox("Heatmap", self)
         self.spec_heatmap.setChecked(True)
-        self.spec_heatmap.setEnabled(spectrogram_supported)
 
+        spec_intensity_label = QLabel("Intensity", self)
         self.spec_intensity = QSlider(Qt.Orientation.Horizontal, self)
         self.spec_intensity.setRange(-600, 600)
         self.spec_intensity.setSingleStep(10)
@@ -104,7 +266,6 @@ class DawPlayerWindow(_BasePlayerWindow):
         self.spec_intensity.setValue(0)
         self.spec_intensity.setFixedWidth(170)
         self.spec_intensity.setToolTip("Spectrogram display gain (-60 dB to +60 dB)")
-        self.spec_intensity.setEnabled(spectrogram_supported)
 
         self.spec_gain_db = QDoubleSpinBox(self)
         self.spec_gain_db.setRange(-60.0, 60.0)
@@ -112,50 +273,49 @@ class DawPlayerWindow(_BasePlayerWindow):
         self.spec_gain_db.setSingleStep(1.0)
         self.spec_gain_db.setSuffix(" dB")
         self.spec_gain_db.setValue(0.0)
-        self.spec_gain_db.setEnabled(spectrogram_supported)
 
+        spec_floor_label = QLabel("Floor", self)
         self.spec_floor_db = QDoubleSpinBox(self)
         self.spec_floor_db.setRange(-200.0, -0.1)
         self.spec_floor_db.setDecimals(1)
         self.spec_floor_db.setSingleStep(5.0)
         self.spec_floor_db.setSuffix(" dB")
         self.spec_floor_db.setValue(-100.0)
-        self.spec_floor_db.setEnabled(spectrogram_supported)
 
+        spec_ceiling_label = QLabel("Ceiling", self)
         self.spec_ceiling_db = QDoubleSpinBox(self)
         self.spec_ceiling_db.setRange(-199.0, 24.0)
         self.spec_ceiling_db.setDecimals(1)
         self.spec_ceiling_db.setSingleStep(1.0)
         self.spec_ceiling_db.setSuffix(" dB")
         self.spec_ceiling_db.setValue(0.0)
-        self.spec_ceiling_db.setEnabled(spectrogram_supported)
 
+        spec_contrast_label = QLabel("Contrast", self)
         self.spec_contrast = QDoubleSpinBox(self)
         self.spec_contrast.setRange(0.05, 8.0)
         self.spec_contrast.setDecimals(2)
         self.spec_contrast.setSingleStep(0.1)
         self.spec_contrast.setValue(1.0)
-        self.spec_contrast.setEnabled(spectrogram_supported)
 
         self.spec_frequency = QComboBox(self)
         self.spec_frequency.addItem("Log frequency", True)
         self.spec_frequency.addItem("Linear frequency", False)
-        self.spec_frequency.setEnabled(spectrogram_supported)
 
-        toolbar.addWidget(QLabel("View", self))
-        toolbar.addWidget(self.display_mode_combo)
-        toolbar.addSeparator()
-        toolbar.addWidget(self.spec_heatmap)
-        toolbar.addWidget(QLabel("Intensity", self))
-        toolbar.addWidget(self.spec_intensity)
-        toolbar.addWidget(self.spec_gain_db)
-        toolbar.addWidget(QLabel("Floor", self))
-        toolbar.addWidget(self.spec_floor_db)
-        toolbar.addWidget(QLabel("Ceiling", self))
-        toolbar.addWidget(self.spec_ceiling_db)
-        toolbar.addWidget(QLabel("Contrast", self))
-        toolbar.addWidget(self.spec_contrast)
-        toolbar.addWidget(self.spec_frequency)
+        self._spectrogram_widgets = [
+            self.spec_heatmap,
+            spec_intensity_label,
+            self.spec_intensity,
+            self.spec_gain_db,
+            spec_floor_label,
+            self.spec_floor_db,
+            spec_ceiling_label,
+            self.spec_ceiling_db,
+            spec_contrast_label,
+            self.spec_contrast,
+            self.spec_frequency,
+        ]
+        for widget in self._spectrogram_widgets:
+            toolbar.addWidget(widget)
 
         if display_supported:
             # Replace the legacy independent overlay controls with one explicit
@@ -177,6 +337,66 @@ class DawPlayerWindow(_BasePlayerWindow):
                 self._display_mode_changed
             )
             self.canvas.displayModeChanged.connect(self._canvas_display_mode_changed)
+
+        if spectral_supported or loudness_supported:
+            self.analysis_zoom_db.valueChanged.connect(
+                self.canvas.set_peak_display_zoom_db
+            )
+            self.analysis_opacity.valueChanged.connect(
+                lambda value: self.canvas.set_analysis_opacity(float(value) / 100.0)
+            )
+            self.canvas.set_peak_display_zoom_db(self.analysis_zoom_db.value())
+            self.canvas.set_analysis_opacity(self.analysis_opacity.value() / 100.0)
+
+        if spectral_supported:
+            self.spectral_low_hz.valueChanged.connect(self.canvas.set_spectral_low_hz)
+            self.spectral_high_hz.valueChanged.connect(self.canvas.set_spectral_high_hz)
+            self.spectral_range.currentIndexChanged.connect(
+                lambda _index: self.canvas.set_spectral_range_mode(
+                    int(self.spectral_range.currentData())
+                )
+            )
+            self.spectral_reverse.toggled.connect(self.canvas.set_spectral_reverse)
+            self.spectral_fade_noise.toggled.connect(
+                self.canvas.set_spectral_fade_noise
+            )
+            self.canvas.set_spectral_low_hz(self.spectral_low_hz.value())
+            self.canvas.set_spectral_high_hz(self.spectral_high_hz.value())
+            self.canvas.set_spectral_range_mode(int(self.spectral_range.currentData()))
+            self.canvas.set_spectral_reverse(self.spectral_reverse.isChecked())
+            self.canvas.set_spectral_fade_noise(self.spectral_fade_noise.isChecked())
+
+        if loudness_supported:
+            self.loudness_metric.currentIndexChanged.connect(
+                lambda _index: self.canvas.set_loudness_metric(
+                    int(self.loudness_metric.currentData())
+                )
+            )
+            self.loudness_style.currentIndexChanged.connect(
+                lambda _index: self.canvas.set_loudness_view(
+                    int(self.loudness_style.currentData())
+                )
+            )
+            self.loudness_floor_lu.valueChanged.connect(
+                self.canvas.set_loudness_floor_lu
+            )
+            self.loudness_ceiling_lu.valueChanged.connect(
+                self.canvas.set_loudness_ceiling_lu
+            )
+            self.loudness_offset_lu.valueChanged.connect(
+                self.canvas.set_loudness_offset_lu
+            )
+            self.loudness_transition_lu.valueChanged.connect(
+                self.canvas.set_loudness_transition_lu
+            )
+            self.canvas.set_loudness_metric(int(self.loudness_metric.currentData()))
+            self.canvas.set_loudness_view(int(self.loudness_style.currentData()))
+            self.canvas.set_loudness_floor_lu(self.loudness_floor_lu.value())
+            self.canvas.set_loudness_ceiling_lu(self.loudness_ceiling_lu.value())
+            self.canvas.set_loudness_offset_lu(self.loudness_offset_lu.value())
+            self.canvas.set_loudness_transition_lu(
+                self.loudness_transition_lu.value()
+            )
 
         if spectrogram_supported:
             # The legacy multiplicative demo gain remains at unity; calibrated
@@ -208,7 +428,11 @@ class DawPlayerWindow(_BasePlayerWindow):
 
         if display_supported and self.display_mode_combo.count() > 0:
             self.canvas.set_display_mode(str(self.display_mode_combo.currentData()))
-        self._update_spectrogram_controls()
+        self._update_analysis_controls(
+            spectral_supported=spectral_supported,
+            loudness_supported=loudness_supported,
+            spectrogram_supported=spectrogram_supported,
+        )
 
         self.setWindowTitle(
             self.windowTitle().replace("libreapeaks player", "libreapeaks DAW player")
@@ -218,7 +442,7 @@ class DawPlayerWindow(_BasePlayerWindow):
         mode = self.display_mode_combo.currentData()
         if mode is not None and hasattr(self.canvas, "set_display_mode"):
             self.canvas.set_display_mode(str(mode))
-        self._update_spectrogram_controls()
+        self._update_analysis_controls()
 
     def _canvas_display_mode_changed(self, mode: str) -> None:
         index = self.display_mode_combo.findData(mode)
@@ -226,7 +450,7 @@ class DawPlayerWindow(_BasePlayerWindow):
             self.display_mode_combo.blockSignals(True)
             self.display_mode_combo.setCurrentIndex(index)
             self.display_mode_combo.blockSignals(False)
-        self._update_spectrogram_controls()
+        self._update_analysis_controls()
 
     def _spectrogram_gain_changed(self, value: float) -> None:
         raw = int(round(float(value) * 10.0))
@@ -236,22 +460,42 @@ class DawPlayerWindow(_BasePlayerWindow):
             self.spec_intensity.blockSignals(False)
         self.canvas.set_spectrogram_gain_db(float(value))
 
-    def _update_spectrogram_controls(self) -> None:
-        enabled = (
-            self.display_mode_combo.isEnabled()
-            and self.display_mode_combo.currentData() == "spectrogram"
-            and hasattr(self.canvas, "set_spectrogram_gain_db")
-        )
-        for widget in (
-            self.spec_heatmap,
-            self.spec_intensity,
-            self.spec_gain_db,
-            self.spec_floor_db,
-            self.spec_ceiling_db,
-            self.spec_contrast,
-            self.spec_frequency,
-        ):
-            widget.setEnabled(enabled)
+    def _update_analysis_controls(
+        self,
+        *,
+        spectral_supported: bool | None = None,
+        loudness_supported: bool | None = None,
+        spectrogram_supported: bool | None = None,
+    ) -> None:
+        mode = self.display_mode_combo.currentData()
+        if spectral_supported is None:
+            spectral_supported = hasattr(self.canvas, "set_spectral_range_mode")
+        if loudness_supported is None:
+            loudness_supported = hasattr(self.canvas, "set_loudness_metric")
+        if spectrogram_supported is None:
+            spectrogram_supported = hasattr(self.canvas, "set_spectrogram_gain_db")
+
+        common_visible = mode in ("spectral", "loudness")
+        spectral_visible = mode == "spectral"
+        loudness_visible = mode == "loudness"
+        spectrogram_visible = mode == "spectrogram"
+
+        for widget in self._common_analysis_widgets:
+            widget.setVisible(common_visible)
+            widget.setEnabled(
+                common_visible
+                and ((spectral_visible and spectral_supported)
+                     or (loudness_visible and loudness_supported))
+            )
+        for widget in self._spectral_widgets:
+            widget.setVisible(spectral_visible)
+            widget.setEnabled(spectral_visible and spectral_supported)
+        for widget in self._loudness_widgets:
+            widget.setVisible(loudness_visible)
+            widget.setEnabled(loudness_visible and loudness_supported)
+        for widget in self._spectrogram_widgets:
+            widget.setVisible(spectrogram_visible)
+            widget.setEnabled(spectrogram_visible and spectrogram_supported)
 
 
 def _default_cache_options() -> dict[str, object]:

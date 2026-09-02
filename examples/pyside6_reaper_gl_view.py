@@ -2,7 +2,8 @@
 
 The wrapper keeps the packed `.reapeaks` renderer byte-preserving while adding
 REAPER-like interaction, explicit analysis display modes, calibrated
-spectrogram controls, smoother spectrogram sampling, and stable waveform LOD.
+spectrogram controls, stable waveform LOD, waveform-colored spectral peaks,
+and loudness peak/graph views.
 """
 from __future__ import annotations
 
@@ -38,6 +39,19 @@ _shader = _replace_required(
     "uniform float u_specContrast;\n"
     "uniform int u_specFreqLog;\n"
     "uniform int u_displayMode;\n"
+    "uniform float u_peakDisplayGain;\n"
+    "uniform float u_analysisOpacity;\n"
+    "uniform float u_spectralLowHz;\n"
+    "uniform float u_spectralHighHz;\n"
+    "uniform int u_spectralRangeMode;\n"
+    "uniform int u_spectralReverse;\n"
+    "uniform int u_spectralFadeNoise;\n"
+    "uniform int u_loudnessMetric;\n"
+    "uniform int u_loudnessView;\n"
+    "uniform float u_loudnessFloorLu;\n"
+    "uniform float u_loudnessCeilingLu;\n"
+    "uniform float u_loudnessOffsetLu;\n"
+    "uniform float u_loudnessTransitionLu;\n"
     "uniform int u_heatmap;",
 )
 _shader = _replace_required(
@@ -98,9 +112,6 @@ float segmentDistancePx(vec2 pointPx, vec2 aPx, vec2 bPx) {
 }
 
 float prefilteredCoverage(float distancePx, float halfWidthPx) {
-    // Compact one-pixel box prefilter in screen space. Because both the ideal
-    // stroke width and the filter radius are expressed in fragment pixels,
-    // steep waveform slopes do not expand the AA footprint.
     const float filterRadiusPx = 0.5;
     return clamp(
         (halfWidthPx + filterRadiusPx - distancePx) / (2.0 * filterRadiusPx),
@@ -119,10 +130,6 @@ float pcmNeighborSegmentDistancePx(
     int maxRecord = max(0, u_pcmCount - 1);
     int base = int(floor(position));
     float best = 1e20;
-
-    // Keep the same three segments in consideration while the fragment crosses
-    // a sample-cell boundary. This removes the visible pop where a steep
-    // segment used to enter/leave the distance test on a tiny zoom change.
     for (int offset = -1; offset <= 1; ++offset) {
         int ia = clamp(base + offset, 0, maxRecord);
         int ib = clamp(base + offset + 1, 0, maxRecord);
@@ -139,6 +146,66 @@ float pcmNeighborSegmentDistancePx(
         best = min(best, segmentDistancePx(vec2(0.0), aPx, bPx));
     }
     return best;
+}
+
+vec3 hsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+
+uint spectralCode(int record, int channel) {
+    uvec4 bytes = texelFetch(u_spectral, ivec2(channel, record), 0);
+    return bytes.r | (bytes.g << 8u) | (bytes.b << 16u) | (bytes.a << 24u);
+}
+
+vec3 spectralCodeColor(uint code) {
+    const vec3 normalPeak = vec3(0.43, 0.92, 0.67);
+    float frequency = float(code & 0x7fffu);
+    float tonality = float((code >> 15u) & 0x3fffu) / 16383.0;
+    if (frequency <= 0.0) return normalPeak;
+
+    float low = max(10.0, u_spectralLowHz);
+    float high = min(max(low + 1.0, u_spectralHighHz), max(low + 1.0, u_nyquist));
+    float f = clamp(frequency, low, high);
+    float phase;
+    if (u_spectralRangeMode != 0) {
+        phase = fract(log(f / low) / log(2.0));
+    } else {
+        phase = clamp(log(f / low) / max(1e-6, log(high / low)), 0.0, 1.0);
+    }
+    if (u_spectralReverse != 0) phase = 1.0 - phase;
+
+    // Red -> yellow -> green -> cyan -> blue -> violet, close to REAPER's
+    // frequency-colored waveform concept rather than a frequency-vs-Y trace.
+    vec3 hueColor = hsv2rgb(vec3(phase * 0.78, 0.92, 1.0));
+    float tonalMix = pow(clamp(tonality, 0.0, 1.0), 0.65);
+    vec3 neutral = u_spectralFadeNoise != 0 ? normalPeak : vec3(0.58);
+    return mix(neutral, hueColor, tonalMix);
+}
+
+vec3 spectralColorAt(float recordPosition, int channel) {
+    float position = clamp(recordPosition, 0.0, float(max(0, u_sCount - 1)));
+    int r0 = int(floor(position));
+    int r1 = min(r0 + 1, max(0, u_sCount - 1));
+    float t = fract(position);
+    return mix(
+        spectralCodeColor(spectralCode(r0, channel)),
+        spectralCodeColor(spectralCode(r1, channel)),
+        t
+    );
+}
+
+vec3 loudnessColor(float lu) {
+    float transition = max(0.05, u_loudnessTransitionLu);
+    vec3 c = vec3(0.18, 0.48, 0.32);
+    c = mix(c, vec3(0.18, 0.72, 0.33), smoothstep(-42.0 - transition, -42.0 + transition, lu));
+    c = mix(c, vec3(0.47, 0.82, 0.24), smoothstep(-36.0 - transition, -36.0 + transition, lu));
+    c = mix(c, vec3(0.92, 0.86, 0.18), smoothstep(-30.0 - transition, -30.0 + transition, lu));
+    c = mix(c, vec3(1.00, 0.62, 0.10), smoothstep(-24.0 - transition, -24.0 + transition, lu));
+    c = mix(c, vec3(0.96, 0.24, 0.10), smoothstep(-18.0 - transition, -18.0 + transition, lu));
+    c = mix(c, vec3(0.88, 0.14, 0.34), smoothstep(-12.0 - transition, -12.0 + transition, lu));
+    c = mix(c, vec3(0.34, 0.42, 1.00), smoothstep(-6.0 - transition, -6.0 + transition, lu));
+    return c;
 }
 
 bool resident(vec2 range, float x) {""",
@@ -176,8 +243,52 @@ _shader = _replace_required(
 )
 _shader = _replace_required(
     _shader,
-    "    if (u_hasSpectral != 0 && u_sCount > 0) {",
-    "    if (u_displayMode == 1 && u_hasSpectral != 0 && u_sCount > 0) {",
+    """    if (u_hasSpectral != 0 && u_sCount > 0) {
+        int record = recordAt(u_sRecord0, u_sRecordsAcross, u_sCount);
+        uvec4 bytes = texelFetch(u_spectral, ivec2(channel, record), 0);
+        uint code = bytes.r | (bytes.g << 8u) | (bytes.b << 16u) | (bytes.a << 24u);
+        float frequency = float(code & 0x7fffu);
+        float density = float((code >> 15u) & 0x3fffu) / 16383.0;
+        if (frequency > 0.0) {
+            float logLo = log(20.0);
+            float logHi = log(max(21.0, u_nyquist));
+            float target = 1.0 - clamp(
+                (log(max(20.0, frequency)) - logLo) / max(1e-6, logHi - logLo),
+                0.0,
+                1.0
+            );
+            float alpha = (1.0 - smoothstep(0.002, 0.012, abs(localY - target)))
+                        * (0.25 + 0.75 * density);
+            color = mix(color, vec3(0.35, 0.72, 1.0), alpha);
+        }
+    }""",
+    """    if (
+        u_displayMode == 1
+        && u_hasSpectral != 0
+        && u_sCount > 0
+        && u_hasWave != 0
+        && u_waveCount > 0
+    ) {
+        float wavePosition = u_waveRecord0 + v_uv.x * u_waveRecordsAcross;
+        float recordsPerPixel = max(abs(dFdx(wavePosition)), 0.00001);
+        float mx;
+        float mn;
+        wavePixelExtrema(wavePosition, recordsPerPixel, channel, mx, mn);
+        mx *= u_peakDisplayGain;
+        mn *= u_peakDisplayGain;
+
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float lower = amplitude - mn;
+        float upper = mx - amplitude;
+        float lowerAa = max(fwidth(lower) * 0.85, 0.001);
+        float upperAa = max(fwidth(upper) * 0.85, 0.001);
+        float inside = smoothstep(-lowerAa, lowerAa, lower)
+                     * smoothstep(-upperAa, upperAa, upper);
+
+        float spectralPosition = u_sRecord0 + v_uv.x * u_sRecordsAcross;
+        vec3 peakColor = spectralColorAt(spectralPosition, channel);
+        color = mix(color, peakColor, inside * u_analysisOpacity);
+    }""",
 )
 _shader = _replace_required(
     _shader,
@@ -277,8 +388,62 @@ _shader = _replace_required(
 )
 _shader = _replace_required(
     _shader,
-    "    if (u_hasLoudness != 0 && u_rCount > 0) {",
-    "    if (u_displayMode == 3 && u_hasLoudness != 0 && u_rCount > 0) {",
+    """    if (u_hasLoudness != 0 && u_rCount > 0) {
+        int record = recordAt(u_rRecord0, u_rRecordsAcross, u_rCount);
+        vec2 energy = texelFetch(u_loudness, ivec2(channel, record), 0).rg;
+        float m = -0.691 + 10.0 * log(max(energy.r, 1e-20)) / log(10.0);
+        float s = -0.691 + 10.0 * log(max(energy.g, 1e-20)) / log(10.0);
+        float my = 1.0 - clamp((m + 70.0) / 70.0, 0.0, 1.0);
+        float sy = 1.0 - clamp((s + 70.0) / 70.0, 0.0, 1.0);
+        float ma = 1.0 - smoothstep(0.002, 0.010, abs(localY - my));
+        float sa = 1.0 - smoothstep(0.002, 0.010, abs(localY - sy));
+        color = mix(color, vec3(1.0, 0.62, 0.12), ma * 0.85);
+        color = mix(color, vec3(1.0, 0.24, 0.10), sa * 0.85);
+    }""",
+    """    if (
+        u_displayMode == 3
+        && u_hasLoudness != 0
+        && u_rCount > 0
+        && u_hasWave != 0
+        && u_waveCount > 0
+    ) {
+        float wavePosition = u_waveRecord0 + v_uv.x * u_waveRecordsAcross;
+        float recordsPerPixel = max(abs(dFdx(wavePosition)), 0.00001);
+        float mx;
+        float mn;
+        wavePixelExtrema(wavePosition, recordsPerPixel, channel, mx, mn);
+        mx *= u_peakDisplayGain;
+        mn *= u_peakDisplayGain;
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float lower = amplitude - mn;
+        float upper = mx - amplitude;
+        float lowerAa = max(fwidth(lower) * 0.85, 0.001);
+        float upperAa = max(fwidth(upper) * 0.85, 0.001);
+        float inside = smoothstep(-lowerAa, lowerAa, lower)
+                     * smoothstep(-upperAa, upperAa, upper);
+
+        int record = recordAt(u_rRecord0, u_rRecordsAcross, u_rCount);
+        vec2 energy = texelFetch(u_loudness, ivec2(channel, record), 0).rg;
+        float selectedEnergy = u_loudnessMetric == 0 ? energy.r : energy.g;
+        float lu = -0.691 + 10.0 * log(max(selectedEnergy, 1e-20)) / log(10.0);
+        lu += u_loudnessOffsetLu;
+        vec3 luColor = loudnessColor(lu);
+
+        if (u_loudnessView == 0) {
+            color = mix(color, luColor, inside * u_analysisOpacity);
+        } else {
+            // REAPER's "normal peaks + LUFS graph" is much easier to read than
+            // two unrelated M/S traces: retain the waveform and overlay one
+            // selected, band-colored loudness graph.
+            color = mix(color, vec3(0.43, 0.92, 0.67), inside * 0.72);
+            float lo = min(u_loudnessFloorLu, u_loudnessCeilingLu - 0.001);
+            float hi = max(u_loudnessCeilingLu, lo + 0.001);
+            float target = 1.0 - clamp((lu - lo) / (hi - lo), 0.0, 1.0);
+            float aa = max(fwidth(localY), 0.0005);
+            float graph = 1.0 - smoothstep(aa * 0.7, aa * 2.2, abs(localY - target));
+            color = mix(color, luColor, graph * u_analysisOpacity);
+        }
+    }""",
 )
 _gl.FRAGMENT_SHADER = _shader
 GpuAnalysisCanvas = _gl.GpuAnalysisCanvas
@@ -332,18 +497,28 @@ class _UniformNameProxy:
             result = self._program.setUniformValue(location, *values)
         key = name.decode("ascii") if isinstance(name, bytes) else name
         if key == "u_specGain":
-            self._set_optional_float("u_specGainDb", self._owner.spectrogram_gain_db)
-            self._set_optional_float("u_specFloorDb", self._owner.spectrogram_floor_db)
+            owner = self._owner
+            self._set_optional_float("u_specGainDb", owner.spectrogram_gain_db)
+            self._set_optional_float("u_specFloorDb", owner.spectrogram_floor_db)
+            self._set_optional_float("u_specCeilingDb", owner.spectrogram_ceiling_db)
+            self._set_optional_float("u_specContrast", owner.spectrogram_contrast)
+            self._set_optional_int("u_specFreqLog", owner.spectrogram_frequency_log)
+            self._set_optional_int("u_displayMode", owner.display_mode_index)
+            self._set_optional_float("u_peakDisplayGain", owner.peak_display_gain)
+            self._set_optional_float("u_analysisOpacity", owner.analysis_opacity)
+            self._set_optional_float("u_spectralLowHz", owner.spectral_low_hz)
+            self._set_optional_float("u_spectralHighHz", owner.spectral_high_hz)
+            self._set_optional_int("u_spectralRangeMode", owner.spectral_range_mode)
+            self._set_optional_int("u_spectralReverse", owner.spectral_reverse)
+            self._set_optional_int("u_spectralFadeNoise", owner.spectral_fade_noise)
+            self._set_optional_int("u_loudnessMetric", owner.loudness_metric)
+            self._set_optional_int("u_loudnessView", owner.loudness_view)
+            self._set_optional_float("u_loudnessFloorLu", owner.loudness_floor_lu)
+            self._set_optional_float("u_loudnessCeilingLu", owner.loudness_ceiling_lu)
+            self._set_optional_float("u_loudnessOffsetLu", owner.loudness_offset_lu)
             self._set_optional_float(
-                "u_specCeilingDb", self._owner.spectrogram_ceiling_db
+                "u_loudnessTransitionLu", owner.loudness_transition_lu
             )
-            self._set_optional_float(
-                "u_specContrast", self._owner.spectrogram_contrast
-            )
-            self._set_optional_int(
-                "u_specFreqLog", self._owner.spectrogram_frequency_log
-            )
-            self._set_optional_int("u_displayMode", self._owner.display_mode_index)
         return result
 
     def __getattr__(self, name):
@@ -379,6 +554,24 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
         self.spectrogram_ceiling_db = 0.0
         self.spectrogram_contrast = 1.0
         self.spectrogram_frequency_log = True
+
+        self.peak_display_zoom_db = 0.0
+        self.peak_display_gain = 1.0
+        self.analysis_opacity = 0.92
+
+        self.spectral_low_hz = 20.0
+        self.spectral_high_hz = 10000.0
+        self.spectral_range_mode = 0
+        self.spectral_reverse = 0
+        self.spectral_fade_noise = 1
+
+        self.loudness_metric = 0
+        self.loudness_view = 1
+        self.loudness_floor_lu = -48.0
+        self.loudness_ceiling_lu = 0.0
+        self.loudness_offset_lu = 0.0
+        self.loudness_transition_lu = 1.5
+
         self.display_mode = "waveform"
         self.display_mode_index = self.DISPLAY_MODES[self.display_mode]
         self.show_spectral = False
@@ -447,6 +640,67 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
 
     def set_vertical_full_scale(self, value: float):
         self.vertical_full_scale = max(0.1, min(32.0, float(value)))
+        self.update()
+
+    def set_peak_display_zoom_db(self, value: float):
+        self.peak_display_zoom_db = max(-24.0, min(24.0, float(value)))
+        self.peak_display_gain = 10.0 ** (self.peak_display_zoom_db / 20.0)
+        self.update()
+
+    def set_analysis_opacity(self, value: float):
+        self.analysis_opacity = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def set_spectral_low_hz(self, value: float):
+        self.spectral_low_hz = max(10.0, min(20000.0, float(value)))
+        if self.spectral_high_hz <= self.spectral_low_hz:
+            self.spectral_high_hz = self.spectral_low_hz + 1.0
+        self.update()
+
+    def set_spectral_high_hz(self, value: float):
+        self.spectral_high_hz = max(20.0, min(30000.0, float(value)))
+        if self.spectral_high_hz <= self.spectral_low_hz:
+            self.spectral_low_hz = max(10.0, self.spectral_high_hz - 1.0)
+        self.update()
+
+    def set_spectral_range_mode(self, mode: int):
+        self.spectral_range_mode = 1 if int(mode) else 0
+        self.update()
+
+    def set_spectral_reverse(self, enabled: bool):
+        self.spectral_reverse = 1 if enabled else 0
+        self.update()
+
+    def set_spectral_fade_noise(self, enabled: bool):
+        self.spectral_fade_noise = 1 if enabled else 0
+        self.update()
+
+    def set_loudness_metric(self, metric: int):
+        self.loudness_metric = 1 if int(metric) else 0
+        self.update()
+
+    def set_loudness_view(self, view: int):
+        self.loudness_view = 1 if int(view) else 0
+        self.update()
+
+    def set_loudness_floor_lu(self, value: float):
+        self.loudness_floor_lu = max(-70.0, min(-0.1, float(value)))
+        if self.loudness_ceiling_lu <= self.loudness_floor_lu:
+            self.loudness_ceiling_lu = min(6.0, self.loudness_floor_lu + 1.0)
+        self.update()
+
+    def set_loudness_ceiling_lu(self, value: float):
+        self.loudness_ceiling_lu = max(-69.0, min(6.0, float(value)))
+        if self.loudness_ceiling_lu <= self.loudness_floor_lu:
+            self.loudness_floor_lu = max(-70.0, self.loudness_ceiling_lu - 1.0)
+        self.update()
+
+    def set_loudness_offset_lu(self, value: float):
+        self.loudness_offset_lu = max(-24.0, min(24.0, float(value)))
+        self.update()
+
+    def set_loudness_transition_lu(self, value: float):
+        self.loudness_transition_lu = max(0.05, min(12.0, float(value)))
         self.update()
 
     def set_spectrogram_gain_db(self, value: float):

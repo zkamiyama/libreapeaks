@@ -1,21 +1,22 @@
-"""Min/max contour waveform overlay for the PySide6 DAW demo.
+"""Filled min/max contour waveform overlay for the PySide6 DAW demo.
 
-The packed cache and source-PCM loaders still choose the data LOD.  Waveform
-rasterization is intentionally simpler: every envelope record contributes one
-maximum point and one minimum point, and adjacent records are connected as two
-ordinary one-device-pixel contour lines.  Exact source samples are the degenerate
-case where min == max, so they become one ordinary polyline.
+The packed cache and source-PCM loaders still choose the data LOD. Waveform
+rasterization uses one shared representation: every envelope record contributes
+one maximum point and one minimum point, adjacent records are connected, and the
+area between the two contours is filled. Exact source samples are the degenerate
+case where min == max, so they remain one ordinary polyline; at deep zoom the
+actual sample positions are also marked with small fixed-device-pixel points.
 
-This removes filled-envelope edge AA, zita-style vertical bars, and fragment
-nearest-segment reconstruction from the DAW waveform view.  Geometry determines
-the shape and QPainter performs normal cosmetic-line rasterization.
+This keeps waveform shape in geometry rather than fragment-distance AA. The
+outline is a one-device-pixel cosmetic line, and the fill uses the same min/max
+geometry, so slope-dependent shader hairs are not reintroduced.
 """
 from __future__ import annotations
 
 import math
 import struct
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 # Import the REAPER wrapper first: it installs its display-mode shader patches
@@ -24,6 +25,10 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 import pyside6_gl_view as _gl
 from source_pcm import PcmDisplayWindow, pcm_display_values
+
+
+SAMPLE_POINT_MIN_DEVICE_PX = 8.0
+SAMPLE_POINT_RADIUS_DEVICE_PX = 2.0
 
 
 def _disable_fragment_waveform(source: str) -> str:
@@ -57,7 +62,7 @@ _gl.FRAGMENT_SHADER = _disable_fragment_waveform(_gl.FRAGMENT_SHADER)
 
 
 class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
-    """REAPER analysis canvas with continuous min/max waveform contours."""
+    """REAPER analysis canvas with filled continuous min/max contours."""
 
     CACHE_COLOR = QColor(110, 235, 171, 245)
     SOURCE_COLOR = QColor(248, 226, 70, 245)
@@ -71,17 +76,28 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
 
     def paintGL(self):  # noqa: N802 - Qt API
         # The base pass still performs LOD selection, paging, analysis rendering,
-        # playhead/debug drawing, and source-PCM loading.  Its waveform branches
-        # are disabled above; one contour overlay is added after the GL pass.
+        # playhead/debug drawing, and source-PCM loading. Its waveform branches
+        # are disabled above; one filled contour overlay is added after the GL pass.
         super().paintGL()
         if self.display_mode == "waveform":
             self._paint_waveform_contours()
 
     def _ready_source_window(self) -> PcmDisplayWindow | None:
-        if self.pcm_loader is None or self._pcm_upload is None:
+        loader = self.pcm_loader
+        if loader is None or self._pcm_upload is None or not loader.source_active:
             return None
-        window = self.pcm_loader.ready_window
-        if window is None:
+        requested = loader.requested_plan
+        ready = loader.ready_plan
+        window = loader.ready_window
+        if (
+            requested is None
+            or not requested.active
+            or requested.key is None
+            or ready is None
+            or ready.key != requested.key
+            or window is None
+            or self._pcm_upload.key != requested.key
+        ):
             return None
         if self._pcm_upload.key != (
             window.first_frame,
@@ -166,6 +182,36 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
         pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         return pen
 
+    @staticmethod
+    def _draw_filled_minmax(
+        painter: QPainter,
+        maxima: list[QPointF],
+        minima: list[QPointF],
+        color: QColor,
+    ) -> None:
+        if not maxima or len(maxima) != len(minima):
+            return
+
+        fill_path = QPainterPath()
+        fill_path.moveTo(maxima[0])
+        for point in maxima[1:]:
+            fill_path.lineTo(point)
+        for point in reversed(minima):
+            fill_path.lineTo(point)
+        fill_path.closeSubpath()
+        painter.fillPath(fill_path, color)
+
+        max_path = QPainterPath()
+        min_path = QPainterPath()
+        max_path.moveTo(maxima[0])
+        min_path.moveTo(minima[0])
+        for point in maxima[1:]:
+            max_path.lineTo(point)
+        for point in minima[1:]:
+            min_path.lineTo(point)
+        painter.drawPath(max_path)
+        painter.drawPath(min_path)
+
     def _paint_waveform_contours(self) -> None:
         source = self._ready_source_window()
         width = max(1, self.width())
@@ -233,6 +279,7 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
 
             if window.mode == "samples":
                 path = QPainterPath()
+                sample_points: list[QPointF] = []
                 started = False
                 for record in range(window.record_count):
                     frame = window.first_frame + record
@@ -241,17 +288,27 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
                     x = (frame - self.view_start) * width / span
                     offset = record * channels + channel
                     y = self._amplitude_y(values[offset], lane_top, lane_height)
+                    point = QPointF(x, y)
+                    sample_points.append(point)
                     if started:
-                        path.lineTo(x, y)
+                        path.lineTo(point)
                     else:
-                        path.moveTo(x, y)
+                        path.moveTo(point)
                         started = True
                 if started:
                     painter.drawPath(path)
+
+                dpr = max(1.0, float(self.devicePixelRatioF()))
+                device_pixels_per_sample = width * dpr / span
+                if device_pixels_per_sample >= SAMPLE_POINT_MIN_DEVICE_PX:
+                    radius = SAMPLE_POINT_RADIUS_DEVICE_PX / dpr
+                    painter.setBrush(self.SOURCE_COLOR)
+                    for point in sample_points:
+                        painter.drawEllipse(point, radius, radius)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
             else:
-                max_path = QPainterPath()
-                min_path = QPainterPath()
-                started = False
+                maxima: list[QPointF] = []
+                minima: list[QPointF] = []
                 data_end = window.first_frame + window.frame_count
                 for record in range(window.record_count):
                     frame0 = window.first_frame + record * division
@@ -263,18 +320,13 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
                     base = (record * channels + channel) * 2
                     maximum = float(values[base])
                     minimum = float(values[base + 1])
-                    top = self._amplitude_y(maximum, lane_top, lane_height)
-                    bottom = self._amplitude_y(minimum, lane_top, lane_height)
-                    if started:
-                        max_path.lineTo(x, top)
-                        min_path.lineTo(x, bottom)
-                    else:
-                        max_path.moveTo(x, top)
-                        min_path.moveTo(x, bottom)
-                        started = True
-                if started:
-                    painter.drawPath(max_path)
-                    painter.drawPath(min_path)
+                    maxima.append(
+                        QPointF(x, self._amplitude_y(maximum, lane_top, lane_height))
+                    )
+                    minima.append(
+                        QPointF(x, self._amplitude_y(minimum, lane_top, lane_height))
+                    )
+                self._draw_filled_minmax(painter, maxima, minima, self.SOURCE_COLOR)
             painter.restore()
 
     def _paint_packed_contours(
@@ -301,25 +353,25 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
             painter.setClipRect(
                 QRectF(0.0, lane_top, float(width), visible_bottom - lane_top)
             )
-            max_path = QPainterPath()
-            min_path = QPainterPath()
-            started = False
+            maxima: list[QPointF] = []
+            minima: list[QPointF] = []
             for record in range(records):
                 center = (first + record + 0.5) * division
                 if center < self.view_start - division or center > self.view_end + division:
                     continue
                 x = (center - self.view_start) * width / span
                 base = (record * channels + channel) * 2
-                top = self._amplitude_y(values[base], lane_top, lane_height)
-                bottom = self._amplitude_y(values[base + 1], lane_top, lane_height)
-                if started:
-                    max_path.lineTo(x, top)
-                    min_path.lineTo(x, bottom)
-                else:
-                    max_path.moveTo(x, top)
-                    min_path.moveTo(x, bottom)
-                    started = True
-            if started:
-                painter.drawPath(max_path)
-                painter.drawPath(min_path)
+                maxima.append(
+                    QPointF(
+                        x,
+                        self._amplitude_y(values[base], lane_top, lane_height),
+                    )
+                )
+                minima.append(
+                    QPointF(
+                        x,
+                        self._amplitude_y(values[base + 1], lane_top, lane_height),
+                    )
+                )
+            self._draw_filled_minmax(painter, maxima, minima, self.CACHE_COLOR)
             painter.restore()
