@@ -21,6 +21,16 @@ if not media or media == "" then
   return
 end
 
+local ok_read_path, read_path = pcall(function()
+  return reaper.GetPeakFileNameEx(media, "", false)
+end)
+if ok_read_path then append("PEAK_READ=" .. tostring(read_path or "")) end
+
+local ok_write_path, write_path = pcall(function()
+  return reaper.GetPeakFileNameEx(media, "", true)
+end)
+if ok_write_path then append("PEAK_WRITE=" .. tostring(write_path or "")) end
+
 append("start=" .. media)
 local src = reaper.PCM_Source_CreateFromFile(media)
 if not src then
@@ -28,6 +38,11 @@ if not src then
   reaper.Main_OnCommand(40004, 0)
   return
 end
+
+local ok_type, source_type = pcall(function()
+  return reaper.GetMediaSourceType(src, "")
+end)
+if ok_type then append("TYPE=" .. tostring(source_type or "")) end
 
 local r = reaper.PCM_Source_BuildPeaks(src, 0)
 local loops = 0
