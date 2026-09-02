@@ -7,7 +7,6 @@ responsive GUI worker thread.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import struct
 from typing import Callable, Literal, Sequence
@@ -26,7 +25,6 @@ from player_common import (
     _read_candidates,
     _resolved,
     _source_fingerprint,
-    _source_metadata,
     _validate_divisions,
     _write_target,
     decode_audio_for_cache,
@@ -92,7 +90,7 @@ def cache_matches_native_mode(path: str | Path, mode: NativeGenerationMode) -> b
 
 def _generate_native_blob(
     source,
-    source_stat: os.stat_result,
+    source_path: Path,
     *,
     divisions: Sequence[int],
     generation_mode: NativeGenerationMode,
@@ -131,7 +129,10 @@ def _generate_native_blob(
             "wave encoding; use a PCM16 WAV/decoder path or select spectral mode"
         )
 
-    source_mtime, source_size = _source_metadata(source_stat)
+    try:
+        source_mtime, source_size = reapeaks.source_stamp(str(source_path))
+    except Exception as exc:
+        raise PlayerCacheError(f"cannot build REAPER source stamp: {exc}") from exc
     kwargs = dict(
         sample_rate=source.sample_rate,
         channels=source.channels,
@@ -228,10 +229,6 @@ def ensure_reapeaks_native(
             return target, False
 
         before = _source_fingerprint(audio)
-        try:
-            source_stat = audio.stat()
-        except OSError as exc:
-            raise PlayerCacheError(f"cannot stat source audio {audio}: {exc}") from exc
 
         _progress(progress, "Decoding source audio", 18)
         decoded = decode_audio_for_cache(
@@ -265,7 +262,7 @@ def ensure_reapeaks_native(
         _progress(progress, f"Generating {mode} cache", 50)
         blob = _generate_native_blob(
             decoded,
-            source_stat,
+            audio,
             divisions=selected_divisions,
             generation_mode=mode,
             wave_encoding=wave_encoding,
