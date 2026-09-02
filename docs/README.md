@@ -15,6 +15,23 @@ unproven or unsupported.
 Machine-readable validation metadata lives in
 [`validation-summary.json`](validation-summary.json).
 
+## I want the finite-f32 / RPKL proof
+
+Read [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md).
+
+This is the focused proof record for the float32 compatibility boundary. It
+separates two kinds of evidence:
+
+- the **exhaustive RPKL waveform quantizer proof** over every finite IEEE-754
+  binary32 bit pattern; and
+- byte-exact **whole-file live-oracle gates** for finite float media through the
+  stateful waveform / `-'s'` / `-'g'` / `-'r'` pipeline.
+
+The scalar oracle recovers all 65,535 RPKL output decision boundaries and covers
+all 4,278,190,080 finite f32 bit patterns, including subnormals and all 8,192
+representable sign-asymmetric exact-half ties. Exact source NaN/+Inf/-Inf policy
+remains outside that claim.
+
 ## I want the technical details of how REAPER's cache was reproduced
 
 Read [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
@@ -35,11 +52,16 @@ It records the oracle methodology and recovered behavior for:
 The `-'g'` implementation has two pinned live-oracle stress gates. The PCM16
 gate covers 122 cases: strict-WDL output is complete-file byte-identical for all
 122, and the portable/default FFT path is checked for exact `-'g'` output on the
-same matrix. The IEEE float32/RPKL gate covers 128 adversarial cases and matches
-REAPER 7.79 exactly for every decoded 128-bin `-'g'` frame and every packed
-`-'g'` payload byte. The float32 claim is deliberately `-'g'`-specific rather
-than a claim about arbitrary NaN/Inf behavior or every RPKL waveform rounding
-edge.
+same matrix. The IEEE float32/RPKL spectrogram gate covers 128 adversarial cases
+and matches REAPER 7.79 for every decoded 128-bin `-'g'` frame and every packed
+`-'g'` payload byte.
+
+Float32 waveform compatibility is stronger than that older `-'g'`-specific
+statement: the RPKL scalar quantizer now has a complete finite-f32 decision-
+boundary oracle, and dedicated finite whole-file workflows cover IEEE-754 edge
+cases and a broad 128-case operating matrix. See `F32_FINITE_PROOF.md` for the
+precise distinction between exhaustive scalar proof and whole-file corpus
+evidence.
 
 A separate fresh-process oracle sweeps 71 REAPER `showpeaks` configurations and
 locks the three native cache shapes: waveform-only, waveform + `-'s'` + `-'r'`,
@@ -82,8 +104,9 @@ actual exported ABI.
 
 Rust, Python, and C expose the same REAPER-oriented mode vocabulary: waveform,
 spectral (`wave + s + r`), and spectrogram (`wave + s + g + r`) for PCM16 and
-float32. With float32 `large_range=true`, the container is RPKL; its `-'g'`
-payload is covered by the permanent 128-case byte-exact REAPER 7.79 oracle.
+float32. With float32 `large_range=true`, the container is RPKL. Finite float32
+waveform quantization is covered exhaustively, while exact source NaN/+Inf/-Inf
+policy remains outside the REAPER-identity claim.
 
 ## Source-of-truth order
 
@@ -93,8 +116,10 @@ When documentation and code disagree, use this order:
    `src/python.rs`);
 2. permanent live oracle workflows and their tests;
 3. [`COMPATIBILITY.md`](COMPATIBILITY.md) for the tested compatibility claim;
-4. the deeper explanatory documents in this directory;
-5. historical oracle reports/workflows, which may describe intermediate
+4. [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md) for the finite-f32 proof
+   boundary;
+5. the deeper explanatory documents in this directory;
+6. historical oracle reports/workflows, which may describe intermediate
    reverse-engineering states rather than the current implementation.
 
 Compatibility claims should always name the validated REAPER version and scope.
