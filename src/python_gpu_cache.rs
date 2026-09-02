@@ -126,5 +126,6 @@ impl PyGpuCacheView {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGpuCacheView>()?;
+    crate::python_rpkx::register(m)?;
     Ok(())
 }
