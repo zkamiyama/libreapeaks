@@ -18,7 +18,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
 import reapeaks
-from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
+from pyside6_zita_gl_view import ZitaGpuAnalysisCanvas
 from source_pcm import SourcePcmService, WavPcmWindowReader
 
 
@@ -54,6 +54,19 @@ def make_cache(path: Path, audio_path: Path, seconds: int = 4) -> int:
     return frames
 
 
+def _wait_for_pcm_mode(app: QApplication, widget: ZitaGpuAnalysisCanvas, mode: str) -> None:
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        widget.grabFramebuffer()
+        if widget._pcm_upload is not None and widget._pcm_upload.mode == mode:
+            return
+        time.sleep(0.01)
+    raise RuntimeError(
+        f"source PCM {mode} texture did not become ready: {widget.diagnostics}"
+    )
+
+
 def main() -> int:
     app = QApplication([sys.argv[0]])
     with tempfile.TemporaryDirectory(prefix="libreapeaks-gl-bench-") as directory:
@@ -65,7 +78,7 @@ def main() -> int:
             expected_sample_rate=48_000,
             expected_channels=2,
         )
-        widget = ReaperGpuAnalysisCanvas(
+        widget = ZitaGpuAnalysisCanvas(
             str(cache), total_frames, pcm_service=pcm_service
         )
         decoded_events: list[object] = []
@@ -95,20 +108,22 @@ def main() -> int:
             widget.grabFramebuffer()
             app.processEvents()
 
-        # Exercise the asynchronous loader and R32F exact-sample texture path,
-        # not only shader compilation with the source uniforms optimized in.
+        # Exercise zita-style per-screen-column min/max geometry at the source
+        # envelope LOD, not just shader compilation and packed-cache views.
+        widget.set_view(1000, 97_000)
+        _wait_for_pcm_mode(app, widget, "envelope")
+        widget.grabFramebuffer()
+        if widget._zita_values_window_id is None:
+            raise RuntimeError("zita envelope painter did not consume source PCM")
+
+        # Exercise the deep-zoom raw-sample polyline as a separate geometry
+        # path. The fragment-distance PCM renderer is disabled by the zita
+        # wrapper, so this also catches QPainter/OpenGL interop regressions.
         widget.set_view(1000, 1200)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            app.processEvents()
-            widget.grabFramebuffer()
-            if widget._pcm_upload is not None and widget._pcm_upload.mode == "samples":
-                break
-            time.sleep(0.01)
-        if widget._pcm_upload is None or widget._pcm_upload.mode != "samples":
-            raise RuntimeError(
-                f"source PCM sample texture did not become ready: {widget.diagnostics}"
-            )
+        _wait_for_pcm_mode(app, widget, "samples")
+        widget.grabFramebuffer()
+        if widget._zita_values_window_id is None:
+            raise RuntimeError("zita sample painter did not consume source PCM")
         if not decoded_events:
             raise RuntimeError("PySide6 emitted no PCM rangeDecoded debug signal")
 

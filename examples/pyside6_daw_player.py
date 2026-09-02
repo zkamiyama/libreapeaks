@@ -46,7 +46,11 @@ from PySide6.QtWidgets import (
 
 import pyside6_player as _base
 from pyside6_prepare import CacheWorker
+from pyside6_zita_gl_view import ZitaGpuAnalysisCanvas
 
+# The DAW demo uses zita-scope-style source-PCM geometry while keeping the
+# lower-level/reference player unchanged.
+_base.ReaperGpuAnalysisCanvas = ZitaGpuAnalysisCanvas
 _BasePlayerWindow = _base.PlayerWindow
 
 
