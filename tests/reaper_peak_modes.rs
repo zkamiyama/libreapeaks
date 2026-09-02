@@ -107,7 +107,9 @@ fn float_reaper_spectrogram_special_values_never_panic() {
     let result = std::panic::catch_unwind(|| {
         generate_f32_reaper(&pcm, &opt, true, ReaperPeakMode::Spectrogram)
     });
-    let blob = result.expect("float spectrogram panicked").expect("generation failed");
+    let blob = result
+        .expect("float spectrogram panicked")
+        .expect("generation failed");
     ReaPeaks::parse(blob).expect("generated float spectrogram failed to parse");
 }
 
