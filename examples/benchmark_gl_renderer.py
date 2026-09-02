@@ -108,22 +108,21 @@ def main() -> int:
             widget.grabFramebuffer()
             app.processEvents()
 
-        # Exercise zita-style per-screen-column min/max geometry at the source
-        # envelope LOD, not just shader compilation and packed-cache views.
+        # Exercise source-envelope min/max contour geometry, not just shader
+        # compilation and packed-cache waveform contours.
         widget.set_view(1000, 97_000)
         _wait_for_pcm_mode(app, widget, "envelope")
         widget.grabFramebuffer()
-        if widget._zita_values_window_id is None:
-            raise RuntimeError("zita envelope painter did not consume source PCM")
+        if widget._source_values_window_id is None:
+            raise RuntimeError("source envelope contour painter did not consume PCM")
 
-        # Exercise the deep-zoom raw-sample polyline as a separate geometry
-        # path. The fragment-distance PCM renderer is disabled by the zita
-        # wrapper, so this also catches QPainter/OpenGL interop regressions.
+        # Exercise the deep-zoom exact-sample polyline as the degenerate
+        # min==max contour case. Fragment-distance PCM drawing is disabled.
         widget.set_view(1000, 1200)
         _wait_for_pcm_mode(app, widget, "samples")
         widget.grabFramebuffer()
-        if widget._zita_values_window_id is None:
-            raise RuntimeError("zita sample painter did not consume source PCM")
+        if widget._source_values_window_id is None:
+            raise RuntimeError("source sample contour painter did not consume PCM")
         if not decoded_events:
             raise RuntimeError("PySide6 emitted no PCM rangeDecoded debug signal")
 
