@@ -5,12 +5,14 @@ on:
     paths:
       - '.github/workflows/reaper-cache-extension-oracle.yml'
       - 'tools/reaper_oracle/cache_extension_oracle.py'
+      - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   pull_request:
     paths:
       - '.github/workflows/reaper-cache-extension-oracle.yml'
       - 'tools/reaper_oracle/cache_extension_oracle.py'
+      - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   workflow_dispatch:
@@ -45,7 +47,7 @@ jobs:
           test -n "$REAPER_BIN"
           echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
       - name: Validate oracle syntax
-        run: python3 -m py_compile tools/reaper_oracle/cache_extension_oracle.py
+        run: python3 -m py_compile tools/reaper_oracle/cache_extension_oracle.py tools/reaper_oracle/cache_extension_oracle_fixed.py
       - name: Start Xvfb
         shell: bash
         run: |
@@ -54,7 +56,7 @@ jobs:
       - name: Probe extended and malformed caches
         env:
           DISPLAY: ':96'
-        run: python3 tools/reaper_oracle/cache_extension_oracle.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 30
+        run: python3 tools/reaper_oracle/cache_extension_oracle_fixed.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 30
       - name: Publish evidence summary
         if: always()
         shell: bash
