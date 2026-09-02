@@ -160,7 +160,9 @@ impl RpkxContainer {
             return Err(ReaPeaksError::Truncated);
         }
         if bytes.get(0..4) != Some(RPKX_MAGIC.as_slice()) {
-            return Err(ReaPeaksError::InvalidMagic(bytes[0..4].try_into().unwrap()));
+            return Err(ReaPeaksError::InvalidMagic(
+                bytes[0..4].try_into().unwrap(),
+            ));
         }
         let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
         if version != RPKX_VERSION {
@@ -198,10 +200,11 @@ impl RpkxContainer {
             let chunk_flags = u32::from_le_bytes(bytes[off + 24..off + 28].try_into().unwrap());
             let reserved = u32::from_le_bytes(bytes[off + 28..off + 32].try_into().unwrap());
             if reserved != 0 {
-                return Err(ReaPeaksError::Unsupported("RPKX v1 nonzero chunk reserved field"));
+                return Err(ReaPeaksError::Unsupported(
+                    "RPKX v1 nonzero chunk reserved field",
+                ));
             }
-            let payload_len_u64 =
-                u64::from_le_bytes(bytes[off + 32..off + 40].try_into().unwrap());
+            let payload_len_u64 = u64::from_le_bytes(bytes[off + 32..off + 40].try_into().unwrap());
             let payload_len = usize::try_from(payload_len_u64)
                 .map_err(|_| ReaPeaksError::InvalidHeader("RPKX payload length too large"))?;
             let payload_start = header_end;
@@ -283,6 +286,9 @@ pub fn standard_end(raw: &[u8]) -> Result<usize> {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidHeader("channels=0"));
     }
+    if read_u32(raw, 6)? == 0 {
+        return Err(ReaPeaksError::InvalidHeader("sample_rate=0"));
+    }
     let layer_count = usize::from(raw[5]);
     let table_len = layer_count
         .checked_mul(8)
@@ -300,7 +306,10 @@ pub fn standard_end(raw: &[u8]) -> Result<usize> {
         let count = read_u32(raw, header_off + 4)? as usize;
         let bytes_per_value = if division > 0 {
             wave_bytes_per_channel_peak
-        } else if matches!(division, TOKEN_SPECTRAL | TOKEN_SPECTROGRAM | TOKEN_LOUDNESS) {
+        } else if matches!(
+            division,
+            TOKEN_SPECTRAL | TOKEN_SPECTROGRAM | TOKEN_LOUDNESS
+        ) {
             4usize
         } else if division == TOKEN_LOUDNESS_OLD {
             return Err(ReaPeaksError::Unsupported(
@@ -317,7 +326,9 @@ pub fn standard_end(raw: &[u8]) -> Result<usize> {
             .ok_or(ReaPeaksError::InvalidHeader("layer payload size overflow"))?;
         payload_off = payload_off
             .checked_add(payload_len)
-            .ok_or(ReaPeaksError::InvalidHeader("layer payload offset overflow"))?;
+            .ok_or(ReaPeaksError::InvalidHeader(
+                "layer payload offset overflow",
+            ))?;
         if payload_off > raw.len() {
             return Err(ReaPeaksError::Truncated);
         }
@@ -409,7 +420,11 @@ pub fn set_rpkx_chunk(raw: &[u8], chunk: RpkxChunk) -> Result<Vec<u8>> {
         ));
     }
     container.set_chunk(chunk);
-    attach_rpkx(raw, &container, RpkxAttachPolicy::RequireMatchingSourceStamp)
+    attach_rpkx(
+        raw,
+        &container,
+        RpkxAttachPolicy::RequireMatchingSourceStamp,
+    )
 }
 
 pub fn append_rpkx_chunk(raw: &[u8], chunk: RpkxChunk) -> Result<Vec<u8>> {
@@ -422,7 +437,11 @@ pub fn append_rpkx_chunk(raw: &[u8], chunk: RpkxChunk) -> Result<Vec<u8>> {
         ));
     }
     container.append_chunk(chunk);
-    attach_rpkx(raw, &container, RpkxAttachPolicy::RequireMatchingSourceStamp)
+    attach_rpkx(
+        raw,
+        &container,
+        RpkxAttachPolicy::RequireMatchingSourceStamp,
+    )
 }
 
 pub fn remove_rpkx_chunks(raw: &[u8], key: RpkxKey) -> Result<Vec<u8>> {
@@ -440,6 +459,10 @@ pub fn remove_rpkx_chunks(raw: &[u8], key: RpkxKey) -> Result<Vec<u8>> {
     if container.chunks.is_empty() {
         strip_rpkx(raw)
     } else {
-        attach_rpkx(raw, &container, RpkxAttachPolicy::RequireMatchingSourceStamp)
+        attach_rpkx(
+            raw,
+            &container,
+            RpkxAttachPolicy::RequireMatchingSourceStamp,
+        )
     }
 }
