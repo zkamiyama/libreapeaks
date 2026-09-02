@@ -1,36 +1,39 @@
-"""zita-scope-inspired source-PCM waveform overlay for the PySide6 DAW demo.
+"""Min/max contour waveform overlay for the PySide6 DAW demo.
 
-The packed `.reapeaks` shader remains responsible for normal cache LODs and
-analysis views.  Once source PCM becomes resident, this module deliberately
-stops reconstructing the waveform as a fragment-distance field.  Instead it
-uses the same two visual primitives described by zita-scope/Ardour:
+The packed cache and source-PCM loaders still choose the data LOD.  Waveform
+rasterization is intentionally simpler: every envelope record contributes one
+maximum point and one minimum point, and adjacent records are connected as two
+ordinary one-device-pixel contour lines.  Exact source samples are the degenerate
+case where min == max, so they become one ordinary polyline.
 
-* sub-sample zoom: aggregate min/max into actual screen-pixel columns, drawing
-  vertical extents and connecting adjacent non-overlapping extents;
-* sample zoom: draw the decoded source samples as one ordinary polyline.
-
-Both paths use a one-device-pixel cosmetic pen.  Geometry decides the shape;
-QPainter's rasterizer supplies ordinary line antialiasing.  There is no
-slope-dependent `fwidth()` or per-fragment nearest-segment selection.
+This removes filled-envelope edge AA, zita-style vertical bars, and fragment
+nearest-segment reconstruction from the DAW waveform view.  Geometry determines
+the shape and QPainter performs normal cosmetic-line rasterization.
 """
 from __future__ import annotations
 
 import math
+import struct
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 # Import the REAPER wrapper first: it installs its display-mode shader patches
-# into pyside6_gl_view.FRAGMENT_SHADER before we suppress the old PCM branches.
+# into pyside6_gl_view.FRAGMENT_SHADER before this module suppresses waveform
+# drawing in the fullscreen fragment pass.
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 import pyside6_gl_view as _gl
 from source_pcm import PcmDisplayWindow, pcm_display_values
 
 
-def _disable_fragment_pcm(source: str) -> str:
-    """Keep source PCM resident but prevent the fullscreen shader drawing it."""
+def _disable_fragment_waveform(source: str) -> str:
+    """Keep waveform textures resident but render waveform geometry with QPainter."""
 
     replacements = (
+        (
+            "if (u_displayMode == 0 && u_hasWave != 0 && u_waveCount > 0) {",
+            "if (false && u_displayMode == 0 && u_hasWave != 0 && u_waveCount > 0) {",
+        ),
         (
             "if (u_displayMode == 0 && u_pcmMode == 1 && u_pcmCount > 0) {",
             "if (false && u_displayMode == 0 && u_pcmMode == 1 && u_pcmCount > 0) {",
@@ -45,32 +48,34 @@ def _disable_fragment_pcm(source: str) -> str:
         if new in patched:
             continue
         if old not in patched:
-            raise RuntimeError("source-PCM shader layout changed")
+            raise RuntimeError("waveform shader layout changed")
         patched = patched.replace(old, new, 1)
     return patched
 
 
-_gl.FRAGMENT_SHADER = _disable_fragment_pcm(_gl.FRAGMENT_SHADER)
+_gl.FRAGMENT_SHADER = _disable_fragment_waveform(_gl.FRAGMENT_SHADER)
 
 
 class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
-    """REAPER analysis canvas with zita-style source waveform rasterization."""
+    """REAPER analysis canvas with continuous min/max waveform contours."""
 
+    CACHE_COLOR = QColor(110, 235, 171, 245)
     SOURCE_COLOR = QColor(248, 226, 70, 245)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._zita_values_window_id: int | None = None
-        self._zita_values = None
+        self._source_values_window_id: int | None = None
+        self._source_values = None
+        self._packed_wave_key: tuple[object, ...] | None = None
+        self._packed_wave_values: tuple[int, int, int, list[float]] | None = None
 
     def paintGL(self):  # noqa: N802 - Qt API
-        # The base pass still selects/loads the source-PCM LOD, suppresses the
-        # packed waveform while PCM is active, and draws all non-PCM UI.  Its
-        # PCM fragment branches were disabled above, so only real line geometry
-        # is added here.
+        # The base pass still performs LOD selection, paging, analysis rendering,
+        # playhead/debug drawing, and source-PCM loading.  Its waveform branches
+        # are disabled above; one contour overlay is added after the GL pass.
         super().paintGL()
         if self.display_mode == "waveform":
-            self._paint_source_pcm_geometry()
+            self._paint_waveform_contours()
 
     def _ready_source_window(self) -> PcmDisplayWindow | None:
         if self.pcm_loader is None or self._pcm_upload is None:
@@ -86,192 +91,235 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
             return None
         return window
 
-    def _values_for(self, window: PcmDisplayWindow):
+    def _source_values_for(self, window: PcmDisplayWindow):
         window_id = id(window)
-        if self._zita_values_window_id != window_id:
-            self._zita_values = pcm_display_values(window)
-            self._zita_values_window_id = window_id
-        return self._zita_values
+        if self._source_values_window_id != window_id:
+            self._source_values = pcm_display_values(window)
+            self._source_values_window_id = window_id
+        return self._source_values
 
-    def _paint_source_pcm_geometry(self) -> None:
-        window = self._ready_source_window()
-        if window is None or window.record_count <= 0:
-            return
+    @staticmethod
+    def _decode_wave_code(code: int, encoding: str) -> float:
+        if encoding == "RPKN":
+            if code == 0:
+                return 0.0
+            return code / (32768.0 if code < 0 else 32767.0)
+        negative = code < 0
+        magnitude = float(abs(code))
+        amplitude = (
+            magnitude / 24576.0
+            if magnitude <= 24576.0
+            else 2.0 ** ((magnitude - 24576.0) / 1024.0)
+        )
+        return -amplitude if negative else amplitude
 
+    def _packed_values_for(self, upload):
+        key = (
+            int(upload.layer_index),
+            int(upload.first_record),
+            int(upload.record_count),
+            str(self.gpu.wave_encoding),
+            int(self.gpu.channels),
+        )
+        if self._packed_wave_key == key and self._packed_wave_values is not None:
+            return self._packed_wave_values
+
+        first, records, channels, bytes_per_channel, raw = self.gpu.records(
+            "waveform",
+            int(upload.layer_index),
+            int(upload.first_record),
+            int(upload.record_count),
+        )
+        first = int(first)
+        records = int(records)
+        channels = int(channels)
+        if int(bytes_per_channel) != 4:
+            raise ValueError(f"unexpected waveform record size {bytes_per_channel}")
+        payload = bytes(raw)
+        expected = records * channels * 4
+        if len(payload) != expected:
+            raise ValueError(
+                f"waveform payload {len(payload)} bytes != expected {expected}"
+            )
+
+        values = [0.0] * (records * channels * 2)
+        encoding = str(self.gpu.wave_encoding)
+        for record in range(records):
+            for channel in range(channels):
+                offset = (record * channels + channel) * 4
+                maximum_code, minimum_code = struct.unpack_from("<hh", payload, offset)
+                target = (record * channels + channel) * 2
+                values[target] = self._decode_wave_code(maximum_code, encoding)
+                values[target + 1] = self._decode_wave_code(minimum_code, encoding)
+
+        result = (first, records, channels, values)
+        self._packed_wave_key = key
+        self._packed_wave_values = result
+        return result
+
+    @staticmethod
+    def _make_pen(color: QColor) -> QPen:
+        pen = QPen(color)
+        pen.setCosmetic(True)
+        pen.setWidthF(1.0)
+        pen.setJoinStyle(Qt.PenJoinStyle.BevelJoin)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        return pen
+
+    def _paint_waveform_contours(self) -> None:
+        source = self._ready_source_window()
         width = max(1, self.width())
         height = max(1, self.height())
         span = max(1.0, float(self.view_end - self.view_start))
-        channels = max(1, int(window.channels))
-        dpr = max(1.0, float(self.devicePixelRatioF()))
-        physical_width = max(1, int(round(width * dpr)))
         content_bottom = height * (0.90 if self.show_tile_debug else 1.0)
-        values = self._values_for(window)
-        if values is None:
-            return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        pen = QPen(self.SOURCE_COLOR)
-        pen.setCosmetic(True)
-        pen.setWidthF(1.0)
-        # A bevel join is intentional: sharp sample turns must not grow miter
-        # spikes that look like transient "hairs" while zooming.
-        pen.setJoinStyle(Qt.PenJoinStyle.BevelJoin)
-        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
-        painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        lane_height = height / channels
-        for channel in range(channels):
-            lane_top = channel * lane_height
-            lane_bottom = (channel + 1) * lane_height
-            visible_bottom = min(lane_bottom, content_bottom)
-            if visible_bottom <= lane_top:
-                continue
-            painter.save()
-            painter.setClipRect(QRectF(0.0, lane_top, float(width), visible_bottom - lane_top))
-            if window.mode == "samples":
-                self._paint_sample_polyline(
+        if source is not None and source.record_count > 0:
+            painter.setPen(self._make_pen(self.SOURCE_COLOR))
+            self._paint_source_contours(
+                painter,
+                source,
+                width,
+                height,
+                span,
+                content_bottom,
+            )
+        else:
+            upload = self._uploads.get("waveform")
+            if upload is not None and upload.record_count > 0:
+                painter.setPen(self._make_pen(self.CACHE_COLOR))
+                self._paint_packed_contours(
                     painter,
-                    window,
-                    values,
-                    channel,
-                    lane_top,
-                    lane_height,
-                    span,
+                    upload,
                     width,
-                )
-            else:
-                self._paint_zita_envelope(
-                    painter,
-                    window,
-                    values,
-                    channel,
-                    lane_top,
-                    lane_height,
+                    height,
                     span,
-                    physical_width,
-                    dpr,
+                    content_bottom,
                 )
-            painter.restore()
         painter.end()
 
     def _amplitude_y(self, value: float, lane_top: float, lane_height: float) -> float:
         full_scale = max(1e-9, float(self.vertical_full_scale))
         return lane_top + (0.5 - float(value) / (2.0 * full_scale)) * lane_height
 
-    def _paint_sample_polyline(
+    def _paint_source_contours(
         self,
         painter: QPainter,
         window: PcmDisplayWindow,
-        values,
-        channel: int,
-        lane_top: float,
-        lane_height: float,
-        span: float,
         width: int,
-    ) -> None:
-        """High-resolution zita path: one ordinary line through raw samples."""
-
-        relative_start = self.view_start - window.first_frame
-        relative_end = self.view_end - window.first_frame
-        first = max(0, int(math.floor(relative_start)) - 1)
-        last = min(window.record_count, int(math.ceil(relative_end)) + 2)
-        if last - first < 2:
-            return
-
-        path = QPainterPath()
-        started = False
-        for record in range(first, last):
-            frame = window.first_frame + record
-            x = (frame - self.view_start) * width / span
-            offset = record * window.channels + channel
-            y = self._amplitude_y(values[offset], lane_top, lane_height)
-            if not started:
-                path.moveTo(x, y)
-                started = True
-            else:
-                path.lineTo(x, y)
-        if started:
-            painter.drawPath(path)
-
-    def _paint_zita_envelope(
-        self,
-        painter: QPainter,
-        window: PcmDisplayWindow,
-        values,
-        channel: int,
-        lane_top: float,
-        lane_height: float,
+        height: int,
         span: float,
-        physical_width: int,
-        dpr: float,
+        content_bottom: float,
     ) -> None:
-        """Low-resolution zita path: per-pixel min/max plus connected extents."""
-
-        maxima = [-math.inf] * physical_width
-        minima = [math.inf] * physical_width
-        present = bytearray(physical_width)
+        values = self._source_values_for(window)
+        if values is None:
+            return
+        channels = max(1, int(window.channels))
+        lane_height = height / channels
         division = max(1, int(window.division))
-        data_end = window.first_frame + window.frame_count
 
-        for record in range(window.record_count):
-            frame0 = window.first_frame + record * division
-            frame1 = min(data_end, frame0 + division)
-            if frame1 <= self.view_start or frame0 >= self.view_end:
+        for channel in range(channels):
+            lane_top = channel * lane_height
+            visible_bottom = min((channel + 1) * lane_height, content_bottom)
+            if visible_bottom <= lane_top:
                 continue
-
-            clipped0 = max(float(frame0), float(self.view_start))
-            clipped1 = min(float(frame1), float(self.view_end))
-            x0 = (clipped0 - self.view_start) * physical_width / span
-            x1 = (clipped1 - self.view_start) * physical_width / span
-            first_col = max(0, min(physical_width - 1, int(math.floor(x0))))
-            last_col = max(
-                first_col,
-                min(physical_width - 1, int(math.ceil(x1) - 1)),
+            painter.save()
+            painter.setClipRect(
+                QRectF(0.0, lane_top, float(width), visible_bottom - lane_top)
             )
 
-            base = (record * window.channels + channel) * 2
-            maximum = float(values[base])
-            minimum = float(values[base + 1])
-            for column in range(first_col, last_col + 1):
-                if not present[column]:
-                    maxima[column] = maximum
-                    minima[column] = minimum
-                    present[column] = 1
-                else:
-                    maxima[column] = max(maxima[column], maximum)
-                    minima[column] = min(minima[column], minimum)
+            if window.mode == "samples":
+                path = QPainterPath()
+                started = False
+                for record in range(window.record_count):
+                    frame = window.first_frame + record
+                    if frame < self.view_start - 1 or frame > self.view_end + 1:
+                        continue
+                    x = (frame - self.view_start) * width / span
+                    offset = record * channels + channel
+                    y = self._amplitude_y(values[offset], lane_top, lane_height)
+                    if started:
+                        path.lineTo(x, y)
+                    else:
+                        path.moveTo(x, y)
+                        started = True
+                if started:
+                    painter.drawPath(path)
+            else:
+                max_path = QPainterPath()
+                min_path = QPainterPath()
+                started = False
+                data_end = window.first_frame + window.frame_count
+                for record in range(window.record_count):
+                    frame0 = window.first_frame + record * division
+                    frame1 = min(data_end, frame0 + division)
+                    center = 0.5 * (frame0 + frame1)
+                    if center < self.view_start - division or center > self.view_end + division:
+                        continue
+                    x = (center - self.view_start) * width / span
+                    base = (record * channels + channel) * 2
+                    maximum = float(values[base])
+                    minimum = float(values[base + 1])
+                    top = self._amplitude_y(maximum, lane_top, lane_height)
+                    bottom = self._amplitude_y(minimum, lane_top, lane_height)
+                    if started:
+                        max_path.lineTo(x, top)
+                        min_path.lineTo(x, bottom)
+                    else:
+                        max_path.moveTo(x, top)
+                        min_path.moveTo(x, bottom)
+                        started = True
+                if started:
+                    painter.drawPath(max_path)
+                    painter.drawPath(min_path)
+            painter.restore()
 
-        path = QPainterPath()
-        for column in range(physical_width):
-            if not present[column]:
+    def _paint_packed_contours(
+        self,
+        painter: QPainter,
+        upload,
+        width: int,
+        height: int,
+        span: float,
+        content_bottom: float,
+    ) -> None:
+        first, records, channels, values = self._packed_values_for(upload)
+        if records <= 0 or channels <= 0:
+            return
+        lane_height = height / channels
+        division = max(1, int(upload.division))
+
+        for channel in range(channels):
+            lane_top = channel * lane_height
+            visible_bottom = min((channel + 1) * lane_height, content_bottom)
+            if visible_bottom <= lane_top:
                 continue
-            x = (column + 0.5) / dpr
-            top = self._amplitude_y(maxima[column], lane_top, lane_height)
-            bottom = self._amplitude_y(minima[column], lane_top, lane_height)
-
-            if column + 1 < physical_width and present[column + 1]:
-                next_x = (column + 1.5) / dpr
-                next_top = self._amplitude_y(
-                    maxima[column + 1], lane_top, lane_height
-                )
-                next_bottom = self._amplitude_y(
-                    minima[column + 1], lane_top, lane_height
-                )
-                # zita-scope / Ardour Fig.3 rule: when neighboring min/max
-                # intervals do not overlap, connect the nearest matching edge
-                # instead of showing two disconnected vertical bars.
-                if top >= next_bottom:
-                    path.moveTo(x, bottom)
-                    path.lineTo(next_x, next_bottom)
+            painter.save()
+            painter.setClipRect(
+                QRectF(0.0, lane_top, float(width), visible_bottom - lane_top)
+            )
+            max_path = QPainterPath()
+            min_path = QPainterPath()
+            started = False
+            for record in range(records):
+                center = (first + record + 0.5) * division
+                if center < self.view_start - division or center > self.view_end + division:
                     continue
-                if bottom <= next_top:
-                    path.moveTo(x, top)
-                    path.lineTo(next_x, next_top)
-                    continue
-
-            path.moveTo(x, top)
-            path.lineTo(x, bottom)
-
-        painter.drawPath(path)
+                x = (center - self.view_start) * width / span
+                base = (record * channels + channel) * 2
+                top = self._amplitude_y(values[base], lane_top, lane_height)
+                bottom = self._amplitude_y(values[base + 1], lane_top, lane_height)
+                if started:
+                    max_path.lineTo(x, top)
+                    min_path.lineTo(x, bottom)
+                else:
+                    max_path.moveTo(x, top)
+                    min_path.moveTo(x, bottom)
+                    started = True
+            if started:
+                painter.drawPath(max_path)
+                painter.drawPath(min_path)
+            painter.restore()
