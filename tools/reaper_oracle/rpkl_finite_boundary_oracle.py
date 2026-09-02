@@ -19,10 +19,15 @@ results.mkdir(parents=True, exist_ok=True)
 probe = (repo / "tools/reaper_oracle/build_probe.lua").resolve()
 
 SAMPLE_RATE = 48_000
-PPS = 48_000
+# REAPER 7.79 clamps peakcachegenrs to an effective 3000 peaks/second here,
+# yielding a minimum fine division of 16 frames. Repeat every candidate for a
+# complete fine bucket so each recovered peak still represents exactly one f32.
+PPS = 3_000
+BUCKET_FRAMES = 16
 POS_TRANSITIONS = 32_767  # 0->1 through 32766->32767
 NEG_TRANSITIONS = 32_768  # 0->1 through 32767->32768
-FRAMES = max(POS_TRANSITIONS, NEG_TRANSITIONS)
+BUCKETS = max(POS_TRANSITIONS, NEG_TRANSITIONS)
+FRAMES = BUCKETS * BUCKET_FRAMES
 MAX_FINITE_MAG_BITS = 0x7F7FFFFF
 DISPLAY = ":97"
 
@@ -33,11 +38,14 @@ def f32_from_bits(bits: int) -> float:
 
 def write_float_wave(path: Path, positive_bits, negative_bits) -> None:
     payload = bytearray()
-    for index in range(FRAMES):
+    for index in range(BUCKETS):
         pos_bits = positive_bits[index] if index < len(positive_bits) else 0
         neg_bits = negative_bits[index] if index < len(negative_bits) else 0
-        payload += struct.pack("<I", pos_bits)
-        payload += struct.pack("<I", neg_bits | 0x80000000)
+        pos_word = struct.pack("<I", pos_bits)
+        neg_word = struct.pack("<I", neg_bits | 0x80000000)
+        for _ in range(BUCKET_FRAMES):
+            payload += pos_word
+            payload += neg_word
     channels = 2
     block_align = channels * 4
     byte_rate = SAMPLE_RATE * block_align
@@ -63,10 +71,12 @@ def parse_fine_codes(path: Path):
     if not wave_headers:
         raise RuntimeError("no positive waveform layers")
     first_index, first_division, first_count = wave_headers[0]
-    if first_index != 0 or first_division != 1:
-        raise RuntimeError(f"expected first waveform division=1, got index={first_index} division={first_division}")
-    if first_count != FRAMES:
-        raise RuntimeError(f"expected {FRAMES} fine peaks, got {first_count}")
+    if first_index != 0 or first_division != BUCKET_FRAMES:
+        raise RuntimeError(
+            f"expected first waveform division={BUCKET_FRAMES}, got index={first_index} division={first_division}"
+        )
+    if first_count != BUCKETS:
+        raise RuntimeError(f"expected {BUCKETS} fine peaks, got {first_count}")
     offset = 18 + 8 * layer_count
     fine_bytes = first_count * channels * 4
     payload = data[offset : offset + fine_bytes]
@@ -74,8 +84,8 @@ def parse_fine_codes(path: Path):
         raise RuntimeError("truncated fine waveform payload")
     positive = []
     negative_mag = []
-    for frame in range(FRAMES):
-        base = frame * channels * 4
+    for peak in range(BUCKETS):
+        base = peak * channels * 4
         pos_max, _pos_min = struct.unpack_from("<hh", payload, base)
         _neg_max, neg_min = struct.unpack_from("<hh", payload, base + 4)
         positive.append(int(pos_max))
@@ -222,6 +232,7 @@ try:
         "sample_rate": SAMPLE_RATE,
         "peakcachegenrs": PPS,
         "fine_division": headers[0][0],
+        "bucket_frames": BUCKET_FRAMES,
         "fresh_reaper_processes": round_index + 2,
         "search_rounds": round_index,
         "positive_transition_count": len(pos_boundaries),
