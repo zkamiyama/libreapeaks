@@ -45,6 +45,30 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn("smoothstep(8.0, 11.0, pixelsPerFrame)", source)
         self.assertNotIn("fwidth(lineDistance)", source)
 
+    def test_spectral_peaks_color_the_waveform_by_frequency_and_tonality(self) -> None:
+        source = read_source("pyside6_reaper_gl_view.py")
+        self.assertIn("vec3 spectralCodeColor(uint code)", source)
+        self.assertIn("float frequency = float(code & 0x7fffu);", source)
+        self.assertIn("float tonality = float((code >> 15u) & 0x3fffu)", source)
+        self.assertIn("u_spectralRangeMode", source)
+        self.assertIn("u_spectralReverse", source)
+        self.assertIn("u_spectralFadeNoise", source)
+        self.assertIn("vec3 peakColor = spectralColorAt", source)
+        self.assertIn("inside * u_analysisOpacity", source)
+        self.assertIn("mx *= u_peakDisplayGain;", source)
+
+    def test_loudness_supports_colored_peaks_and_single_lufs_graph(self) -> None:
+        source = read_source("pyside6_reaper_gl_view.py")
+        self.assertIn("vec3 loudnessColor(float lu)", source)
+        self.assertIn("u_loudnessMetric", source)
+        self.assertIn("u_loudnessView", source)
+        self.assertIn("u_loudnessOffsetLu", source)
+        self.assertIn("u_loudnessTransitionLu", source)
+        self.assertIn('REAPER\'s "normal peaks + LUFS graph"', source)
+        self.assertIn("selectedEnergy = u_loudnessMetric == 0 ? energy.r : energy.g", source)
+        self.assertIn("color = mix(color, luColor, inside * u_analysisOpacity)", source)
+        self.assertIn("graph * u_analysisOpacity", source)
+
     def test_daw_waveform_uses_filled_minmax_geometry(self) -> None:
         source = read_source("pyside6_zita_gl_view.py")
         self.assertIn("def _disable_fragment_waveform", source)
@@ -74,18 +98,30 @@ class PySideGuiSourceTests(unittest.TestCase):
     def test_shader_patch_targets_still_exist(self) -> None:
         base = read_source("pyside6_gl_view.py")
         self.assertIn("if (u_hasG != 0 && u_gCount > 0)", base)
+        self.assertIn("if (u_hasSpectral != 0 && u_sCount > 0)", base)
         self.assertIn("if (u_hasWave != 0 && u_waveCount > 0)", base)
         self.assertIn("if (u_pcmMode == 2 && u_pcmCount > 0)", base)
         self.assertIn("if (u_hasLoudness != 0 && u_rCount > 0)", base)
 
-    def test_daw_toolbar_exposes_view_and_spectrogram_controls(self) -> None:
+    def test_daw_toolbar_exposes_reaper_like_mode_parameters(self) -> None:
         source = read_source("pyside6_daw_player.py")
         self.assertIn('QLabel("View"', source)
-        self.assertIn('QLabel("Intensity"', source)
-        self.assertIn('QCheckBox("Heatmap"', source)
         self.assertIn('("Waveform", "waveform", "waveform")', source)
+        self.assertIn('("Spectral peaks", "spectral", "spectral")', source)
         self.assertIn('("Spectrogram", "spectrogram", "spectrogram")', source)
-        self.assertIn("set_display_mode", source)
+        self.assertIn('("Loudness", "loudness", "loudness")', source)
+        self.assertIn('QLabel("Peak zoom"', source)
+        self.assertIn('QLabel("Opacity"', source)
+        self.assertIn('self.spectral_range.addItem("Full spectrum", 0)', source)
+        self.assertIn('self.spectral_range.addItem("Every octave", 1)', source)
+        self.assertIn('QCheckBox("Reverse"', source)
+        self.assertIn('QCheckBox("Fade noise"', source)
+        self.assertIn('self.loudness_metric.addItem("LUFS-M", 0)', source)
+        self.assertIn('self.loudness_metric.addItem("LUFS-S", 1)', source)
+        self.assertIn('self.loudness_style.addItem("Graph + peaks", 1)', source)
+        self.assertIn('self.loudness_style.addItem("Colored peaks", 0)', source)
+        self.assertIn('QLabel("Transition"', source)
+        self.assertIn("def _update_analysis_controls(", source)
 
     def test_cache_prepare_always_generates_complete_spectrogram_mode(self) -> None:
         source = read_source("pyside6_prepare.py")
