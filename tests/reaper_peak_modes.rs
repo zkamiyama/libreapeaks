@@ -1,6 +1,6 @@
 use reapeaks::{
     default_divisions, generate_f32_reaper, generate_pcm16_reaper, GenerateOptions, ReaPeaks,
-    ReaperPeakMode,
+    ReaperPeakMode, Version,
 };
 
 fn options(sample_rate: u32, channels: usize) -> GenerateOptions {
@@ -75,11 +75,40 @@ fn mode_api_overrides_legacy_spectral_flag() {
 }
 
 #[test]
-fn float_reaper_spectrogram_fails_closed() {
+fn float_reaper_spectrogram_emits_rpkl_native_shape() {
+    let opt = options(48_000, 2);
+    let pcm: Vec<f32> = (0..96_137 * 2)
+        .map(|i| (((i * 97) % 65_535) as f32 - 32_768.0) / 32_768.0)
+        .collect();
+    let parsed = ReaPeaks::parse(
+        generate_f32_reaper(&pcm, &opt, true, ReaperPeakMode::Spectrogram).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(parsed.header.version, Version::Rpkl);
+    assert_eq!(parsed.wave_layers.len(), 3);
+    assert_eq!(parsed.spectral_layers.len(), 3);
+    assert_eq!(parsed.spectrogram_layers.len(), 2);
+    assert_eq!(parsed.loudness_layers.len(), 2);
+}
+
+#[test]
+fn float_reaper_spectrogram_special_values_never_panic() {
     let opt = options(48_000, 1);
-    let pcm = vec![0.0f32; 48_000];
-    let err = generate_f32_reaper(&pcm, &opt, true, ReaperPeakMode::Spectrogram).unwrap_err();
-    assert!(err.to_string().contains("float32 REAPER spectrogram"));
+    let values = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::from_bits(1),
+        -f32::from_bits(1),
+        0.5,
+        -0.5,
+    ];
+    let pcm: Vec<f32> = (0..48_137).map(|i| values[i % values.len()]).collect();
+    let result = std::panic::catch_unwind(|| {
+        generate_f32_reaper(&pcm, &opt, true, ReaperPeakMode::Spectrogram)
+    });
+    let blob = result.expect("float spectrogram panicked").expect("generation failed");
+    ReaPeaks::parse(blob).expect("generated float spectrogram failed to parse");
 }
 
 #[test]
