@@ -1,0 +1,111 @@
+name: reaper-oracle-hygiene
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-oracle-hygiene.yml'
+      - 'tools/reaper_oracle/fresh_process.py'
+      - 'tools/reaper_oracle/fresh_process_determinism.py'
+      - 'tools/reaper_oracle/spectral_eof_sweep.py'
+      - 'tools/reaper_oracle/spectral_analysis_length_oracle.py'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/strict_wdl.cpp'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-oracle-hygiene.yml'
+      - 'tools/reaper_oracle/fresh_process.py'
+      - 'tools/reaper_oracle/fresh_process_determinism.py'
+      - 'tools/reaper_oracle/spectral_eof_sweep.py'
+      - 'tools/reaper_oracle/spectral_analysis_length_oracle.py'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/strict_wdl.cpp'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-oracle-hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fresh-process:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-oracle-hygiene
+          mkdir -p "$root/reaper" "$root/determinism/results" "$root/eof/results" "$root/analysis-length/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/reaper-oracle-hygiene/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Fresh-process repeat and order determinism
+        run: python3 tools/reaper_oracle/fresh_process_determinism.py /tmp/reaper-oracle-hygiene/determinism "$REAPER_BIN"
+      - name: Fresh-process spectral EOF observation sweep
+        run: python3 tools/reaper_oracle/spectral_eof_sweep.py /tmp/reaper-oracle-hygiene/eof "$REAPER_BIN"
+      - name: Infer effective spectral analysis-frame lengths
+        run: python3 tools/reaper_oracle/spectral_analysis_length_oracle.py /tmp/reaper-oracle-hygiene/analysis-length "$REAPER_BIN"
+      - name: Publish evidence summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/reaper-oracle-hygiene/determinism/results/fresh-process-determinism.json ]; then
+            echo '## Fresh-process determinism' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-oracle-hygiene/determinism/results/fresh-process-determinism.json'
+          d=json.load(open(p))
+          print(f"cases={len(d['cases'])}, repeats={d['repeats']}, orderings={len(d['orders'])}")
+          for name,row in d['cases'].items(): print(f"- {name}: `{row['sha256']}`")
+          PY
+          fi
+          if [ -f /tmp/reaper-oracle-hygiene/eof/results/spectral-eof-sweep.json ]; then
+            echo '## Spectral EOF sweep' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-oracle-hygiene/eof/results/spectral-eof-sweep.json'
+          d=json.load(open(p))
+          for s in d['scenarios']:
+              mism512=sum(x['observed_count'] != x['candidate_center_512'] for x in s['points'])
+              mism5115=sum(x['observed_count'] != x['candidate_center_511_5'] for x in s['points'])
+              print(f"- {s['name']}: points={len(s['points'])}, mismatch(center=512)={mism512}, mismatch(center=511.5)={mism5115}")
+          PY
+          fi
+          if [ -f /tmp/reaper-oracle-hygiene/analysis-length/results/spectral-analysis-length.json ]; then
+            echo '## Inferred spectral analysis lengths' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-oracle-hygiene/analysis-length/results/spectral-analysis-length.json'
+          d=json.load(open(p))
+          for x in d['probes']:
+              print(f"- {x['name']}: source={x['frames']} @ {x['sr']} Hz, candidates={x['candidate_analysis_frames']}")
+          PY
+          fi
+      - name: Upload oracle-hygiene evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-oracle-hygiene-${{ github.sha }}
+          path: |
+            /tmp/reaper-oracle-hygiene/determinism/results
+            /tmp/reaper-oracle-hygiene/eof/results
+            /tmp/reaper-oracle-hygiene/analysis-length/results
+          if-no-files-found: warn
+          retention-days: 30

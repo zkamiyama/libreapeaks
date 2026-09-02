@@ -7,6 +7,7 @@
 #include <limits>
 #include <mutex>
 #include <type_traits>
+#include <vector>
 
 #include "fft.h"
 #include "resample.h"
@@ -46,6 +47,15 @@ bool valid_interleaved_span(long long frames, int channels) noexcept {
 
     return frame_count <= max_pointer_elements / channel_count &&
            frame_count <= max_double_elements / channel_count;
+}
+
+void configure_reaper_spectral_resampler(
+    WDL_Resampler &rs,
+    double input_rate,
+    double output_rate) {
+    rs.SetMode(true, 1, false, 64, 32);
+    rs.SetFeedMode(true);
+    rs.SetRates(input_rate, output_rate);
 }
 
 } // namespace
@@ -129,9 +139,7 @@ long long rpk_wdl_resample_all(
         }
 
         WDL_Resampler rs;
-        rs.SetMode(true, 1, false, 64, 32);
-        rs.SetFeedMode(true);
-        rs.SetRates(input_rate, output_rate);
+        configure_reaper_spectral_resampler(rs, input_rate, output_rate);
 
         long long in_pos = 0;
         long long out_pos = 0;
@@ -144,8 +152,16 @@ long long rpk_wdl_resample_all(
         const int block_frames = std::max(1, 2048 / channels);
 
         while (in_pos < input_frames && out_pos < output_capacity_frames) {
+            // Feed mode's request is the amount of source input being offered.
+            // Shrink the final request to the actual remaining source frames so
+            // the returned analysis stream can be compared directly with the
+            // fresh-process EOF oracle, without adding synthetic analysis data.
+            const int request_frames = static_cast<int>(std::min<long long>(
+                block_frames, input_frames - in_pos));
+            if (request_frames <= 0) return kProcessingFailure;
+
             WDL_ResampleSample *inbuf = nullptr;
-            const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
+            const int wanted = rs.ResamplePrepare(request_frames, channels, &inbuf);
             if (wanted <= 0 || !inbuf) return kProcessingFailure;
 
             const int avail = static_cast<int>(std::min<long long>(
@@ -175,29 +191,62 @@ long long rpk_wdl_resample_all(
             out_pos += got;
             if (avail < wanted) break;
         }
-
-        // REAPER's spectral consumer advances the analysis-domain ring once
-        // beyond WDL's last valid output sample. This is observable at EOF
-        // scheduler boundaries: 50,550 source frames at 76.8 kHz with a
-        // 256-source-frame fine division produce 191 spectral records, whereas
-        // WDL's valid-output stream alone reaches only 190. The following zero
-        // analysis frame supplies that EOF advance. The Rust strict scheduler
-        // still caps output at the oracle-derived expected record count, so
-        // cases that already reached their target never consume this tail.
-        if (out_pos < output_capacity_frames) {
-            const auto output_offset = static_cast<std::size_t>(out_pos) *
-                                       static_cast<std::size_t>(channels);
-            std::fill_n(
-                output + output_offset,
-                static_cast<std::size_t>(channels),
-                0.0);
-            ++out_pos;
-        }
-
         return out_pos;
     } catch (...) {
         // WDL allocates internally. Convert allocation and other C++ failures
         // into an ordinary negative backend status instead of unwinding over FFI.
+        return kCppException;
+    }
+}
+
+long long rpk_wdl_resample_count(
+    long long input_frames,
+    int channels,
+    double input_rate,
+    double output_rate) noexcept {
+    try {
+        if (!std::isfinite(input_rate) || !std::isfinite(output_rate) ||
+            input_rate <= 0.0 || output_rate <= 0.0 ||
+            !valid_interleaved_span(input_frames, channels)) {
+            return kInvalidArgument;
+        }
+
+        WDL_Resampler rs;
+        configure_reaper_spectral_resampler(rs, input_rate, output_rate);
+        const int block_frames = std::max(1, 2048 / channels);
+        std::vector<double> out(
+            static_cast<std::size_t>(block_frames) *
+            static_cast<std::size_t>(channels));
+
+        long long in_pos = 0;
+        long long out_pos = 0;
+        while (in_pos < input_frames) {
+            const int request_frames = static_cast<int>(std::min<long long>(
+                block_frames, input_frames - in_pos));
+            if (request_frames <= 0) return kProcessingFailure;
+
+            WDL_ResampleSample *inbuf = nullptr;
+            const int wanted = rs.ResamplePrepare(request_frames, channels, &inbuf);
+            if (wanted <= 0 || !inbuf) return kProcessingFailure;
+
+            const int avail = static_cast<int>(std::min<long long>(
+                wanted, input_frames - in_pos));
+            if (avail <= 0) return kProcessingFailure;
+            std::fill_n(
+                inbuf,
+                static_cast<std::size_t>(avail) * static_cast<std::size_t>(channels),
+                0.0);
+
+            const int got = rs.ResampleOut(
+                out.data(), avail, block_frames, channels);
+            if (got < 0 || got > block_frames) return kProcessingFailure;
+
+            in_pos += avail;
+            out_pos += got;
+            if (avail < wanted) break;
+        }
+        return out_pos;
+    } catch (...) {
         return kCppException;
     }
 }

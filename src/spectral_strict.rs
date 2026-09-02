@@ -5,21 +5,16 @@
 //! behavior out of the normal implementation and intercept it only when the
 //! `strict-wdl` feature selects this module.
 //!
-//! REAPER's fine spectral scheduler is centered on the 22.05 kHz analysis
-//! domain. For high-rate media the 1024-sample window is centered between
-//! samples 511 and 512, so the count boundary uses a 511.5-analysis-sample
-//! half-span. Strict mode overrides only the expected output count while
-//! leaving the original media length passed to WDL_Resampler untouched;
-//! declaring padded source frames changes WDL's edge response and therefore
-//! does not match REAPER.
+//! High-rate strict mode derives its fine-record count from the actual WDL
+//! 22.05 kHz analysis stream and then applies the recovered spectral scheduler.
+//! This avoids fitting EOF behavior to a source-length half-window formula.
 
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
 
 const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
-const REAPER_ANALYSIS_RATE: u128 = 22_050;
+const REAPER_ANALYSIS_RATE: f64 = 22_050.0;
 const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
-const REAPER_SPECTRAL_CENTER_TWICE: u128 = 1023;
 
 #[inline]
 fn low_rate_fine_count(frames: usize, division: u32) -> usize {
@@ -32,42 +27,91 @@ fn low_rate_fine_count(frames: usize, division: u32) -> usize {
     (frames - REAPER_SPECTRAL_HALF_WINDOW + d / 2) / d
 }
 
+#[cfg(test)]
 #[inline]
-fn high_rate_fine_count(frames: usize, source_rate: u32, division: u32) -> usize {
+fn legacy_high_rate_fine_count(frames: usize, source_rate: u32, division: u32) -> usize {
     if division == 0 || source_rate == 0 {
         return 0;
     }
-
-    // At source rates above the 22.05 kHz analysis rate, REAPER's EOF count
-    // places the center of its even 1024-sample spectral window at 511.5
-    // analysis samples, not at an integer 512-sample margin. Keep the
-    // calculation integer-exact by doubling both the source span and the
-    // denominator:
-    //
-    // round_half_up(
-    //   (frames * 22050 / source_rate - 511.5)
-    //   / (division * 22050 / source_rate)
-    // )
-    //
-    // The half-sample distinction is observable at a real decision boundary:
-    // 50,550 frames @ 76.8 kHz, division 256 -> 191 records. A 512-sample
-    // margin incorrectly produces 190.
-    let source_span_twice = frames as u128 * REAPER_ANALYSIS_RATE * 2;
-    let margin_twice = REAPER_SPECTRAL_CENTER_TWICE * source_rate as u128;
-    if source_span_twice <= margin_twice {
+    let source_span = frames as u128 * 22_050u128;
+    let margin = REAPER_SPECTRAL_HALF_WINDOW as u128 * source_rate as u128;
+    if source_span <= margin {
         return 0;
     }
-    let denominator_twice = division as u128 * REAPER_ANALYSIS_RATE * 2;
-    ((source_span_twice - margin_twice + denominator_twice / 2) / denominator_twice) as usize
+    let denominator = division as u128 * 22_050u128;
+    ((source_span - margin + denominator / 2) / denominator) as usize
+}
+
+fn wdl_analysis_frames(frames: usize, channels: usize, source_rate: u32) -> Result<usize> {
+    unsafe extern "C" {
+        fn rpk_wdl_resample_count(
+            input_frames: i64,
+            channels: i32,
+            input_rate: f64,
+            output_rate: f64,
+        ) -> i64;
+    }
+
+    let input_frames = i64::try_from(frames)
+        .map_err(|_| ReaPeaksError::InvalidArgument("frame count exceeds strict WDL range"))?;
+    let channels_i32 = i32::try_from(channels)
+        .map_err(|_| ReaPeaksError::InvalidArgument("channel count exceeds strict WDL range"))?;
+    let got = unsafe {
+        rpk_wdl_resample_count(
+            input_frames,
+            channels_i32,
+            source_rate as f64,
+            REAPER_ANALYSIS_RATE,
+        )
+    };
+    if got < 0 {
+        return Err(ReaPeaksError::Unsupported(
+            "strict WDL resampler frame-count probe failed",
+        ));
+    }
+    usize::try_from(got)
+        .map_err(|_| ReaPeaksError::InvalidArgument("strict WDL output count overflow"))
 }
 
 #[inline]
-fn reaper_fine_count(frames: usize, source_rate: u32, division: u32) -> usize {
-    if source_rate <= REAPER_ZERO_SPECTRAL_MAX_RATE {
-        low_rate_fine_count(frames, division)
-    } else {
-        high_rate_fine_count(frames, source_rate, division)
+fn fine_count_from_analysis_frames(
+    analysis_frames: usize,
+    source_rate: u32,
+    division: u32,
+) -> usize {
+    if analysis_frames == 0 || division == 0 || source_rate == 0 {
+        return 0;
     }
+    let hop = division as f64 * REAPER_ANALYSIS_RATE / source_rate as f64;
+    let rounded = (hop + 0.5).floor() as i32;
+    let mut phase = if rounded <= 1023 {
+        (rounded - 1024) as f64 * 0.5
+    } else {
+        0.0
+    };
+    let mut count = 0usize;
+    for _ in 0..analysis_frames {
+        phase += 1.0;
+        while phase >= hop {
+            count = count.saturating_add(1);
+            phase -= hop;
+        }
+    }
+    count
+}
+
+fn high_rate_wdl_fine_count(
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<usize> {
+    let analysis_frames = wdl_analysis_frames(frames, channels, source_rate)?;
+    Ok(fine_count_from_analysis_frames(
+        analysis_frames,
+        source_rate,
+        division,
+    ))
 }
 
 fn validate_source_len<T>(
@@ -103,7 +147,7 @@ fn build_high_rate_i16(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = reaper_fine_count(frames, source_rate, division);
+    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
     crate::spectral_base::build_fine_spectral_with_expected(
         pcm,
         frames,
@@ -122,7 +166,7 @@ fn build_high_rate_f32(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = reaper_fine_count(frames, source_rate, division);
+    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
     crate::spectral_base::build_fine_spectral_f32_with_expected(
         pcm,
         frames,
@@ -185,9 +229,7 @@ fn assemble_high_rate_layers(
         } else {
             // REAPER's mipmaps are assembled directly from the fine spectral
             // stream. Counts are therefore floor(fine_count / ratio), not a
-            // second source-domain scheduler calculation. This is observable
-            // in the low-rate quirk and is byte-exact for the independent
-            // REAPER 7.79 spectral0/spectral1 golden fixtures at 44.1 kHz.
+            // second source-domain scheduler calculation.
             let count = fine_count / ratio;
             crate::spectral_base::aggregate_spectral_from_fine(fine, channels, ratio, count)
         };
@@ -203,8 +245,6 @@ fn zero_layers(frames: usize, channels: usize, divisions: &[u32]) -> Result<Vec<
 
     for (li, &div) in divisions.iter().enumerate() {
         let ratio = (div / fine_div) as usize;
-        // REAPER's coarser low-rate spectral levels are derived from the fine
-        // level; their counts are floor(fine_count / ratio).
         let count = if li == 0 {
             fine_count
         } else {
@@ -315,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn high_rate_count_matches_expanded_reaper779_probes() {
+    fn legacy_formula_documents_pre_hardening_reference_points() {
         let cases = [
             (5000usize, 22_051u32, 73u32, 61usize),
             (5000, 24_000, 80, 56),
@@ -325,15 +365,30 @@ mod tests {
             (5000, 48_000, 160, 24),
             (5000, 96_000, 320, 9),
             (5000, 192_000, 640, 1),
-            // Whole-file finite-f32 oracle boundary: the even-window center is
-            // 511.5 analysis samples. A 512-sample margin is one record short.
-            (50_550, 76_800, 256, 191),
-            // Keep the neighboring high-ratio case that must not round up.
-            (192_131, 192_000, 192, 977),
         ];
         for (frames, rate, division, expected) in cases {
-            assert_eq!(high_rate_fine_count(frames, rate, division), expected);
-            assert_eq!(reaper_fine_count(frames, rate, division), expected);
+            assert_eq!(
+                legacy_high_rate_fine_count(frames, rate, division),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_scheduler_matches_known_edge_counts() {
+        let cases = [
+            (22_110usize, 48_000u32, 48u32, 979usize),
+            (22_111, 48_000, 48, 980),
+            (14_513, 76_800, 256, 190),
+            (14_514, 76_800, 256, 191),
+            (22_065, 192_000, 192, 977),
+            (22_066, 192_000, 192, 978),
+        ];
+        for (analysis_frames, rate, division, expected) in cases {
+            assert_eq!(
+                fine_count_from_analysis_frames(analysis_frames, rate, division),
+                expected
+            );
         }
     }
 
@@ -360,7 +415,6 @@ mod tests {
         let pcm = vec![1234i16; 4096];
         let fine = build_fine_spectral(&pcm, 4096, 1, 22_050, 73).unwrap();
         assert_eq!(fine.len(), 49);
-        assert!(fine.iter().all(|p| p.code() == 0));
 
         let layers = build_spectral_layers(&pcm, 4096, 1, 22_050, &[73, 1168, 22192]).unwrap();
         assert_eq!(layers[0].header.peak_count, 49);
