@@ -87,6 +87,28 @@ void wavePixelExtrema(
     }
 }
 
+float segmentDistancePx(vec2 pointPx, vec2 aPx, vec2 bPx) {
+    vec2 ab = bPx - aPx;
+    float denom = dot(ab, ab);
+    if (denom <= 1e-12) {
+        return length(pointPx - aPx);
+    }
+    float t = clamp(dot(pointPx - aPx, ab) / denom, 0.0, 1.0);
+    return length(pointPx - (aPx + t * ab));
+}
+
+float prefilteredCoverage(float distancePx, float halfWidthPx) {
+    // Compact one-pixel box prefilter in screen space. Because both the ideal
+    // stroke width and the filter radius are expressed in fragment pixels,
+    // steep waveform slopes do not expand the AA footprint.
+    const float filterRadiusPx = 0.5;
+    return clamp(
+        (halfWidthPx + filterRadiusPx - distancePx) / (2.0 * filterRadiusPx),
+        0.0,
+        1.0
+    );
+}
+
 bool resident(vec2 range, float x) {""",
 )
 _shader = _replace_required(
@@ -185,14 +207,43 @@ _shader = _replace_required(
             amplitudePerPixel * 1.75,
             abs(amplitude - lineSample)
         );""",
-    """        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);
-        float lineDistance = amplitude - lineSample;
-        float lineAa = max(fwidth(lineDistance), amplitudePerPixel);
-        float line = 1.0 - smoothstep(
-            lineAa * 0.35,
-            lineAa * 1.15,
-            abs(lineDistance)
-        );""",
+    """        float amplitudePerPixel = max(abs(dFdy(amplitude)), 1e-6);
+        float samplesPerPixel = max(abs(dFdx(position)), 1e-6);
+        float pixelsPerFrame = 1.0 / samplesPerPixel;
+        vec2 aPx = vec2(
+            (float(left) - position) / samplesPerPixel,
+            (leftSample - amplitude) / amplitudePerPixel
+        );
+        vec2 bPx = vec2(
+            (float(right) - position) / samplesPerPixel,
+            (rightSample - amplitude) / amplitudePerPixel
+        );
+        float distancePx = segmentDistancePx(vec2(0.0), aPx, bPx);
+        float line = prefilteredCoverage(distancePx, 0.55);""",
+)
+_shader = _replace_required(
+    _shader,
+    """        if (u_pcmDrawPoints != 0) {
+            float nearestPosition = floor(position + 0.5);
+            int nearest = clamp(int(nearestPosition), 0, u_pcmCount - 1);
+            float pointSample = finitePcm(texelFetch(u_pcm, ivec2(channel, nearest), 0).r);
+            float dxPixels = abs(position - nearestPosition) * u_pcmPixelsPerFrame;
+            float dyPixels = abs(amplitude - pointSample) / amplitudePerPixel;
+            float dot = 1.0 - smoothstep(2.0, 3.0, length(vec2(dxPixels, dyPixels)));
+            alpha = max(alpha, dot);
+        }""",
+    """        if (u_pcmDrawPoints != 0) {
+            float nearestPosition = floor(position + 0.5);
+            int nearest = clamp(int(nearestPosition), 0, u_pcmCount - 1);
+            float pointSample = finitePcm(texelFetch(u_pcm, ivec2(channel, nearest), 0).r);
+            vec2 pointDeltaPx = vec2(
+                (nearestPosition - position) / samplesPerPixel,
+                (pointSample - amplitude) / amplitudePerPixel
+            );
+            float pointFade = smoothstep(8.0, 11.0, pixelsPerFrame);
+            float dot = prefilteredCoverage(length(pointDeltaPx), 1.65) * pointFade;
+            alpha = max(alpha, dot);
+        }""",
 )
 _shader = _replace_required(
     _shader,

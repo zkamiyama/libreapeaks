@@ -28,9 +28,19 @@ class PySideGuiSourceTests(unittest.TestCase):
         source = read_source("pyside6_reaper_gl_view.py")
         self.assertIn("float sampleG(", source)
         self.assertIn("return mix(lo, hi, bt);", source)
-        self.assertIn("fwidth(lineDistance)", source)
         self.assertIn("fwidth(lower)", source)
         self.assertIn("fwidth(upper)", source)
+
+    def test_glsl_source_pcm_uses_screen_space_segment_prefilter(self) -> None:
+        source = read_source("pyside6_reaper_gl_view.py")
+        self.assertIn("float segmentDistancePx(", source)
+        self.assertIn("float prefilteredCoverage(", source)
+        self.assertIn("abs(dFdx(position))", source)
+        self.assertIn("abs(dFdy(amplitude))", source)
+        self.assertIn("segmentDistancePx(vec2(0.0), aPx, bPx)", source)
+        self.assertIn("prefilteredCoverage(distancePx, 0.55)", source)
+        self.assertIn("smoothstep(8.0, 11.0, pixelsPerFrame)", source)
+        self.assertNotIn("fwidth(lineDistance)", source)
 
     def test_glsl_waveform_uses_pixel_extrema_and_stable_lod(self) -> None:
         source = read_source("pyside6_reaper_gl_view.py")
