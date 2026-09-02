@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - compat-resampler-final-feed-probe
     paths:
       - '.github/workflows/reaper-f32-finite-whole-file.yml'
       - 'src/wave.rs'
