@@ -1,6 +1,6 @@
 {
   "oracle": "REAPER 7.79 x86_64 Linux",
-  "updated": "2026-09-01",
+  "updated": "2026-09-02",
   "oracle_process_policy": "one fresh REAPER process per media file",
   "primary_compatibility_backend": "strict-wdl",
   "native_generation_modes": {
@@ -102,6 +102,11 @@
     "leading_edge": "resize symmetric Blackman-Harris window to available real samples, then zero-pad FFT input",
     "aggregation": "average already-quantized base codes; higher mipmaps average complete groups of prior stored frames",
     "portable_fft_scale": "2x conventional DFT output to match the recovered WDL real-FFT scale",
+    "float32_generation": {
+      "implemented": true,
+      "byte_exact_oracle_proven": false,
+      "non_finite_policy": "NaN and +/-Inf are sanitized to zero for -g analysis; finite subnormals are accepted"
+    },
     "property_stress": [
       "exhaustive 12-bit packing",
       "arbitrary 192-byte frame decode/encode bijection",
@@ -233,13 +238,16 @@
     "c_reaper_native_modes": ["rpk_generate_pcm16_reaper", "rpk_generate_f32_reaper"],
     "native_mode_names": ["waveform", "spectral", "spectrogram"],
     "pcm16_native_spectrogram_supported": true,
-    "f32_native_spectrogram_supported": false,
+    "f32_native_spectrogram_supported": true,
+    "f32_native_spectrogram_byte_exact_oracle_proven": false,
     "rust_complete_mode3": [
       "generate_pcm16_mode3",
       "generate_f32_mode3",
-      "generate_pcm16_mode3_with_spectrogram"
+      "generate_pcm16_mode3_with_spectrogram",
+      "generate_f32_mode3_with_spectrogram"
     ],
     "rust_pcm16_spectrogram_mode3": "generate_pcm16_mode3_with_spectrogram",
+    "rust_f32_spectrogram_mode3": "generate_f32_mode3_with_spectrogram",
     "rust_legacy_wave_spectral_s": ["generate_pcm16", "generate_f32"],
     "python_legacy_wave_spectral_s": ["generate_pcm16", "generate_f32"],
     "c_legacy_wave_spectral_s": ["rpk_generate_pcm16", "rpk_generate_f32"],
