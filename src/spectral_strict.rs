@@ -366,7 +366,10 @@ mod tests {
             (5000, 192_000, 640, 1),
         ];
         for (frames, rate, division, expected) in cases {
-            assert_eq!(legacy_high_rate_fine_count(frames, rate, division), expected);
+            assert_eq!(
+                legacy_high_rate_fine_count(frames, rate, division),
+                expected
+            );
         }
     }
 
