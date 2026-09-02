@@ -61,10 +61,12 @@ pub fn generate_pcm16_reaper(
 /// Generate one of the REAPER-native float32 peak-cache modes in a single call.
 ///
 /// Waveform and spectral modes retain their established paths. Spectrogram mode
-/// now emits waveform + `-'s'` + `-'g'` + `-'r'` for float media as well. The
-/// float `-'g'` path follows the recovered PCM16 scheduler/window/quantizer but
-/// remains outside the byte-identical REAPER compatibility claim until a
-/// dedicated float oracle is added.
+/// emits waveform + `-'s'` + `-'g'` + `-'r'` for float media. With RPKL output,
+/// the `-'g'` layers are byte-exact against the pinned REAPER 7.79 Linux x86_64
+/// executable for the permanent 128-case adversarial oracle: decoded 128-bin
+/// frames and packed payload bytes both match exactly. The claim remains scoped
+/// to the tested `-'g'` path rather than arbitrary float exceptional values or
+/// every RPKL waveform rounding edge.
 pub fn generate_f32_reaper(
     pcm: &[f32],
     options: &GenerateOptions,
