@@ -82,7 +82,11 @@ pub unsafe extern "C" fn rpk_matches_source_stamp(
     let (Some(h), Some(stamp)) = (h.as_ref(), stamp.as_ref()) else {
         return -1;
     };
-    i32::from(h.file.matches_source_stamp((*stamp).into()))
+    if h.file.matches_source_stamp((*stamp).into()) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Stat a source path and compare it with an open cache. Returns 1/0 or <0 on error.
@@ -101,7 +105,8 @@ pub unsafe extern "C" fn rpk_matches_source(
         return -2;
     };
     match h.file.matches_source_path(path) {
-        Ok(matches) => i32::from(matches),
+        Ok(true) => 1,
+        Ok(false) => 0,
         Err(_) => -3,
     }
 }
