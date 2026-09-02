@@ -8,7 +8,9 @@ on:
       - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
       - 'tools/reaper_oracle/cache_read_matrix.py'
       - 'tools/reaper_oracle/cache_read_matrix_fixed.py'
+      - 'tools/reaper_oracle/cache_read_rpkx_gate.py'
       - 'tools/reaper_oracle/cache_read_probe.lua'
+      - 'tools/reaper_oracle/cache_rebuild_rpkx.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   pull_request:
@@ -18,7 +20,9 @@ on:
       - 'tools/reaper_oracle/cache_extension_oracle_fixed.py'
       - 'tools/reaper_oracle/cache_read_matrix.py'
       - 'tools/reaper_oracle/cache_read_matrix_fixed.py'
+      - 'tools/reaper_oracle/cache_read_rpkx_gate.py'
       - 'tools/reaper_oracle/cache_read_probe.lua'
+      - 'tools/reaper_oracle/cache_rebuild_rpkx.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   workflow_dispatch:
@@ -53,7 +57,14 @@ jobs:
           test -n "$REAPER_BIN"
           echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
       - name: Validate oracle syntax
-        run: python3 -m py_compile tools/reaper_oracle/cache_extension_oracle.py tools/reaper_oracle/cache_extension_oracle_fixed.py tools/reaper_oracle/cache_read_matrix.py tools/reaper_oracle/cache_read_matrix_fixed.py
+        run: >-
+          python3 -m py_compile
+          tools/reaper_oracle/cache_extension_oracle.py
+          tools/reaper_oracle/cache_extension_oracle_fixed.py
+          tools/reaper_oracle/cache_read_matrix.py
+          tools/reaper_oracle/cache_read_matrix_fixed.py
+          tools/reaper_oracle/cache_read_rpkx_gate.py
+          tools/reaper_oracle/cache_rebuild_rpkx.py
       - name: Start Xvfb
         shell: bash
         run: |
@@ -67,12 +78,19 @@ jobs:
         env:
           DISPLAY: ':96'
         run: python3 tools/reaper_oracle/cache_read_matrix_fixed.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 20
+      - name: Require EOF-appended caches to read exactly like control
+        run: python3 tools/reaper_oracle/cache_read_rpkx_gate.py /tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json
+      - name: Force REAPER rebuild of plain and RPKX caches
+        env:
+          DISPLAY: ':96'
+        run: python3 tools/reaper_oracle/cache_rebuild_rpkx.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 30
       - name: Publish evidence summary
         if: always()
         shell: bash
         run: |
           report=/tmp/reaper-cache-extension/oracle/results/cache-extension-oracle.json
           reads=/tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json
+          rebuild=/tmp/reaper-cache-extension/oracle/results/cache-rebuild-rpkx.json
           if [ -f "$report" ]; then
             echo '## REAPER cache extension oracle' >> "$GITHUB_STEP_SUMMARY"
             python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -98,6 +116,20 @@ jobs:
           print('|---|---:|---:|---:|')
           for c in d['cases']:
               print(f"| {c['name']} | {c['read_ok']} | {c['read_signature_equals_control']} | {c['cache_unchanged']} |")
+          PY
+          fi
+          if [ -f "$rebuild" ]; then
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Forced RPKX rebuild' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-cache-extension/oracle/results/cache-rebuild-rpkx.json'
+          d=json.load(open(p))
+          print(f"plain BEGIN: {d['plain']['begin']}")
+          print(f"RPKX BEGIN: {d['rpkx']['begin']}")
+          print(f"rebuilt outputs byte-identical: {d['rebuilt_outputs_byte_identical']}")
+          print(f"RPKX extension present after rebuild: {d['rpkx_extension_present_after_rebuild']}")
+          print(f"RPKX suffix preserved after rebuild: {d['rpkx_suffix_preserved_after_rebuild']}")
           PY
           fi
       - name: Stop Xvfb
