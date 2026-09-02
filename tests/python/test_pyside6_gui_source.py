@@ -66,13 +66,18 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertNotIn("mode_combo", source)
         self.assertIn("waveform, spectral peaks, spectrogram, and loudness", source)
 
-    def test_daw_player_has_empty_drop_open_launcher(self) -> None:
+    def test_daw_player_drop_open_prepares_inline(self) -> None:
         source = read_source("pyside6_daw_player.py")
         self.assertIn("class DropLaunchWindow(QMainWindow):", source)
         self.assertIn("self.setAcceptDrops(True)", source)
         self.assertIn("def dragEnterEvent", source)
         self.assertIn("def dropEvent", source)
-        self.assertIn("QProcess.startDetached", source)
+        self.assertIn("QProgressBar", source)
+        self.assertIn("CacheWorker(audio, _default_cache_options())", source)
+        self.assertIn("worker.progress.connect(self._on_progress)", source)
+        self.assertIn("self._begin_prepare(path)", source)
+        self.assertIn("self.status.setText(\"Opening player…\")", source)
+        self.assertNotIn("QProcess.startDetached", source)
         self.assertIn("if not args:", source)
         self.assertIn("Drop an audio file here", source)
 
