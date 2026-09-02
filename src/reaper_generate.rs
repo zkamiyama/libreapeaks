@@ -76,10 +76,8 @@ pub fn generate_f32_reaper(
         ReaperPeakMode::Spectral => {
             generate_f32_mode3(pcm, &with_spectral(options, true), large_range)
         }
-        ReaperPeakMode::Spectrogram => generate_f32_mode3_with_spectrogram(
-            pcm,
-            &with_spectral(options, true),
-            large_range,
-        ),
+        ReaperPeakMode::Spectrogram => {
+            generate_f32_mode3_with_spectrogram(pcm, &with_spectral(options, true), large_range)
+        }
     }
 }
