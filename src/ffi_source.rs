@@ -91,10 +91,7 @@ pub unsafe extern "C" fn rpk_matches_source_stamp(
 
 /// Stat a source path and compare it with an open cache. Returns 1/0 or <0 on error.
 #[no_mangle]
-pub unsafe extern "C" fn rpk_matches_source(
-    h: *const RpkHandle,
-    path: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn rpk_matches_source(h: *const RpkHandle, path: *const c_char) -> i32 {
     let Some(h) = h.as_ref() else {
         return -1;
     };
