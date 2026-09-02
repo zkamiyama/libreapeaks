@@ -201,7 +201,10 @@ fn reaper779_f32_rpkl_spectrogram_is_byte_identical() {
         );
     }
 
-    assert_eq!(oracle, generated, "whole RPKL file differs after layer checks");
+    assert_eq!(
+        oracle, generated,
+        "whole RPKL file differs after layer checks"
+    );
     println!(
         "F32_SPECTROGRAM_BYTE_IDENTICAL sample_rate={} channels={} source_frames={} bytes={} g_frames={:?}",
         oracle_parsed.header.sample_rate,
