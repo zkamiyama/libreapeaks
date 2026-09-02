@@ -22,6 +22,15 @@ reproduce REAPER 7.79 `.reapeaks` files **byte-for-byte**, including:
 - the tested REAPER 7.79 EOF, scheduler, window-placement, and coarse-mipmap
   behavior.
 
+For the validated IEEE float32/RPKL spectrogram corpus, the Rust `strict-wdl`
+float generator reproduces REAPER 7.79 `-'g'` layers **byte-for-byte** in
+**128 / 128** adversarial cases. The live gate compares both every decoded
+128-bin `SpectrogramFrame` and the complete packed `-'g'` payload bytes.
+
+This float32 claim is intentionally scoped to `-'g'`. It is not a whole-file
+claim for every possible RPKL waveform rounding edge, nor a claim about REAPER's
+exact NaN/Inf/subnormal policy. Those are separate compatibility surfaces.
+
 `generate_pcm16_mode3_with_spectrogram` is intentionally separate from
 `generate_pcm16_mode3`. The established non-`g` mode-3 byte stream therefore
 remains unchanged unless the caller explicitly chooses spectrogram generation.
@@ -61,9 +70,9 @@ Python: generate_pcm16_reaper / generate_f32_reaper
 C:      rpk_generate_pcm16_reaper / rpk_generate_f32_reaper
 ```
 
-PCM16 supports all three modes. Float32 supports waveform and spectral modes;
-float32 spectrogram mode intentionally returns unsupported until exact float32
-`-'g'` generation is implemented.
+PCM16 and float32 both support all three modes. With `large_range=true`, the
+float32 path writes RPKL. Its `-'g'` payload is covered by the 128-case
+byte-exact live oracle described below.
 
 The older `generate_pcm16` / `generate_f32` and matching Python/C calls remain
 available for compatibility. Their optional `spectral` switch means waveform +
@@ -104,7 +113,7 @@ Coverage includes 22.05/32/44.1/48/88.2/96 kHz, `peakcachegenrs`
 window ±1-sample boundaries, steps, impulses, and deterministic multichannel
 noise.
 
-### Spectrogram mode-3 stress matrix
+### PCM16 spectrogram mode-3 stress matrix
 
 `reaper-spectrogram-stress-oracle` pins the same REAPER 7.79 Linux x86_64 build,
 uses one fresh REAPER process per source, and currently generates **122**
@@ -143,6 +152,39 @@ The stress corpus spans:
 The portable/default FFT gate is a `-'g'` compatibility check rather than a
 claim that every auxiliary floating-point path is identical to strict-WDL.
 
+### Float32/RPKL `-'g'` stress matrix
+
+`reaper-spectrogram-f32-byte-identical` uses the same pinned executable and a
+fresh REAPER process for every IEEE float32 WAVE source. REAPER writes RPKL
+caches, and the permanent strict-WDL test compares the float-generated `-'g'`
+layers independently of unrelated waveform/loudness compatibility surfaces.
+
+For every case it checks:
+
+1. `-'g'` layer count and mirrored divisions;
+2. every decoded 128-bin channel/time frame;
+3. every `-'g'` header word count;
+4. every packed `-'g'` payload byte.
+
+Result:
+
+```text
+strict-wdl float32/RPKL -'g': 128 / 128 cases exact
+packed-payload failures:       0
+```
+
+The 128-case corpus spans 8,000 through 192,000 Hz, 1 through 8 channels,
+`peakcachegenrs` 100/150/300/500/1000 plus many neighboring values, the
+76,799/76,800/76,801 placement branch, fine divisions around 255/256/257,
+scheduler boundaries, long multichannel inputs, silence/DC, values above
+±1.0, very small finite values, exact-bin and off-bin tones, chirps, ramps,
+steps, impulses, deterministic noise, sparse lanes, and deterministic randomized
+cases.
+
+The corpus deliberately uses finite float audio values for the compatibility
+claim. NaN/Inf exact REAPER behavior remains outside scope; the libreapeaks
+safety policy for such values is described below.
+
 ## `-'g'` format and API coverage
 
 The Rust parser materializes `-'g'` layers as `SpectrogramFrame` records and the
@@ -180,11 +222,14 @@ SPECTROGRAM_BINS
 SPECTROGRAM_BYTES_PER_CHANNEL_FRAME
 SPECTROGRAM_WORDS_PER_CHANNEL_FRAME
 generate_pcm16_mode3_with_spectrogram
+generate_f32_mode3_with_spectrogram
 generate_pcm16_reaper(..., ReaperPeakMode::Spectrogram)
+generate_f32_reaper(..., ReaperPeakMode::Spectrogram)
 ```
 
-Generation currently targets PCM16 RPKN for exact `-'g'`. The Python and C
-REAPER-mode APIs expose this PCM16 spectrogram path directly.
+Exact `-'g'` generation is live-oracle validated for PCM16/RPKN and for the
+128-case finite float32/RPKL matrix. Python and C expose the same REAPER-mode
+spectrogram paths.
 
 ## Spectrogram implementation stress beyond the live oracle
 
@@ -263,6 +308,11 @@ RPKN decoded PCM24: 50,000 / 50,000 buckets exact
 RPKL float:          43,857 / 43,857 values exact
 ```
 
+The float32 `-'g'` oracle is intentionally independent of the RPKL waveform
+quantizer. A diagnostic whole-file float matrix found a finite half-tie waveform
+rounding edge that does not affect `-'g'`; whole-file RPKL identity for every
+finite float bit pattern is therefore not implied by the 128-case `-'g'` claim.
+
 ## Loudness validation
 
 The `-'r'` writer reproduces the tested REAPER 7.79 mode-3 behavior using a
@@ -332,6 +382,7 @@ Lower-level Rust writers remain available:
 generate_pcm16_mode3
 generate_f32_mode3
 generate_pcm16_mode3_with_spectrogram
+generate_f32_mode3_with_spectrogram
 ```
 
 Legacy waveform + optional `-'s'` writers also remain available in all three
@@ -351,14 +402,18 @@ Outside the current compatibility claim:
 - REAPER versions other than 7.79 unless separately tested;
 - Windows/macOS or non-x86_64 behavior without a dedicated oracle;
 - every lossy codec and decoder build;
-- f32/RPKL `-'g'` generation;
 - legacy `-'l'` loudness payload parsing/generation;
 - RPKM compact waveform materialization through the current pyramid;
-- exact REAPER NaN/Inf/subnormal policy for arbitrary float media.
+- exact REAPER NaN/Inf/subnormal policy for arbitrary float media;
+- whole-file RPKL byte identity for arbitrary finite float waveform rounding
+  edges beyond the validated waveform corpora.
 
 Malformed-input and overflow tests deliberately go beyond REAPER compatibility:
 the Rust parser/generator, C ABI, and application helpers are expected to fail
-closed rather than panic or cross unsafe boundaries.
+closed rather than panic or cross unsafe boundaries. For float32 `-'g'`
+generation specifically, non-finite source samples are sanitized to zero so
+hostile input cannot poison FFT output or panic generation; that safety policy
+is not presented as REAPER's exact exceptional-value behavior.
 
 ## Evidence sources
 
@@ -367,6 +422,7 @@ Key permanent evidence is in:
 - `.github/workflows/reaper-individual-layer-oracle.yml`
 - `.github/workflows/reaper-spectrogram-byte-identical.yml`
 - `.github/workflows/reaper-spectrogram-stress-oracle.yml`
+- `.github/workflows/reaper-spectrogram-f32-byte-identical.yml`
 - `.github/workflows/reaper-ffmpeg-byte-identical.yml`
 - `.github/workflows/reaper-adversarial-oracle.yml`
 - `tests/reaper_peak_modes.rs`
@@ -374,6 +430,9 @@ Key permanent evidence is in:
 - `tests/python/test_reaper_generation_modes.py`
 - `tests/reaper_spectrogram_exact.rs`
 - `tests/reaper_spectrogram_g_only.rs`
+- `tests/reaper_spectrogram_f32_g_only.rs`
+- `tools/reaper_oracle/spectrogram_f32_stress_cases.py`
+- `tools/reaper_oracle/spectrogram_f32_g_stress_run.py`
 - `tests/spectrogram_stress.rs`
 - `tests/spectrogram_structure_stress.rs`
 - `tests/spectrogram_toggle_stress.rs`
