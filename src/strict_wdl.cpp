@@ -144,8 +144,17 @@ long long rpk_wdl_resample_all(
         const int block_frames = std::max(1, 2048 / channels);
 
         while (in_pos < input_frames && out_pos < output_capacity_frames) {
+            // In feed mode the argument to ResamplePrepare() is the amount of
+            // source input being offered.  REAPER's EOF behavior is matched by
+            // shrinking this request to the actual remaining source frames on
+            // the final block, rather than requesting a full block and invoking
+            // WDL's short-input flush/valid-output adjustment path.
+            const int request_frames = static_cast<int>(std::min<long long>(
+                block_frames, input_frames - in_pos));
+            if (request_frames <= 0) return kProcessingFailure;
+
             WDL_ResampleSample *inbuf = nullptr;
-            const int wanted = rs.ResamplePrepare(block_frames, channels, &inbuf);
+            const int wanted = rs.ResamplePrepare(request_frames, channels, &inbuf);
             if (wanted <= 0 || !inbuf) return kProcessingFailure;
 
             const int avail = static_cast<int>(std::min<long long>(
