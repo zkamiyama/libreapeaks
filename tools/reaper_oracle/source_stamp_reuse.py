@@ -83,6 +83,31 @@ def parse_header(data: bytes) -> dict[str, object]:
     }
 
 
+def native_mode(header: dict[str, object]) -> str:
+    raw_layers = header.get("layers")
+    if not isinstance(raw_layers, list):
+        raise RuntimeError("missing .reapeaks layer table")
+    tokens = [int(layer[0]) for layer in raw_layers]
+    positives = [token for token in tokens if token > 0]
+    if not positives or tokens[: len(positives)] != positives:
+        raise RuntimeError(f"unexpected waveform-layer ordering: {tokens}")
+    count = len(positives)
+    shapes = {
+        "waveform": positives,
+        "spectral": positives + [-115] * count + [-114] * max(0, count - 1),
+        "spectrogram": (
+            positives
+            + [-115] * count
+            + [-103] * max(0, count - 1)
+            + [-114] * max(0, count - 1)
+        ),
+    }
+    for mode, expected in shapes.items():
+        if tokens == expected:
+            return mode
+    raise RuntimeError(f"oracle produced an unknown native layer shape: {tokens}")
+
+
 def write_config(path: Path) -> None:
     path.write_text(
         "[REAPER]\n"
@@ -204,10 +229,7 @@ def main() -> int:
     peak_path = oracle.peak_path.resolve()
     oracle_bytes = peak_path.read_bytes()
     oracle_header = parse_header(oracle_bytes)
-    if any(int(layer[0]) <= 0 for layer in oracle_header["layers"]):
-        raise RuntimeError(
-            "source-stamp reuse oracle requires a waveform-only showpeaks configuration"
-        )
+    mode = native_mode(oracle_header)
 
     source_stat = source.stat()
     expected_stamp = (
@@ -234,6 +256,7 @@ def main() -> int:
             str(source),
             str(raw),
             str(peak_path),
+            mode,
         ],
         cwd=HERE.parents[1],
         check=True,
@@ -242,6 +265,10 @@ def main() -> int:
     libreapeaks_bytes = peak_path.read_bytes()
     (results / "libreapeaks.reapeaks").write_bytes(libreapeaks_bytes)
     libreapeaks_header = parse_header(libreapeaks_bytes)
+    if native_mode(libreapeaks_header) != mode:
+        raise RuntimeError(
+            f"libreapeaks native mode differs from REAPER: lib={native_mode(libreapeaks_header)}, oracle={mode}"
+        )
     libreapeaks_stamp = (
         int(libreapeaks_header["source_mtime_low32"]),
         int(libreapeaks_header["source_size_low32"]),
@@ -338,6 +365,7 @@ def main() -> int:
         "reaper": str(args.reaper.resolve()),
         "source": str(source),
         "oracle_peak": str(peak_path),
+        "native_mode": mode,
         "oracle_stamp": {
             "mtime_low32": oracle_stamp[0],
             "size_low32": oracle_stamp[1],
