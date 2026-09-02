@@ -32,6 +32,16 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn("fwidth(lower)", source)
         self.assertIn("fwidth(upper)", source)
 
+    def test_glsl_waveform_uses_pixel_extrema_and_stable_lod(self) -> None:
+        source = read_source("pyside6_reaper_gl_view.py")
+        self.assertIn("void wavePixelExtrema(", source)
+        self.assertIn("dFdx(recordPosition)", source)
+        self.assertIn("mx = max(mx,", source)
+        self.assertIn("mn = min(mn,", source)
+        self.assertIn("coarsest cache level that is no coarser than one pixel", source)
+        self.assertIn("float(item[1][0])) <= desired", source)
+        self.assertIn("return max(eligible", source)
+
     def test_shader_patch_targets_still_exist(self) -> None:
         base = read_source("pyside6_gl_view.py")
         self.assertIn("if (u_hasG != 0 && u_gCount > 0)", base)
