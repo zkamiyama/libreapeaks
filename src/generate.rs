@@ -224,9 +224,11 @@ pub fn generate_f32_mode3(
 /// Generate float32 REAPER-shaped mode-3 output including `-'g'` spectrogram layers.
 ///
 /// The waveform encoding is RPKL when `large_range=true` and RPKN otherwise.
-/// The `-'g'` DSP path mirrors the recovered PCM16 scheduler/window/quantizer,
-/// but exact byte identity for arbitrary float media is not claimed until a
-/// dedicated live-REAPER float oracle is added. Non-finite source samples are
+/// Against the pinned REAPER 7.79 Linux x86_64 oracle, the float32/RPKL `-'g'`
+/// layer path is byte-exact for the permanent 128-case adversarial matrix:
+/// decoded 128-bin frames and packed payload bytes both match exactly. This is
+/// a `-'g'` compatibility claim, not a claim about every RPKL waveform rounding
+/// edge or arbitrary NaN/Inf/subnormal behavior. Non-finite source samples are
 /// sanitized to zero for spectrogram analysis so hostile float media cannot
 /// poison FFT output or panic generation.
 pub fn generate_f32_mode3_with_spectrogram(
