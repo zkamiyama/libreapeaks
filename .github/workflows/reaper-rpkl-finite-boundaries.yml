@@ -1,0 +1,80 @@
+name: reaper-rpkl-finite-boundaries
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-rpkl-finite-boundaries.yml'
+      - 'src/wave.rs'
+      - 'tests/reaper_rpkl_finite_boundaries.rs'
+      - 'tools/reaper_oracle/rpkl_finite_boundary_oracle.py'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-rpkl-finite-boundaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Formatting gate
+        run: cargo fmt --all -- --check
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/rpkl-finite-boundaries
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/rpkl-finite-boundaries/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Recover every finite RPKL decision boundary
+        run: python3 tools/reaper_oracle/rpkl_finite_boundary_oracle.py /tmp/rpkl-finite-boundaries "$REAPER_BIN"
+      - name: Compare Rust quantizer with every recovered boundary
+        env:
+          REAPEAKS_RPKL_POS_BOUNDARIES: /tmp/rpkl-finite-boundaries/results/positive_boundaries.u32le
+          REAPEAKS_RPKL_NEG_BOUNDARIES: /tmp/rpkl-finite-boundaries/results/negative_boundaries.u32le
+        run: |
+          cargo test --release --test reaper_rpkl_finite_boundaries \
+            reaper779_rpkl_quantizer_matches_every_finite_f32_decision_boundary \
+            -- --ignored --exact --nocapture
+      - name: Publish oracle summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/rpkl-finite-boundaries/results/summary.txt ]; then
+            cat /tmp/rpkl-finite-boundaries/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f /tmp/rpkl-finite-boundaries/results/report.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/rpkl-finite-boundaries/results/report.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-rpkl-finite-boundaries-${{ github.sha }}
+          path: /tmp/rpkl-finite-boundaries/results
+          if-no-files-found: warn
+          retention-days: 14
