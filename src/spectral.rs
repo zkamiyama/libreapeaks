@@ -268,7 +268,7 @@ fn analyze_channel(
     // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
     // emits a zero spectral peak for those frames instead of a Nyquist/zero-
     // density placeholder.
-    if !(total > 0.0) {
+    if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return (SpectralPeak::default(), next);
     }
 
