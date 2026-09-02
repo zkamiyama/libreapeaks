@@ -24,6 +24,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -138,6 +139,7 @@ def run_reuse_probe(
     config = cfg_dir / "reaper.ini"
     write_config(config)
     status_path = cfg_dir / "result.txt"
+    saved_status = results / f"{label}.status.txt"
     log_path = results / f"{label}.reaper.log"
     before = peak_path.read_bytes()
     before_stat = peak_path.stat()
@@ -147,24 +149,33 @@ def run_reuse_probe(
         REAPEAKS_MEDIA=str(source.resolve()),
         REAPEAKS_RESULT=str(status_path),
     )
-    with log_path.open("wb") as log:
-        completed = subprocess.run(
-            [
-                str(reaper),
-                "-newinst",
-                "-cfgfile",
-                str(config),
-                "-new",
-                "-nosplash",
-                str(HERE / "check_peak_reuse.lua"),
-            ],
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=120,
-        )
+    try:
+        with log_path.open("wb") as log:
+            completed = subprocess.run(
+                [
+                    str(reaper),
+                    "-newinst",
+                    "-cfgfile",
+                    str(config),
+                    "-new",
+                    "-nosplash",
+                    str(HERE / "check_peak_reuse.lua"),
+                ],
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=120,
+            )
+    except subprocess.TimeoutExpired as exc:
+        status = status_path.read_text(encoding="utf-8") if status_path.exists() else ""
+        saved_status.write_text(status, encoding="utf-8")
+        raise RuntimeError(
+            f"{label}: REAPER probe timed out; status={status!r}; log={log_path}"
+        ) from exc
+
     status = status_path.read_text(encoding="utf-8") if status_path.exists() else ""
+    saved_status.write_text(status, encoding="utf-8")
     if completed.returncode != 0 or "BEGIN=" not in status:
         raise RuntimeError(
             f"{label}: REAPER probe failed rc={completed.returncode}: {status!r}; log={log_path}"
@@ -245,6 +256,23 @@ def main() -> int:
             f"REAPER header stamp differs from stat(): oracle={oracle_stamp}, stat={expected_stamp}"
         )
 
+    cases: list[dict[str, object]] = []
+
+    # First prove that this fresh-process probe itself reports REAPER's own cache
+    # as reusable. Otherwise a libreapeaks result would be uninterpretable.
+    peak_path.write_bytes(oracle_bytes)
+    case = run_reuse_probe(
+        reaper=args.reaper,
+        source=source,
+        peak_path=peak_path,
+        label="oracle-cache-baseline",
+        display=args.display,
+        results=results,
+    )
+    if not case["reuse"] or not case["peak_unchanged"]:
+        raise RuntimeError(f"REAPER did not reuse its own oracle cache: {case}")
+    cases.append(case)
+
     subprocess.run(
         [
             "cargo",
@@ -263,7 +291,7 @@ def main() -> int:
         timeout=180,
     )
     libreapeaks_bytes = peak_path.read_bytes()
-    (results / "libreapeaks.reapeaks").write_bytes(libreapeaks_bytes)
+    shutil.copy2(peak_path, results / "libreapeaks.reapeaks")
     libreapeaks_header = parse_header(libreapeaks_bytes)
     if native_mode(libreapeaks_header) != mode:
         raise RuntimeError(
@@ -277,8 +305,6 @@ def main() -> int:
         raise RuntimeError(
             f"libreapeaks stamp differs from REAPER: lib={libreapeaks_stamp}, oracle={oracle_stamp}"
         )
-
-    cases: list[dict[str, object]] = []
 
     # The central interoperability gate: REAPER must accept the cache generated
     # by libreapeaks without starting a peak rebuild.
