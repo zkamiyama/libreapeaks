@@ -24,6 +24,17 @@ It documents the source `mtime`/size fields stored in `.reapeaks`, the
 exact/conservative, and the live REAPER gate that requires a libreapeaks cache
 to be accepted without starting `PCM_Source_BuildPeaks` work.
 
+## I want custom metadata inside the same `.reapeaks` file
+
+Read [`RPKX_EOF_EXTENSIONS.md`](RPKX_EOF_EXTENSIONS.md).
+
+It records the live REAPER evidence for an EOF-appended `RPKX` extension:
+REAPER 7.79 reuses and byte-preserves pure EOF tails, corrected
+`PCM_Source_GetPeaks` reads are identical to the plain cache, and a real REAPER
+rebuild discards the extension. It also documents the parser policy change that
+accepts bytes after the standard layer region while keeping standard-region
+truncation and unknown in-table tokens strict.
+
 ## I want the finite-f32 / RPKL proof
 
 Read [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md).
