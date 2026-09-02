@@ -3,7 +3,8 @@
 The wrapper is the public demo surface. It normalizes two binding/runtime
 quirks before the renderer is used: one Mesa-reserved GLSL identifier and
 PySide6 6.11's scalar-uniform overload resolution by resolving names to integer
-uniform locations before calling ``setUniformValue``.
+uniform locations and dispatching scalar values through the explicit
+``setUniformValue1f``/``setUniformValue1i`` APIs.
 
 It also layers DAW-style spectrogram display transforms on top of the exact
 packed `-'g'` bytes: display gain in dB, floor/ceiling range, contrast, and a
@@ -77,20 +78,38 @@ class _UniformNameProxy:
             self._locations[key] = location
         return location
 
-    def _set_optional(self, name: str, value) -> None:
+    def _set_scalar(self, location: int, value):
+        if isinstance(value, bool):
+            return self._program.setUniformValue1i(location, int(value))
+        if isinstance(value, int):
+            return self._program.setUniformValue1i(location, value)
+        if isinstance(value, float):
+            return self._program.setUniformValue1f(location, value)
+        return self._program.setUniformValue(location, value)
+
+    def _set_optional_float(self, name: str, value: float) -> None:
         location = self._location(name)
         if location >= 0:
-            self._program.setUniformValue(location, value)
+            self._program.setUniformValue1f(location, float(value))
+
+    def _set_optional_int(self, name: str, value: int) -> None:
+        location = self._location(name)
+        if location >= 0:
+            self._program.setUniformValue1i(location, int(value))
 
     def setUniformValue(self, name, *values):  # noqa: N802 - Qt API
-        result = self._program.setUniformValue(self._location(name), *values)
+        location = self._location(name)
+        if len(values) == 1:
+            result = self._set_scalar(location, values[0])
+        else:
+            result = self._program.setUniformValue(location, *values)
         key = name.decode("ascii") if isinstance(name, bytes) else name
         if key == "u_specGain":
-            self._set_optional("u_specGainDb", float(self._owner.spectrogram_gain_db))
-            self._set_optional("u_specFloorDb", float(self._owner.spectrogram_floor_db))
-            self._set_optional("u_specCeilingDb", float(self._owner.spectrogram_ceiling_db))
-            self._set_optional("u_specContrast", float(self._owner.spectrogram_contrast))
-            self._set_optional("u_specFreqLog", int(self._owner.spectrogram_frequency_log))
+            self._set_optional_float("u_specGainDb", self._owner.spectrogram_gain_db)
+            self._set_optional_float("u_specFloorDb", self._owner.spectrogram_floor_db)
+            self._set_optional_float("u_specCeilingDb", self._owner.spectrogram_ceiling_db)
+            self._set_optional_float("u_specContrast", self._owner.spectrogram_contrast)
+            self._set_optional_int("u_specFreqLog", self._owner.spectrogram_frequency_log)
         return result
 
     def __getattr__(self, name):
