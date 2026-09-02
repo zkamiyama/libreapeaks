@@ -15,6 +15,7 @@
 pub mod error;
 pub mod ffi;
 mod ffi_reaper_generate;
+mod ffi_rpkx;
 mod ffi_source;
 pub mod format;
 pub mod generate;
@@ -22,6 +23,7 @@ pub mod gpu_cache;
 pub mod loudness;
 pub mod pyramid;
 pub mod reaper_generate;
+pub mod rpkx;
 pub mod source;
 
 // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
@@ -51,6 +53,8 @@ mod python_gpu_cache;
 #[cfg(feature = "python")]
 mod python_reaper_generate;
 #[cfg(feature = "python")]
+mod python_rpkx;
+#[cfg(feature = "python")]
 mod python_spectrogram_view;
 
 pub use error::{ReaPeaksError, Result};
@@ -62,6 +66,11 @@ pub use generate::{
 pub use gpu_cache::{GpuCacheView, GpuLayerKind, GpuLayerMeta, GpuRawTile};
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
 pub use reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
+pub use rpkx::{
+    append_rpkx_chunk, attach_rpkx, read_rpkx, reapeaks_source_stamp, remove_rpkx_chunks,
+    set_rpkx_chunk, standard_end, strip_rpkx, RpkxAttachPolicy, RpkxChunk, RpkxContainer, RpkxKey,
+    RpkxNamespace, RPKX_CHUNK_HEADER_SIZE, RPKX_HEADER_SIZE, RPKX_MAGIC, RPKX_VERSION,
+};
 pub use source::SourceStamp;
 pub use spectrogram::{
     decode_spectrogram_frame, encode_spectrogram_frame, parse_spectrogram_layers, SpectrogramFrame,
