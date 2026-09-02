@@ -1,6 +1,7 @@
 use crate::format::ReaPeaks;
 use crate::generate::{generate_f32, generate_pcm16, GenerateOptions};
 use crate::pyramid::{WavePyramid, WaveTileKey};
+use crate::source::SourceStamp;
 use crate::texture::{
     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8,
     render_waveform_rgba8_scaled,
@@ -37,6 +38,32 @@ impl PyReaPeaks {
     #[getter]
     pub fn channels(&self) -> u8 {
         self.file.header.channels
+    }
+
+    #[getter]
+    pub fn source_mtime_low32(&self) -> u32 {
+        self.file.header.source_mtime_low32
+    }
+
+    #[getter]
+    pub fn source_size_low32(&self) -> u32 {
+        self.file.header.source_size_low32
+    }
+
+    pub fn source_stamp(&self) -> (u32, u32) {
+        let stamp = self.file.source_stamp();
+        (stamp.mtime_low32, stamp.size_low32)
+    }
+
+    pub fn matches_source_stamp(&self, source_mtime_low32: u32, source_size_low32: u32) -> bool {
+        self.file.matches_source_stamp(SourceStamp::new(
+            source_mtime_low32,
+            source_size_low32,
+        ))
+    }
+
+    pub fn matches_source(&self, path: &str) -> PyResult<bool> {
+        self.file.matches_source_path(path).map_err(py_err)
     }
 
     #[getter]
@@ -192,6 +219,18 @@ impl PyReaPeaks {
     }
 }
 
+#[pyfunction(name = "source_stamp")]
+pub fn py_source_stamp(path: &str) -> PyResult<(u32, u32)> {
+    let stamp = SourceStamp::from_path(path).map_err(py_err)?;
+    Ok((stamp.mtime_low32, stamp.size_low32))
+}
+
+#[pyfunction(name = "source_stamp_from_unix_seconds")]
+pub fn py_source_stamp_from_unix_seconds(mtime_seconds: i64, size: u64) -> (u32, u32) {
+    let stamp = SourceStamp::from_unix_seconds_and_size(mtime_seconds, size);
+    (stamp.mtime_low32, stamp.size_low32)
+}
+
 #[pyfunction(name = "default_divisions")]
 #[pyo3(signature=(sample_rate, fine_peaks_per_second=300))]
 pub fn py_default_divisions(sample_rate: u32, fine_peaks_per_second: u32) -> Vec<u32> {
@@ -264,6 +303,8 @@ pub fn py_generate_f32<'py>(
 #[pymodule]
 pub fn reapeaks(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReaPeaks>()?;
+    m.add_function(wrap_pyfunction!(py_source_stamp, m)?)?;
+    m.add_function(wrap_pyfunction!(py_source_stamp_from_unix_seconds, m)?)?;
     m.add_function(wrap_pyfunction!(py_default_divisions, m)?)?;
     m.add_function(wrap_pyfunction!(py_generate_pcm16, m)?)?;
     m.add_function(wrap_pyfunction!(py_generate_f32, m)?)?;
