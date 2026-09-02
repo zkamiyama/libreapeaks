@@ -147,7 +147,7 @@ pub fn parse_spectrogram_layers(bytes: &[u8]) -> Result<(u8, u32, Vec<Spectrogra
     let mut spectrogram_index = 0usize;
     let mut layers = Vec::new();
 
-    for (index, (division, count)) in headers.iter().copied().enumerate() {
+    for (division, count) in headers.iter().copied() {
         let count_usize = count as usize;
         let payload_size = if division > 0 {
             let bytes_per_peak = match version {
@@ -234,11 +234,9 @@ pub fn parse_spectrogram_layers(bytes: &[u8]) -> Result<(u8, u32, Vec<Spectrogra
             spectrogram_index += 1;
         }
         payload_offset = payload_end;
-
-        if index + 1 == headers.len() && payload_offset != bytes.len() {
-            return Err(ReaPeaksError::InvalidHeader("trailing bytes after layers"));
-        }
     }
 
+    // Deliberately ignore bytes after the computed standard layer end. REAPER
+    // accepts and preserves such EOF tails, which leaves room for extensions.
     Ok((channels, sample_rate, layers))
 }

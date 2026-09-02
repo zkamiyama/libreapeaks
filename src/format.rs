@@ -441,9 +441,9 @@ impl ReaPeaks {
             }
         }
 
-        if off != raw.len() {
-            return Err(ReaPeaksError::InvalidHeader("trailing bytes after layers"));
-        }
+        // REAPER 7.79 accepts and preserves arbitrary bytes after the computed
+        // end of the standard layers. Keep the complete raw buffer and ignore
+        // that tail here so compatible extension containers can coexist at EOF.
 
         Ok(Self {
             header,

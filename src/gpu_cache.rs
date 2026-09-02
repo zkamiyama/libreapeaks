@@ -199,9 +199,8 @@ impl GpuCacheView {
             offset = end;
         }
 
-        if offset != raw.len() {
-            return Err(ReaPeaksError::InvalidHeader("trailing bytes after layers"));
-        }
+        // REAPER accepts and preserves bytes beyond the standard layer payloads.
+        // The raw buffer intentionally retains that tail for future extensions.
 
         Ok(Self {
             raw,
