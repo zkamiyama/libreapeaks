@@ -15,6 +15,7 @@
 pub mod error;
 pub mod ffi;
 mod ffi_reaper_generate;
+mod ffi_source;
 pub mod format;
 pub mod generate;
 pub mod gpu_cache;
