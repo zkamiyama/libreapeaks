@@ -38,6 +38,7 @@ mod spectral_base;
 
 pub mod spectrogram;
 mod spectrogram_generate;
+mod spectrogram_generate_f32;
 pub mod texture;
 pub mod wave;
 
@@ -53,8 +54,8 @@ mod python_spectrogram_view;
 pub use error::{ReaPeaksError, Result};
 pub use format::{Header, LoudnessLayer, LoudnessPeak, ReaPeaks, SpectralPeak, Version, WaveLayer};
 pub use generate::{
-    generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3,
-    generate_pcm16_mode3_with_spectrogram, GenerateOptions,
+    generate_f32, generate_f32_mode3, generate_f32_mode3_with_spectrogram, generate_pcm16,
+    generate_pcm16_mode3, generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
 pub use gpu_cache::{GpuCacheView, GpuLayerKind, GpuLayerMeta, GpuRawTile};
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
