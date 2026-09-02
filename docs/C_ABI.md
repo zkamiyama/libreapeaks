@@ -166,15 +166,20 @@ SPECTROGRAM:
 No `-'s'`-only, `-'g'`-only, or `-'r'`-only file was observed, so the native
 mode API intentionally exposes a mode enum instead of independent layer bits.
 
-`rpk_generate_pcm16_reaper()` supports all three modes. The float32 entry point
-supports WAVEFORM and SPECTRAL with RPKN/RPKL selection via `large_range`.
-SPECTROGRAM currently returns `-2` for float32 because exact float32 `-'g'`
-generation has not been implemented; it is not silently converted through
-PCM16.
+Both `rpk_generate_pcm16_reaper()` and `rpk_generate_f32_reaper()` support all
+three modes. The float32 entry point selects RPKN/RPKL via `large_range`; with
+`large_range=1`, SPECTROGRAM writes RPKL plus `-'s'`, `-'g'`, and `-'r'`.
 
-When byte-exact `-'s'` behavior matters, build with `--features strict-wdl`.
-The PCM16 SPECTROGRAM mode uses the same strict-WDL-compatible `-'s'`, `-'r'`,
-and exact `-'g'` generation paths covered by the pinned whole-file oracles.
+The float `-'g'` path is direct rather than a PCM16 approximation. The permanent
+REAPER 7.79 Linux x86_64 live oracle covers 128 adversarial IEEE float32/RPKL
+sources and reports **128 / 128 exact** for both decoded 128-bin `-'g'` frames
+and packed `-'g'` payload bytes. This is a `-'g'` compatibility claim; exact
+NaN/Inf/subnormal behavior and unrelated whole-file RPKL waveform rounding
+remain separate.
+
+When byte-exact spectral/spectrogram behavior matters, build with
+`--features strict-wdl`. PCM16 complete-file gates and the float32/RPKL `-'g'`
+gate are described in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Build
 
