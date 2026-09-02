@@ -4,7 +4,8 @@ The packed cache and source-PCM loaders still choose the data LOD. Waveform
 rasterization uses one shared representation: every envelope record contributes
 one maximum point and one minimum point, adjacent records are connected, and the
 area between the two contours is filled. Exact source samples are the degenerate
-case where min == max, so they remain one ordinary polyline.
+case where min == max, so they remain one ordinary polyline; at deep zoom the
+actual sample positions are also marked with small fixed-device-pixel points.
 
 This keeps waveform shape in geometry rather than fragment-distance AA. The
 outline is a one-device-pixel cosmetic line, and the fill uses the same min/max
@@ -24,6 +25,10 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from pyside6_reaper_gl_view import ReaperGpuAnalysisCanvas
 import pyside6_gl_view as _gl
 from source_pcm import PcmDisplayWindow, pcm_display_values
+
+
+SAMPLE_POINT_MIN_DEVICE_PX = 8.0
+SAMPLE_POINT_RADIUS_DEVICE_PX = 2.0
 
 
 def _disable_fragment_waveform(source: str) -> str:
@@ -274,6 +279,7 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
 
             if window.mode == "samples":
                 path = QPainterPath()
+                sample_points: list[QPointF] = []
                 started = False
                 for record in range(window.record_count):
                     frame = window.first_frame + record
@@ -282,13 +288,24 @@ class ZitaGpuAnalysisCanvas(ReaperGpuAnalysisCanvas):
                     x = (frame - self.view_start) * width / span
                     offset = record * channels + channel
                     y = self._amplitude_y(values[offset], lane_top, lane_height)
+                    point = QPointF(x, y)
+                    sample_points.append(point)
                     if started:
-                        path.lineTo(x, y)
+                        path.lineTo(point)
                     else:
-                        path.moveTo(x, y)
+                        path.moveTo(point)
                         started = True
                 if started:
                     painter.drawPath(path)
+
+                dpr = max(1.0, float(self.devicePixelRatioF()))
+                device_pixels_per_sample = width * dpr / span
+                if device_pixels_per_sample >= SAMPLE_POINT_MIN_DEVICE_PX:
+                    radius = SAMPLE_POINT_RADIUS_DEVICE_PX / dpr
+                    painter.setBrush(self.SOURCE_COLOR)
+                    for point in sample_points:
+                        painter.drawEllipse(point, radius, radius)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
             else:
                 maxima: list[QPointF] = []
                 minima: list[QPointF] = []
