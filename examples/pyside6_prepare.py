@@ -1,11 +1,10 @@
-"""Responsive cache preparation dialog for the PySide6 demo player."""
+"""Responsive full-cache preparation dialog for the PySide6 demo player."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -17,11 +16,7 @@ from PySide6.QtWidgets import (
 from player_native_cache import NativeGenerationMode, ensure_reapeaks_native
 
 
-MODE_ROWS = (
-    ("Waveform only", "waveform"),
-    ("Waveform + spectral + loudness", "spectral"),
-    ("Waveform + spectral + spectrogram + loudness", "spectrogram"),
-)
+FULL_GENERATION_MODE: NativeGenerationMode = "spectrogram"
 
 
 class CacheWorker(QObject):
@@ -29,73 +24,60 @@ class CacheWorker(QObject):
     completed = Signal(object, bool, str)
     failed = Signal(str)
 
-    def __init__(self, audio: Path, options: dict[str, object], mode: str):
+    def __init__(self, audio: Path, options: dict[str, object]):
         super().__init__()
         self.audio = audio
         self.options = dict(options)
-        self.mode = mode
 
     @Slot()
     def run(self) -> None:
         try:
             peaks, generated = ensure_reapeaks_native(
                 self.audio,
-                generation_mode=self.mode,  # type: ignore[arg-type]
+                generation_mode=FULL_GENERATION_MODE,
                 progress=lambda stage, value: self.progress.emit(stage, value),
                 **self.options,
             )
         except Exception as exc:  # PyO3 errors have no stable shared base class.
             self.failed.emit(str(exc))
             return
-        self.completed.emit(peaks, generated, self.mode)
+        self.completed.emit(peaks, generated, FULL_GENERATION_MODE)
 
 
 class CachePreparationDialog(QDialog):
-    """Select the REAPER-native cache richness and build it off the UI thread."""
+    """Build the complete REAPER-native analysis cache off the UI thread."""
 
     def __init__(
         self,
         audio: Path,
         *,
         options: dict[str, object],
-        initial_mode: NativeGenerationMode = "spectral",
+        initial_mode: NativeGenerationMode = FULL_GENERATION_MODE,
         parent=None,
     ):
         super().__init__(parent)
+        # Keep ``initial_mode`` in the public demo signature so older callers do
+        # not break, but GUI cache preparation intentionally always generates
+        # the complete native spectrogram shape.
+        _ = initial_mode
         self.audio = audio
         self.options = dict(options)
         self.peaks_path: Path | None = None
         self.generated = False
-        self.generation_mode: NativeGenerationMode = initial_mode
+        self.generation_mode: NativeGenerationMode = FULL_GENERATION_MODE
         self._thread: QThread | None = None
         self._worker: CacheWorker | None = None
 
         self.setWindowTitle("Prepare libreapeaks cache")
         self.setModal(True)
-        self.resize(620, 210)
+        self.resize(620, 190)
 
         self.summary = QLabel(
-            "Choose how much REAPER-compatible analysis data to create. "
-            "The cache is generated on a worker thread so the UI remains responsive."
+            "The player creates the complete REAPER-compatible analysis cache: "
+            "waveform, spectral peaks, spectrogram, and loudness. "
+            "Generation runs on a worker thread so the UI remains responsive."
         )
         self.summary.setWordWrap(True)
-
-        self.mode_combo = QComboBox()
-        for label, value in MODE_ROWS:
-            self.mode_combo.addItem(label, value)
-        initial_index = next(
-            (
-                index
-                for index in range(self.mode_combo.count())
-                if self.mode_combo.itemData(index) == initial_mode
-            ),
-            1,
-        )
-        self.mode_combo.setCurrentIndex(initial_index)
-
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Cache data"))
-        mode_row.addWidget(self.mode_combo, 1)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -117,7 +99,6 @@ class CachePreparationDialog(QDialog):
 
         layout = QVBoxLayout()
         layout.addWidget(self.summary)
-        layout.addLayout(mode_row)
         layout.addWidget(self.progress)
         layout.addWidget(self.status)
         layout.addLayout(buttons)
@@ -127,15 +108,13 @@ class CachePreparationDialog(QDialog):
     def start(self) -> None:
         if self._thread is not None:
             return
-        mode = str(self.mode_combo.currentData())
-        self.mode_combo.setEnabled(False)
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
         self.progress.setValue(0)
-        self.status.setText("Starting cache preparation…")
+        self.status.setText("Starting full cache preparation…")
 
         thread = QThread(self)
-        worker = CacheWorker(self.audio, self.options, mode)
+        worker = CacheWorker(self.audio, self.options)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_progress)
@@ -177,7 +156,6 @@ class CachePreparationDialog(QDialog):
         if completed:
             self.accept()
             return
-        self.mode_combo.setEnabled(True)
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
 

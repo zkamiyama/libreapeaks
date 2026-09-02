@@ -48,6 +48,24 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn('("Spectrogram", "spectrogram", "spectrogram")', source)
         self.assertIn("set_display_mode", source)
 
+    def test_cache_prepare_always_generates_complete_spectrogram_mode(self) -> None:
+        source = read_source("pyside6_prepare.py")
+        self.assertIn('FULL_GENERATION_MODE: NativeGenerationMode = "spectrogram"', source)
+        self.assertIn("generation_mode=FULL_GENERATION_MODE", source)
+        self.assertNotIn("MODE_ROWS", source)
+        self.assertNotIn("mode_combo", source)
+        self.assertIn("waveform, spectral peaks, spectrogram, and loudness", source)
+
+    def test_daw_player_has_empty_drop_open_launcher(self) -> None:
+        source = read_source("pyside6_daw_player.py")
+        self.assertIn("class DropLaunchWindow(QMainWindow):", source)
+        self.assertIn("self.setAcceptDrops(True)", source)
+        self.assertIn("def dragEnterEvent", source)
+        self.assertIn("def dropEvent", source)
+        self.assertIn("QProcess.startDetached", source)
+        self.assertIn("if not args:", source)
+        self.assertIn("Drop an audio file here", source)
+
 
 if __name__ == "__main__":
     unittest.main()

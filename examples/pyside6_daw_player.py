@@ -10,25 +10,36 @@ controls suitable for DAW inspection:
 - heatmap toggle;
 - linear or logarithmic frequency axis.
 
-The cache is never rewritten by these controls. Multichannel material remains
+When started without an audio path, the demo opens an empty drop target. Drop a
+local media file there to launch the normal full-cache preparation/player flow.
+
+The cache is never rewritten by display controls. Multichannel material remains
 on one shared timeline with one vertically stacked lane per channel, matching
 the REAPER-style layout used by the base GLSL renderer.
 
-Example:
-    python examples/pyside6_daw_player.py mix.wav --generation-mode spectrogram
+Examples:
+    python examples/pyside6_daw_player.py
+    python examples/pyside6_daw_player.py mix.wav
 """
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QLabel,
+    QMainWindow,
+    QPushButton,
     QSlider,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 import pyside6_player as _base
@@ -236,11 +247,98 @@ class DawPlayerWindow(_BasePlayerWindow):
             widget.setEnabled(enabled)
 
 
+class DropLaunchWindow(QMainWindow):
+    """Empty launch surface used when the DAW demo starts without a path."""
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setWindowTitle("libreapeaks DAW player")
+        self.resize(900, 520)
+
+        self.drop_label = QLabel(
+            "Drop an audio file here\n\n"
+            "A complete waveform + spectral + spectrogram + loudness cache "
+            "will be prepared before playback."
+        )
+        self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.drop_label.setWordWrap(True)
+        self.drop_label.setStyleSheet(
+            "QLabel { border: 2px dashed #667080; border-radius: 12px; "
+            "padding: 48px; font-size: 18px; }"
+        )
+
+        open_button = QPushButton("Open audio file…")
+        open_button.clicked.connect(self._choose_file)
+
+        layout = QVBoxLayout()
+        layout.addStretch(1)
+        layout.addWidget(self.drop_label)
+        layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+        central = QWidget()
+        central.setLayout(layout)
+        self.setCentralWidget(central)
+
+    def _choose_file(self) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Open audio file",
+            str(Path.home()),
+            "Media files (*.*)",
+        )
+        if selected:
+            self._launch(Path(selected))
+
+    def _first_local_file(self, event) -> Path | None:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                if path.is_file():
+                    return path
+        return None
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt API
+        if self._first_local_file(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt API
+        path = self._first_local_file(event)
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._launch(path)
+
+    def _launch(self, audio_path: Path) -> None:
+        script = Path(__file__).resolve()
+        result = QProcess.startDetached(
+            sys.executable,
+            [str(script), str(audio_path.resolve(strict=False))],
+        )
+        started = result[0] if isinstance(result, tuple) else bool(result)
+        if not started:
+            self.drop_label.setText(f"Could not launch player for:\n{audio_path}")
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+
 def main(argv: list[str] | None = None) -> int:
-    # Reuse the base application's argument parsing, cache preparation,
-    # playback setup and cleanup while substituting only the window class.
+    args = sys.argv[1:] if argv is None else list(argv)
     _base.PlayerWindow = DawPlayerWindow
-    return _base.main(sys.argv[1:] if argv is None else argv)
+    if not args:
+        app = QApplication([sys.argv[0]])
+        window = DropLaunchWindow()
+        window.show()
+        return app.exec()
+    return _base.main(args)
 
 
 if __name__ == "__main__":
