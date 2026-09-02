@@ -57,10 +57,11 @@ fn parser_rejects_unknown_negative_layer_token() {
 }
 
 #[test]
-fn parser_rejects_trailing_garbage() {
+fn parser_accepts_and_preserves_trailing_bytes() {
     let mut raw = bare_header(1, 0, 48_000);
-    raw.push(0xaa);
-    assert!(ReaPeaks::parse(raw).is_err());
+    raw.extend_from_slice(b"RPKX\x01\x00\x00\x00");
+    let parsed = ReaPeaks::parse(raw.clone()).unwrap();
+    assert_eq!(parsed.raw, raw);
 }
 
 #[test]
