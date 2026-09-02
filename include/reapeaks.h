@@ -43,9 +43,30 @@ typedef struct RpkViewPlan {
   double peaks_per_pixel;
 } RpkViewPlan;
 
+/*
+ * Source metadata stored by REAPER in the .reapeaks header. These are cache
+ * freshness fields, not a collision-resistant runtime file identity.
+ */
+typedef struct RpkSourceStamp {
+  uint32_t source_mtime_low32;
+  uint32_t source_size_low32;
+} RpkSourceStamp;
+
 int32_t rpk_open(const char *path, RpkHandle **out);
 void rpk_close(RpkHandle *h);
 uint8_t rpk_wave_encoding(const RpkHandle *h);
+
+/*
+ * Build/compare the REAPER-compatible source mtime/size stamp.
+ * rpk_matches_source* return 1 for a match, 0 for a mismatch, and <0 on error.
+ */
+int32_t rpk_source_stamp_from_path(const char *path, RpkSourceStamp *out);
+int32_t rpk_source_stamp_from_unix_seconds(int64_t mtime_seconds, uint64_t size,
+                                           RpkSourceStamp *out);
+int32_t rpk_get_source_stamp(const RpkHandle *h, RpkSourceStamp *out);
+int32_t rpk_matches_source_stamp(const RpkHandle *h,
+                                 const RpkSourceStamp *stamp);
+int32_t rpk_matches_source(const RpkHandle *h, const char *path);
 
 size_t rpk_level_count(const RpkHandle *h);
 int32_t rpk_get_level_info(const RpkHandle *h, size_t index, RpkLevelInfo *out);
