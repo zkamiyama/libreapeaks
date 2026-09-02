@@ -26,12 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let raw = fs::read(&pcm_path)?;
-    if raw.len() % 2 != 0 {
+    let (samples, remainder) = raw.as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("PCM16LE fixture has odd byte length".into());
     }
-    let pcm: Vec<i16> = raw
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+    let pcm: Vec<i16> = samples
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample))
         .collect();
 
     let stamp = SourceStamp::from_path(&source)?;
