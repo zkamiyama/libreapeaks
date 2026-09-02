@@ -27,6 +27,7 @@ fn low_rate_fine_count(frames: usize, division: u32) -> usize {
     (frames - REAPER_SPECTRAL_HALF_WINDOW + d / 2) / d
 }
 
+#[cfg(test)]
 #[inline]
 fn legacy_high_rate_fine_count(frames: usize, source_rate: u32, division: u32) -> usize {
     if division == 0 || source_rate == 0 {
