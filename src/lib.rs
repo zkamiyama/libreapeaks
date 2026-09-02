@@ -23,6 +23,7 @@ pub mod gpu_cache;
 pub mod loudness;
 pub mod pyramid;
 pub mod reaper_generate;
+#[allow(clippy::derivable_impls)]
 pub mod rpkx;
 pub mod source;
 
