@@ -10,6 +10,7 @@ on:
       - 'src/generate.rs'
       - 'src/spectral.rs'
       - 'src/spectral_strict.rs'
+      - 'src/strict_wdl.cpp'
       - 'src/spectrogram_generate_f32.rs'
       - 'src/loudness.rs'
       - 'tests/reaper_spectrogram_f32_exact.rs'
