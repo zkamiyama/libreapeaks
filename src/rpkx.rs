@@ -160,9 +160,7 @@ impl RpkxContainer {
             return Err(ReaPeaksError::Truncated);
         }
         if bytes.get(0..4) != Some(RPKX_MAGIC.as_slice()) {
-            return Err(ReaPeaksError::InvalidMagic(
-                bytes[0..4].try_into().unwrap(),
-            ));
+            return Err(ReaPeaksError::InvalidMagic(bytes[0..4].try_into().unwrap()));
         }
         let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
         if version != RPKX_VERSION {
