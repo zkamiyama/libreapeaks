@@ -56,10 +56,8 @@ impl PyReaPeaks {
     }
 
     pub fn matches_source_stamp(&self, source_mtime_low32: u32, source_size_low32: u32) -> bool {
-        self.file.matches_source_stamp(SourceStamp::new(
-            source_mtime_low32,
-            source_size_low32,
-        ))
+        self.file
+            .matches_source_stamp(SourceStamp::new(source_mtime_low32, source_size_low32))
     }
 
     pub fn matches_source(&self, path: &str) -> PyResult<bool> {
