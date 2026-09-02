@@ -159,7 +159,7 @@ def run_reuse_probe(
                     str(config),
                     "-new",
                     "-nosplash",
-                    str(HERE / "check_peak_reuse.lua"),
+                    str(HERE / "build_one.lua"),
                 ],
                 env=env,
                 stdout=log,
@@ -176,7 +176,7 @@ def run_reuse_probe(
 
     status = status_path.read_text(encoding="utf-8") if status_path.exists() else ""
     saved_status.write_text(status, encoding="utf-8")
-    if completed.returncode != 0 or "BEGIN=" not in status:
+    if completed.returncode != 0 or "BEGIN=" not in status or "OK loops=" not in status:
         raise RuntimeError(
             f"{label}: REAPER probe failed rc={completed.returncode}: {status!r}; log={log_path}"
         )
