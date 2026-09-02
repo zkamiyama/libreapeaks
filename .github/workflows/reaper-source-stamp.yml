@@ -1,0 +1,106 @@
+name: reaper-source-stamp
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-source-stamp.yml'
+      - 'src/source.rs'
+      - 'src/format.rs'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'examples/source_stamp_fixture.rs'
+      - 'tools/reaper_oracle/check_peak_reuse.lua'
+      - 'tools/reaper_oracle/source_stamp_reuse.py'
+      - 'tools/reaper_oracle/build_one.lua'
+      - 'tools/reaper_oracle/fresh_process.py'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-source-stamp.yml'
+      - 'src/source.rs'
+      - 'src/format.rs'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'examples/source_stamp_fixture.rs'
+      - 'tools/reaper_oracle/check_peak_reuse.lua'
+      - 'tools/reaper_oracle/source_stamp_reuse.py'
+      - 'tools/reaper_oracle/build_one.lua'
+      - 'tools/reaper_oracle/fresh_process.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-source-stamp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-stamp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-source-stamp
+          mkdir -p "$root/reaper" "$root/oracle/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/reaper-source-stamp/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Unit-test source stamp API
+        run: cargo test --test source_stamp
+      - name: Start Xvfb
+        shell: bash
+        run: |
+          Xvfb :97 -screen 0 1280x720x24 -nolisten tcp >/tmp/reaper-source-stamp/xvfb.log 2>&1 &
+          echo $! >/tmp/reaper-source-stamp/xvfb.pid
+      - name: Verify libreapeaks cache is reused by REAPER
+        env:
+          DISPLAY: ':97'
+        run: python3 tools/reaper_oracle/source_stamp_reuse.py /tmp/reaper-source-stamp/oracle "$REAPER_BIN" --display :97
+      - name: Publish evidence summary
+        if: always()
+        shell: bash
+        run: |
+          report=/tmp/reaper-source-stamp/oracle/results/source-stamp-reuse.json
+          if [ -f "$report" ]; then
+            echo '## REAPER source-stamp cache reuse' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-source-stamp/oracle/results/source-stamp-reuse.json'
+          d=json.load(open(p))
+          print(f"oracle stamp: mtime={d['oracle_stamp']['mtime_low32']}, size={d['oracle_stamp']['size_low32']}")
+          print(f"libreapeaks stamp: mtime={d['libreapeaks_stamp']['mtime_low32']}, size={d['libreapeaks_stamp']['size_low32']}")
+          print(f"byte-identical waveform fixture: {d['libreapeaks_byte_identical_to_oracle']}")
+          for case in d['cases']:
+              print(f"- {case['label']}: begin={case['begin']}, reuse={case['reuse']}, unchanged={case['peak_unchanged']}")
+          PY
+          fi
+      - name: Stop Xvfb
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/reaper-source-stamp/xvfb.pid ]; then
+            kill "$(cat /tmp/reaper-source-stamp/xvfb.pid)" 2>/dev/null || true
+          fi
+      - name: Upload source-stamp evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-source-stamp-${{ github.sha }}
+          path: |
+            /tmp/reaper-source-stamp/oracle/results
+            /tmp/reaper-source-stamp/xvfb.log
+          if-no-files-found: warn
+          retention-days: 30
