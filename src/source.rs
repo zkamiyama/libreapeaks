@@ -5,7 +5,7 @@ use std::fs::{self, Metadata};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The source-file identity fields stored in a `.reapeaks` header.
+/// The source-file freshness fields stored in a `.reapeaks` header.
 ///
 /// REAPER stores only the low 32 bits of the source modification time in whole
 /// Unix seconds and the low 32 bits of the source byte size. This is a cache
@@ -29,9 +29,8 @@ impl SourceStamp {
 
     /// Build the REAPER header stamp from whole Unix seconds and a full byte size.
     ///
-    /// Both values are reduced modulo 2^32, exactly matching the fields available
-    /// in the `.reapeaks` header. Negative Unix seconds retain their two's-complement
-    /// low 32 bits.
+    /// Both values are reduced modulo 2^32, matching the two fields available in
+    /// the `.reapeaks` header.
     pub const fn from_unix_seconds_and_size(mtime_seconds: i64, size: u64) -> Self {
         Self {
             mtime_low32: mtime_seconds as u32,
@@ -42,12 +41,16 @@ impl SourceStamp {
     /// Build a stamp from a `SystemTime` and full byte size.
     ///
     /// Sub-second precision is intentionally discarded because the REAPER cache
-    /// header stores whole seconds only. For pre-epoch times the duration is
-    /// truncated toward zero before taking the low 32 bits.
+    /// header stores whole seconds only.
     pub fn from_system_time_and_size(modified: SystemTime, size: u64) -> Self {
         let mtime_low32 = match modified.duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_secs() as u32,
-            Err(error) => 0u32.wrapping_sub(error.duration().as_secs() as u32),
+            Err(error) => {
+                let duration = error.duration();
+                let seconds_before_epoch = duration.as_secs()
+                    + u64::from(duration.subsec_nanos() != 0);
+                0u32.wrapping_sub(seconds_before_epoch as u32)
+            }
         };
         Self {
             mtime_low32,
@@ -68,9 +71,14 @@ impl SourceStamp {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
+    /// Exact comparison with the two source fields stored in a cache header.
+    ///
+    /// This is deliberately stricter than REAPER's documented acceptance of
+    /// small mtime offsets (including offsets near one hour). It is a safe,
+    /// conservative application freshness check, not an emulation of that
+    /// tolerance policy.
     pub const fn matches_header(self, header: &Header) -> bool {
-        self.mtime_low32 == header.source_mtime_low32
-            && self.size_low32 == header.source_size_low32
+        self.mtime_low32 == header.source_mtime_low32 && self.size_low32 == header.source_size_low32
     }
 }
 
@@ -80,17 +88,17 @@ impl Header {
         SourceStamp::new(self.source_mtime_low32, self.source_size_low32)
     }
 
-    /// Compare this header with an already captured source stamp.
+    /// Exactly compare this header with an already captured source stamp.
     pub const fn matches_source_stamp(&self, stamp: SourceStamp) -> bool {
         stamp.matches_header(self)
     }
 
-    /// Compare this header with filesystem metadata using REAPER's stamp fields.
+    /// Exactly compare this header with filesystem metadata.
     pub fn matches_source_metadata(&self, metadata: &Metadata) -> Result<bool> {
         Ok(self.matches_source_stamp(SourceStamp::from_metadata(metadata)?))
     }
 
-    /// Stat a source path and compare it with this header's source stamp.
+    /// Stat a source path and exactly compare it with this header's source stamp.
     pub fn matches_source_path(&self, path: impl AsRef<Path>) -> Result<bool> {
         Ok(self.matches_source_stamp(SourceStamp::from_path(path)?))
     }
@@ -102,12 +110,12 @@ impl ReaPeaks {
         self.header.source_stamp()
     }
 
-    /// Compare this cache with an already captured source stamp.
+    /// Exactly compare this cache with an already captured source stamp.
     pub const fn matches_source_stamp(&self, stamp: SourceStamp) -> bool {
         self.header.matches_source_stamp(stamp)
     }
 
-    /// Stat a source path and compare it with this cache's source stamp.
+    /// Stat a source path and exactly compare it with this cache's source stamp.
     pub fn matches_source_path(&self, path: impl AsRef<Path>) -> Result<bool> {
         self.header.matches_source_path(path)
     }
