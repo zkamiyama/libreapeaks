@@ -11,7 +11,6 @@ on:
       - 'src/generate.rs'
       - 'src/reaper_generate.rs'
       - 'examples/source_stamp_fixture.rs'
-      - 'tools/reaper_oracle/check_peak_reuse.lua'
       - 'tools/reaper_oracle/source_stamp_reuse.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
@@ -23,7 +22,6 @@ on:
       - 'src/generate.rs'
       - 'src/reaper_generate.rs'
       - 'examples/source_stamp_fixture.rs'
-      - 'tools/reaper_oracle/check_peak_reuse.lua'
       - 'tools/reaper_oracle/source_stamp_reuse.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
@@ -80,9 +78,10 @@ jobs:
           import json
           p='/tmp/reaper-source-stamp/oracle/results/source-stamp-reuse.json'
           d=json.load(open(p))
+          print(f"native mode: {d['native_mode']}")
           print(f"oracle stamp: mtime={d['oracle_stamp']['mtime_low32']}, size={d['oracle_stamp']['size_low32']}")
           print(f"libreapeaks stamp: mtime={d['libreapeaks_stamp']['mtime_low32']}, size={d['libreapeaks_stamp']['size_low32']}")
-          print(f"byte-identical waveform fixture: {d['libreapeaks_byte_identical_to_oracle']}")
+          print(f"byte-identical native fixture: {d['libreapeaks_byte_identical_to_oracle']}")
           for case in d['cases']:
               print(f"- {case['label']}: begin={case['begin']}, reuse={case['reuse']}, unchanged={case['peak_unchanged']}")
           PY
