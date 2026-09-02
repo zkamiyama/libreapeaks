@@ -1,15 +1,8 @@
 """REAPER-style interaction wrapper for the direct GLSL analysis canvas.
 
-The wrapper is the public demo surface. It normalizes two binding/runtime
-quirks before the renderer is used: one Mesa-reserved GLSL identifier and
-PySide6 6.11's scalar-uniform overload resolution by resolving names to integer
-uniform locations and dispatching scalar values through the explicit
-``setUniformValue1f``/``setUniformValue1i`` APIs.
-
-It also layers DAW-style display controls on top of the exact packed cache
-bytes: an exclusive analysis view mode plus spectrogram gain in dB,
-floor/ceiling range, contrast, and a linear/log frequency-axis switch. These
-are shader-only display transforms and never rewrite the cache.
+The wrapper keeps the packed `.reapeaks` renderer byte-preserving while adding
+REAPER-like interaction, explicit analysis display modes, calibrated
+spectrogram controls, smoother spectrogram sampling, and stable waveform LOD.
 """
 from __future__ import annotations
 
@@ -50,51 +43,82 @@ _shader = _replace_required(
 _shader = _replace_required(
     _shader,
     "bool resident(vec2 range, float x) {",
-    "float sampleG(float recordPosition, int channel, float binPosition) {\n"
-    "    float record = clamp(recordPosition, 0.0, float(max(0, u_gCount - 1)));\n"
-    "    float bin = clamp(binPosition, 0.0, 127.0);\n"
-    "    int r0 = int(floor(record));\n"
-    "    int r1 = min(r0 + 1, max(0, u_gCount - 1));\n"
-    "    int b0 = int(floor(bin));\n"
-    "    int b1 = min(b0 + 1, 127);\n"
-    "    float rt = fract(record);\n"
-    "    float bt = fract(bin);\n"
-    "    float lo = mix(float(unpackG(r0, channel, b0)), float(unpackG(r1, channel, b0)), rt);\n"
-    "    float hi = mix(float(unpackG(r0, channel, b1)), float(unpackG(r1, channel, b1)), rt);\n"
-    "    return mix(lo, hi, bt);\n"
-    "}\n\n"
-    "bool resident(vec2 range, float x) {",
+    """float sampleG(float recordPosition, int channel, float binPosition) {
+    float record = clamp(recordPosition, 0.0, float(max(0, u_gCount - 1)));
+    float bin = clamp(binPosition, 0.0, 127.0);
+    int r0 = int(floor(record));
+    int r1 = min(r0 + 1, max(0, u_gCount - 1));
+    int b0 = int(floor(bin));
+    int b1 = min(b0 + 1, 127);
+    float rt = fract(record);
+    float bt = fract(bin);
+    float lo = mix(float(unpackG(r0, channel, b0)), float(unpackG(r1, channel, b0)), rt);
+    float hi = mix(float(unpackG(r0, channel, b1)), float(unpackG(r1, channel, b1)), rt);
+    return mix(lo, hi, bt);
+}
+
+void wavePixelExtrema(
+    float centerRecord,
+    float recordsPerPixel,
+    int channel,
+    out float mx,
+    out float mn
+) {
+    int maxRecord = max(0, u_waveCount - 1);
+    float halfFootprint = max(recordsPerPixel * 0.5, 0.00001);
+    float leftEdge = centerRecord - halfFootprint;
+    float rightEdge = centerRecord + halfFootprint;
+    int firstRecord = clamp(int(floor(leftEdge)), 0, maxRecord);
+    int lastRecord = clamp(int(floor(rightEdge - 0.00001)), 0, maxRecord);
+    lastRecord = max(firstRecord, lastRecord);
+
+    uvec4 firstBytes = texelFetch(u_wave, ivec2(channel, firstRecord), 0);
+    mx = decodeWave(s16(firstBytes.r, firstBytes.g));
+    mn = decodeWave(s16(firstBytes.b, firstBytes.a));
+
+    // REAPER's normal three-level cache ratios stay well below this bound.
+    // The fixed cap keeps the GLSL loop predictable even for custom divisions.
+    for (int offset = 1; offset < 64; ++offset) {
+        int record = firstRecord + offset;
+        if (record > lastRecord) break;
+        uvec4 bytes = texelFetch(u_wave, ivec2(channel, record), 0);
+        mx = max(mx, decodeWave(s16(bytes.r, bytes.g)));
+        mn = min(mn, decodeWave(s16(bytes.b, bytes.a)));
+    }
+}
+
+bool resident(vec2 range, float x) {""",
 )
 _shader = _replace_required(
     _shader,
-    "    if (u_hasG != 0 && u_gCount > 0) {\n"
-    "        int record = recordAt(u_gRecord0, u_gRecordsAcross, u_gCount);\n"
-    "        int bin = clamp(int(floor((1.0 - localY) * 128.0)), 0, 127);\n"
-    "        float intensity = clamp(\n"
-    "            float(unpackG(record, channel, bin)) / 4095.0 * u_specGain,\n"
-    "            0.0,\n"
-    "            1.0\n"
-    "        );",
-    "    if (u_displayMode == 2 && u_hasG != 0 && u_gCount > 0) {\n"
-    "        float record = clamp(\n"
-    "            u_gRecord0 + v_uv.x * u_gRecordsAcross,\n"
-    "            0.0,\n"
-    "            float(max(0, u_gCount - 1))\n"
-    "        );\n"
-    "        float bin;\n"
-    "        if (u_specFreqLog != 0) {\n"
-    "            float minFreq = max(20.0, u_nyquist / 128.0);\n"
-    "            float frequency = exp(mix(log(minFreq), log(max(minFreq + 1.0, u_nyquist)), 1.0 - localY));\n"
-    "            bin = clamp(frequency * 128.0 / max(1.0, u_nyquist) - 0.5, 0.0, 127.0);\n"
-    "        } else {\n"
-    "            bin = clamp((1.0 - localY) * 128.0 - 0.5, 0.0, 127.0);\n"
-    "        }\n"
-    "        float code = sampleG(record, channel, bin);\n"
-    "        float db = (code - 4095.5) * (10.0 / (88.92179516969081 * log(10.0))) + u_specGainDb;\n"
-    "        float lo = min(u_specFloorDb, u_specCeilingDb - 0.001);\n"
-    "        float hi = max(u_specCeilingDb, lo + 0.001);\n"
-    "        float normalized = clamp((db - lo) / (hi - lo), 0.0, 1.0);\n"
-    "        float intensity = clamp(pow(normalized, max(0.05, u_specContrast)) * u_specGain, 0.0, 1.0);",
+    """    if (u_hasG != 0 && u_gCount > 0) {
+        int record = recordAt(u_gRecord0, u_gRecordsAcross, u_gCount);
+        int bin = clamp(int(floor((1.0 - localY) * 128.0)), 0, 127);
+        float intensity = clamp(
+            float(unpackG(record, channel, bin)) / 4095.0 * u_specGain,
+            0.0,
+            1.0
+        );""",
+    """    if (u_displayMode == 2 && u_hasG != 0 && u_gCount > 0) {
+        float record = clamp(
+            u_gRecord0 + v_uv.x * u_gRecordsAcross,
+            0.0,
+            float(max(0, u_gCount - 1))
+        );
+        float bin;
+        if (u_specFreqLog != 0) {
+            float minFreq = max(20.0, u_nyquist / 128.0);
+            float frequency = exp(mix(log(minFreq), log(max(minFreq + 1.0, u_nyquist)), 1.0 - localY));
+            bin = clamp(frequency * 128.0 / max(1.0, u_nyquist) - 0.5, 0.0, 127.0);
+        } else {
+            bin = clamp((1.0 - localY) * 128.0 - 0.5, 0.0, 127.0);
+        }
+        float code = sampleG(record, channel, bin);
+        float db = (code - 4095.5) * (10.0 / (88.92179516969081 * log(10.0))) + u_specGainDb;
+        float lo = min(u_specFloorDb, u_specCeilingDb - 0.001);
+        float hi = max(u_specCeilingDb, lo + 0.001);
+        float normalized = clamp((db - lo) / (hi - lo), 0.0, 1.0);
+        float intensity = clamp(pow(normalized, max(0.05, u_specContrast)) * u_specGain, 0.0, 1.0);""",
 )
 _shader = _replace_required(
     _shader,
@@ -103,20 +127,33 @@ _shader = _replace_required(
 )
 _shader = _replace_required(
     _shader,
-    "    if (u_hasWave != 0 && u_waveCount > 0) {",
-    "    if (u_displayMode == 0 && u_hasWave != 0 && u_waveCount > 0) {",
-)
-_shader = _replace_required(
-    _shader,
-    "        float aa = max(fwidth(amplitude) * 1.5, 0.001);\n"
-    "        float inside = smoothstep(mn - aa, mn + aa, amplitude)\n"
-    "                     * (1.0 - smoothstep(mx - aa, mx + aa, amplitude));",
-    "        float lower = amplitude - mn;\n"
-    "        float upper = mx - amplitude;\n"
-    "        float lowerAa = max(fwidth(lower) * 0.85, 0.001);\n"
-    "        float upperAa = max(fwidth(upper) * 0.85, 0.001);\n"
-    "        float inside = smoothstep(-lowerAa, lowerAa, lower)\n"
-    "                     * smoothstep(-upperAa, upperAa, upper);",
+    """    if (u_hasWave != 0 && u_waveCount > 0) {
+        int record = recordAt(u_waveRecord0, u_waveRecordsAcross, u_waveCount);
+        uvec4 bytes = texelFetch(u_wave, ivec2(channel, record), 0);
+        float mx = decodeWave(s16(bytes.r, bytes.g));
+        float mn = decodeWave(s16(bytes.b, bytes.a));
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float aa = max(fwidth(amplitude) * 1.5, 0.001);
+        float inside = smoothstep(mn - aa, mn + aa, amplitude)
+                     * (1.0 - smoothstep(mx - aa, mx + aa, amplitude));
+        color = mix(color, vec3(0.43, 0.92, 0.67), inside);
+    }""",
+    """    if (u_displayMode == 0 && u_hasWave != 0 && u_waveCount > 0) {
+        float recordPosition = u_waveRecord0 + v_uv.x * u_waveRecordsAcross;
+        float recordsPerPixel = max(abs(dFdx(recordPosition)), 0.00001);
+        float mx;
+        float mn;
+        wavePixelExtrema(recordPosition, recordsPerPixel, channel, mx, mn);
+
+        float amplitude = (0.5 - localY) * 2.0 * u_verticalFs;
+        float lower = amplitude - mn;
+        float upper = mx - amplitude;
+        float lowerAa = max(fwidth(lower) * 0.85, 0.001);
+        float upperAa = max(fwidth(upper) * 0.85, 0.001);
+        float inside = smoothstep(-lowerAa, lowerAa, lower)
+                     * smoothstep(-upperAa, upperAa, upper);
+        color = mix(color, vec3(0.43, 0.92, 0.67), inside);
+    }""",
 )
 _shader = _replace_required(
     _shader,
@@ -125,15 +162,15 @@ _shader = _replace_required(
 )
 _shader = _replace_required(
     _shader,
-    "        float aa = max(fwidth(amplitude) * 1.5, 0.001);\n"
-    "        float inside = smoothstep(extrema.g - aa, extrema.g + aa, amplitude)\n"
-    "                     * (1.0 - smoothstep(extrema.r - aa, extrema.r + aa, amplitude));",
-    "        float lower = amplitude - extrema.g;\n"
-    "        float upper = extrema.r - amplitude;\n"
-    "        float lowerAa = max(fwidth(lower) * 0.85, 0.001);\n"
-    "        float upperAa = max(fwidth(upper) * 0.85, 0.001);\n"
-    "        float inside = smoothstep(-lowerAa, lowerAa, lower)\n"
-    "                     * smoothstep(-upperAa, upperAa, upper);",
+    """        float aa = max(fwidth(amplitude) * 1.5, 0.001);
+        float inside = smoothstep(extrema.g - aa, extrema.g + aa, amplitude)
+                     * (1.0 - smoothstep(extrema.r - aa, extrema.r + aa, amplitude));""",
+    """        float lower = amplitude - extrema.g;
+        float upper = extrema.r - amplitude;
+        float lowerAa = max(fwidth(lower) * 0.85, 0.001);
+        float upperAa = max(fwidth(upper) * 0.85, 0.001);
+        float inside = smoothstep(-lowerAa, lowerAa, lower)
+                     * smoothstep(-upperAa, upperAa, upper);""",
 )
 _shader = _replace_required(
     _shader,
@@ -142,20 +179,20 @@ _shader = _replace_required(
 )
 _shader = _replace_required(
     _shader,
-    "        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);\n"
-    "        float line = 1.0 - smoothstep(\n"
-    "            amplitudePerPixel * 0.75,\n"
-    "            amplitudePerPixel * 1.75,\n"
-    "            abs(amplitude - lineSample)\n"
-    "        );",
-    "        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);\n"
-    "        float lineDistance = amplitude - lineSample;\n"
-    "        float lineAa = max(fwidth(lineDistance), amplitudePerPixel);\n"
-    "        float line = 1.0 - smoothstep(\n"
-    "            lineAa * 0.35,\n"
-    "            lineAa * 1.15,\n"
-    "            abs(lineDistance)\n"
-    "        );",
+    """        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);
+        float line = 1.0 - smoothstep(
+            amplitudePerPixel * 0.75,
+            amplitudePerPixel * 1.75,
+            abs(amplitude - lineSample)
+        );""",
+    """        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);
+        float lineDistance = amplitude - lineSample;
+        float lineAa = max(fwidth(lineDistance), amplitudePerPixel);
+        float line = 1.0 - smoothstep(
+            lineAa * 0.35,
+            lineAa * 1.15,
+            abs(lineDistance)
+        );""",
 )
 _shader = _replace_required(
     _shader,
@@ -216,9 +253,15 @@ class _UniformNameProxy:
         if key == "u_specGain":
             self._set_optional_float("u_specGainDb", self._owner.spectrogram_gain_db)
             self._set_optional_float("u_specFloorDb", self._owner.spectrogram_floor_db)
-            self._set_optional_float("u_specCeilingDb", self._owner.spectrogram_ceiling_db)
-            self._set_optional_float("u_specContrast", self._owner.spectrogram_contrast)
-            self._set_optional_int("u_specFreqLog", self._owner.spectrogram_frequency_log)
+            self._set_optional_float(
+                "u_specCeilingDb", self._owner.spectrogram_ceiling_db
+            )
+            self._set_optional_float(
+                "u_specContrast", self._owner.spectrogram_contrast
+            )
+            self._set_optional_int(
+                "u_specFreqLog", self._owner.spectrogram_frequency_log
+            )
             self._set_optional_int("u_displayMode", self._owner.display_mode_index)
         return result
 
@@ -259,6 +302,27 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
         self.display_mode_index = self.DISPLAY_MODES[self.display_mode]
         self.show_spectral = False
         self.show_loudness = False
+
+    @staticmethod
+    def _nearest_level(levels, desired_division: float):
+        """Choose the coarsest cache level that is no coarser than one pixel.
+
+        A nearest-in-log-space choice switches to the next coarse mip too early:
+        one peak bucket can then cover several screen pixels and appears as a
+        rectangular block. Staying on the finest level needed for the current
+        pixel footprint lets the shader union every max/min bucket touched by
+        that pixel, preserving transients while zooming out.
+        """
+        if not levels:
+            return None
+        desired = max(1.0, float(desired_division))
+        indexed = list(enumerate(levels))
+        eligible = [
+            item for item in indexed if max(1.0, float(item[1][0])) <= desired
+        ]
+        if eligible:
+            return max(eligible, key=lambda item: float(item[1][0]))
+        return min(indexed, key=lambda item: float(item[1][0]))
 
     def paintGL(self):  # noqa: N802 - Qt API
         program = self._program
@@ -311,13 +375,17 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
     def set_spectrogram_floor_db(self, value: float):
         self.spectrogram_floor_db = max(-200.0, min(-0.001, float(value)))
         if self.spectrogram_ceiling_db <= self.spectrogram_floor_db:
-            self.spectrogram_ceiling_db = min(24.0, self.spectrogram_floor_db + 1.0)
+            self.spectrogram_ceiling_db = min(
+                24.0, self.spectrogram_floor_db + 1.0
+            )
         self.update()
 
     def set_spectrogram_ceiling_db(self, value: float):
         self.spectrogram_ceiling_db = max(-199.0, min(24.0, float(value)))
         if self.spectrogram_ceiling_db <= self.spectrogram_floor_db:
-            self.spectrogram_floor_db = max(-200.0, self.spectrogram_ceiling_db - 1.0)
+            self.spectrogram_floor_db = max(
+                -200.0, self.spectrogram_ceiling_db - 1.0
+            )
         self.update()
 
     def set_spectrogram_contrast(self, value: float):

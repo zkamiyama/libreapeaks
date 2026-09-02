@@ -10,8 +10,9 @@ controls suitable for DAW inspection:
 - heatmap toggle;
 - linear or logarithmic frequency axis.
 
-When started without an audio path, the demo opens an empty drop target. Drop a
-local media file there to launch the normal full-cache preparation/player flow.
+When started without an audio path, the demo opens a modern drop target. Drop a
+local media file there and the same window immediately becomes a progress view,
+builds/reuses the complete cache, and opens the player without a second dialog.
 
 The cache is never rewritten by display controls. Multichannel material remains
 on one shared timeline with one vertically stacked lane per channel, matching
@@ -26,7 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSlider,
     QToolBar,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 import pyside6_player as _base
+from pyside6_prepare import CacheWorker
 
 _BasePlayerWindow = _base.PlayerWindow
 
@@ -247,8 +250,29 @@ class DawPlayerWindow(_BasePlayerWindow):
             widget.setEnabled(enabled)
 
 
+def _default_cache_options() -> dict[str, object]:
+    """Match the no-option defaults of pyside6_player for drop-open startup."""
+    return {
+        "peaks_path": None,
+        "rebuild": False,
+        "decoder": "auto",
+        "cache_mode": "auto",
+        "cache_directory": None,
+        "reaper_cache_map": None,
+        "allow_stale_cache": False,
+        "ffmpeg": "ffmpeg",
+        "ffprobe": "ffprobe",
+        "decode_timeout": _base.DEFAULT_DECODE_TIMEOUT,
+        "max_decode_bytes": _base.DEFAULT_MAX_DECODE_BYTES,
+        "wave_encoding": "auto",
+        "divisions": None,
+        "fine_peaks_per_second": 300,
+        "lock_timeout": 30.0,
+    }
+
+
 class DropLaunchWindow(QMainWindow):
-    """Empty launch surface used when the DAW demo starts without a path."""
+    """Drop target that turns directly into an in-place preparation view."""
 
     def __init__(self):
         super().__init__()
@@ -256,10 +280,16 @@ class DropLaunchWindow(QMainWindow):
         self.setWindowTitle("libreapeaks DAW player")
         self.resize(900, 520)
 
+        self.audio_path: Path | None = None
+        self._thread: QThread | None = None
+        self._worker: CacheWorker | None = None
+        self._player_window: DawPlayerWindow | None = None
+        self._prepared_playback = None
+
         self.drop_label = QLabel(
             "Drop an audio file here\n\n"
             "A complete waveform + spectral + spectrogram + loudness cache "
-            "will be prepared before playback."
+            "will be prepared automatically."
         )
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_label.setWordWrap(True)
@@ -268,19 +298,34 @@ class DropLaunchWindow(QMainWindow):
             "padding: 48px; font-size: 18px; }"
         )
 
-        open_button = QPushButton("Open audio file…")
-        open_button.clicked.connect(self._choose_file)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(True)
+        self.progress.hide()
+
+        self.status = QLabel("")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setWordWrap(True)
+        self.status.hide()
+
+        self.open_button = QPushButton("Open audio file…")
+        self.open_button.clicked.connect(self._choose_file)
 
         layout = QVBoxLayout()
         layout.addStretch(1)
         layout.addWidget(self.drop_label)
-        layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.status)
+        layout.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
         central = QWidget()
         central.setLayout(layout)
         self.setCentralWidget(central)
 
     def _choose_file(self) -> None:
+        if self._thread is not None:
+            return
         selected, _filter = QFileDialog.getOpenFileName(
             self,
             "Open audio file",
@@ -288,7 +333,7 @@ class DropLaunchWindow(QMainWindow):
             "Media files (*.*)",
         )
         if selected:
-            self._launch(Path(selected))
+            self._begin_prepare(Path(selected))
 
     def _first_local_file(self, event) -> Path | None:
         mime = event.mimeData()
@@ -302,32 +347,130 @@ class DropLaunchWindow(QMainWindow):
         return None
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt API
-        if self._first_local_file(event) is not None:
+        if self._thread is None and self._first_local_file(event) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):  # noqa: N802 - Qt API
         path = self._first_local_file(event)
-        if path is None:
+        if path is None or self._thread is not None:
             event.ignore()
             return
         event.acceptProposedAction()
-        self._launch(path)
+        self._begin_prepare(path)
 
-    def _launch(self, audio_path: Path) -> None:
-        script = Path(__file__).resolve()
-        result = QProcess.startDetached(
-            sys.executable,
-            [str(script), str(audio_path.resolve(strict=False))],
+    def _set_idle(self, message: str | None = None) -> None:
+        self.setAcceptDrops(True)
+        self.open_button.setEnabled(True)
+        self.open_button.show()
+        self.progress.hide()
+        if message:
+            self.status.setText(message)
+            self.status.show()
+        else:
+            self.status.hide()
+        self.drop_label.setText(
+            "Drop an audio file here\n\n"
+            "A complete waveform + spectral + spectrogram + loudness cache "
+            "will be prepared automatically."
         )
-        started = result[0] if isinstance(result, tuple) else bool(result)
-        if not started:
-            self.drop_label.setText(f"Could not launch player for:\n{audio_path}")
+
+    def _begin_prepare(self, audio_path: Path) -> None:
+        if self._thread is not None:
             return
+        audio = audio_path.expanduser().resolve(strict=False)
+        if not audio.is_file():
+            self._set_idle(f"File not found: {audio}")
+            return
+
+        self.audio_path = audio
+        self.setAcceptDrops(False)
+        self.open_button.setEnabled(False)
+        self.open_button.hide()
+        self.drop_label.setText(f"Preparing\n{audio.name}")
+        self.progress.setValue(0)
+        self.progress.show()
+        self.status.setText("Starting full cache preparation…")
+        self.status.show()
+
+        thread = QThread(self)
+        worker = CacheWorker(audio, _default_cache_options())
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_progress)
+        worker.completed.connect(self._on_completed)
+        worker.failed.connect(self._on_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._worker_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_progress(self, stage: str, value: int) -> None:
+        self.progress.setValue(max(0, min(100, int(value))))
+        self.status.setText(stage)
+
+    def _on_completed(self, peaks_path: object, generated: bool, mode: str) -> None:
+        audio = self.audio_path
+        if audio is None:
+            self._on_failed("cache preparation completed without an audio path")
+            return
+
+        self.progress.setValue(100)
+        self.status.setText("Opening player…")
+        prepared = None
+        try:
+            prepared = _base.prepare_playback_audio(
+                audio,
+                decoder="native",
+                ffmpeg="ffmpeg",
+                ffprobe="ffprobe",
+                timeout=_base.DEFAULT_DECODE_TIMEOUT,
+                max_decode_bytes=_base.DEFAULT_MAX_DECODE_BYTES,
+            )
+            player = DawPlayerWindow(
+                audio,
+                prepared.path,
+                Path(peaks_path),
+                bool(generated),
+                generation_mode=mode,
+                render_backend="auto",
+                cache_decoder="auto",
+                playback_decoder="native",
+                source_pcm_enabled=True,
+                pcm_decoder="auto",
+                ffmpeg="ffmpeg",
+                ffprobe="ffprobe",
+                decode_timeout=_base.DEFAULT_DECODE_TIMEOUT,
+                pcm_cache_bytes=_base.DEFAULT_PCM_CACHE_BYTES,
+                pcm_max_window_bytes=_base.DEFAULT_PCM_MAX_WINDOW_BYTES,
+                pcm_target_page_bytes=_base.DEFAULT_PCM_TARGET_PAGE_BYTES,
+            )
+        except Exception as exc:
+            if prepared is not None:
+                prepared.close()
+            self._on_failed(f"Could not open player: {exc}")
+            return
+
+        self._prepared_playback = prepared
+        self._player_window = player
         app = QApplication.instance()
         if app is not None:
-            app.quit()
+            app.aboutToQuit.connect(prepared.close)
+        player.show()
+        self.hide()
+
+    def _on_failed(self, message: str) -> None:
+        self.progress.setValue(0)
+        self._set_idle(f"Preparation failed: {message}")
+
+    def _worker_finished(self) -> None:
+        self._worker = None
+        self._thread = None
+        if self._player_window is None and self.isVisible():
+            self.setAcceptDrops(True)
 
 
 def main(argv: list[str] | None = None) -> int:

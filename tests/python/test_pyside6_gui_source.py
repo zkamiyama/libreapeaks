@@ -32,6 +32,16 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn("fwidth(lower)", source)
         self.assertIn("fwidth(upper)", source)
 
+    def test_glsl_waveform_uses_pixel_extrema_and_stable_lod(self) -> None:
+        source = read_source("pyside6_reaper_gl_view.py")
+        self.assertIn("void wavePixelExtrema(", source)
+        self.assertIn("dFdx(recordPosition)", source)
+        self.assertIn("mx = max(mx,", source)
+        self.assertIn("mn = min(mn,", source)
+        self.assertIn("coarsest cache level that is no coarser than one pixel", source)
+        self.assertIn("float(item[1][0])) <= desired", source)
+        self.assertIn("return max(eligible", source)
+
     def test_shader_patch_targets_still_exist(self) -> None:
         base = read_source("pyside6_gl_view.py")
         self.assertIn("if (u_hasG != 0 && u_gCount > 0)", base)
@@ -56,13 +66,18 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertNotIn("mode_combo", source)
         self.assertIn("waveform, spectral peaks, spectrogram, and loudness", source)
 
-    def test_daw_player_has_empty_drop_open_launcher(self) -> None:
+    def test_daw_player_drop_open_prepares_inline(self) -> None:
         source = read_source("pyside6_daw_player.py")
         self.assertIn("class DropLaunchWindow(QMainWindow):", source)
         self.assertIn("self.setAcceptDrops(True)", source)
         self.assertIn("def dragEnterEvent", source)
         self.assertIn("def dropEvent", source)
-        self.assertIn("QProcess.startDetached", source)
+        self.assertIn("QProgressBar", source)
+        self.assertIn("CacheWorker(audio, _default_cache_options())", source)
+        self.assertIn("worker.progress.connect(self._on_progress)", source)
+        self.assertIn("self._begin_prepare(path)", source)
+        self.assertIn("self.status.setText(\"Opening player…\")", source)
+        self.assertNotIn("QProcess.startDetached", source)
         self.assertIn("if not args:", source)
         self.assertIn("Drop an audio file here", source)
 
