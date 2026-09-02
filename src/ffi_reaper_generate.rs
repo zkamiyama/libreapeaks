@@ -99,8 +99,13 @@ pub unsafe extern "C" fn rpk_generate_pcm16_reaper(
 
 /// Generate a REAPER-native float32 cache mode.
 ///
-/// mode=0 and mode=1 are supported. mode=2 returns -2 because exact float32
-/// `-'g'` generation is not implemented and is never approximated through PCM16.
+/// mode=0: waveform only
+/// mode=1: waveform + -'s' spectral + -'r' loudness
+/// mode=2: waveform + -'s' + -'g' spectrogram + -'r'
+///
+/// Float `-'g'` generation is implemented without a PCM16 approximation, but
+/// remains outside the byte-identical REAPER compatibility claim until a
+/// dedicated float32 live-oracle matrix is added.
 #[no_mangle]
 pub unsafe extern "C" fn rpk_generate_f32_reaper(
     pcm: *const f32,
