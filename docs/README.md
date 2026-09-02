@@ -15,6 +15,15 @@ unproven or unsupported.
 Machine-readable validation metadata lives in
 [`validation-summary.json`](validation-summary.json).
 
+## I want to share cache freshness with REAPER
+
+Read [`SOURCE_STAMP.md`](SOURCE_STAMP.md).
+
+It documents the source `mtime`/size fields stored in `.reapeaks`, the
+`SourceStamp` Rust/Python/C APIs, why the library's comparison is intentionally
+exact/conservative, and the live REAPER gate that requires a libreapeaks cache
+to be accepted without starting `PCM_Source_BuildPeaks` work.
+
 ## I want the finite-f32 / RPKL proof
 
 Read [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md).
