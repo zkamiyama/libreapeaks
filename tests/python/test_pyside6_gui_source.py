@@ -31,13 +31,16 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn("fwidth(lower)", source)
         self.assertIn("fwidth(upper)", source)
 
-    def test_glsl_source_pcm_uses_screen_space_segment_prefilter(self) -> None:
+    def test_glsl_source_pcm_uses_neighbor_screen_space_segments(self) -> None:
         source = read_source("pyside6_reaper_gl_view.py")
         self.assertIn("float segmentDistancePx(", source)
         self.assertIn("float prefilteredCoverage(", source)
+        self.assertIn("float pcmNeighborSegmentDistancePx(", source)
+        self.assertIn("for (int offset = -1; offset <= 1; ++offset)", source)
+        self.assertIn("best = min(best, segmentDistancePx", source)
         self.assertIn("abs(dFdx(position))", source)
         self.assertIn("abs(dFdy(amplitude))", source)
-        self.assertIn("segmentDistancePx(vec2(0.0), aPx, bPx)", source)
+        self.assertIn("pcmNeighborSegmentDistancePx(", source)
         self.assertIn("prefilteredCoverage(distancePx, 0.55)", source)
         self.assertIn("smoothstep(8.0, 11.0, pixelsPerFrame)", source)
         self.assertNotIn("fwidth(lineDistance)", source)

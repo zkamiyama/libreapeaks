@@ -109,6 +109,38 @@ float prefilteredCoverage(float distancePx, float halfWidthPx) {
     );
 }
 
+float pcmNeighborSegmentDistancePx(
+    float position,
+    float amplitude,
+    float samplesPerPixel,
+    float amplitudePerPixel,
+    int channel
+) {
+    int maxRecord = max(0, u_pcmCount - 1);
+    int base = int(floor(position));
+    float best = 1e20;
+
+    // Keep the same three segments in consideration while the fragment crosses
+    // a sample-cell boundary. This removes the visible pop where a steep
+    // segment used to enter/leave the distance test on a tiny zoom change.
+    for (int offset = -1; offset <= 1; ++offset) {
+        int ia = clamp(base + offset, 0, maxRecord);
+        int ib = clamp(base + offset + 1, 0, maxRecord);
+        float sa = finitePcm(texelFetch(u_pcm, ivec2(channel, ia), 0).r);
+        float sb = finitePcm(texelFetch(u_pcm, ivec2(channel, ib), 0).r);
+        vec2 aPx = vec2(
+            (float(ia) - position) / samplesPerPixel,
+            (sa - amplitude) / amplitudePerPixel
+        );
+        vec2 bPx = vec2(
+            (float(ib) - position) / samplesPerPixel,
+            (sb - amplitude) / amplitudePerPixel
+        );
+        best = min(best, segmentDistancePx(vec2(0.0), aPx, bPx));
+    }
+    return best;
+}
+
 bool resident(vec2 range, float x) {""",
 )
 _shader = _replace_required(
@@ -210,15 +242,13 @@ _shader = _replace_required(
     """        float amplitudePerPixel = max(abs(dFdy(amplitude)), 1e-6);
         float samplesPerPixel = max(abs(dFdx(position)), 1e-6);
         float pixelsPerFrame = 1.0 / samplesPerPixel;
-        vec2 aPx = vec2(
-            (float(left) - position) / samplesPerPixel,
-            (leftSample - amplitude) / amplitudePerPixel
+        float distancePx = pcmNeighborSegmentDistancePx(
+            position,
+            amplitude,
+            samplesPerPixel,
+            amplitudePerPixel,
+            channel
         );
-        vec2 bPx = vec2(
-            (float(right) - position) / samplesPerPixel,
-            (rightSample - amplitude) / amplitudePerPixel
-        );
-        float distancePx = segmentDistancePx(vec2(0.0), aPx, bPx);
         float line = prefilteredCoverage(distancePx, 0.55);""",
 )
 _shader = _replace_required(
