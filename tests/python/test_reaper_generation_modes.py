@@ -1,3 +1,4 @@
+import math
 import struct
 import unittest
 
@@ -56,9 +57,10 @@ class ReaperGenerationModeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.generate("s-only")
 
-    def test_float_spectrogram_is_not_silently_approximated(self) -> None:
-        pcm = struct.pack("<" + "f" * 48_000, *([0.0] * 48_000))
-        with self.assertRaises(ValueError):
+    def test_float_spectrogram_emits_native_layer_shape(self) -> None:
+        values = [math.sin(index * 0.031) for index in range(48_137)]
+        pcm = struct.pack("<" + "f" * len(values), *values)
+        data = bytes(
             reapeaks.generate_f32_reaper(
                 pcm,
                 48_000,
@@ -67,6 +69,28 @@ class ReaperGenerationModeTests(unittest.TestCase):
                 True,
                 "spectrogram",
             )
+        )
+        self.assertEqual(data[:4], b"RPKL")
+        self.assertEqual(
+            layer_tokens(data),
+            self.divisions + [-115, -115, -115, -103, -103, -114, -114],
+        )
+
+    def test_float_spectrogram_special_values_are_safe(self) -> None:
+        values = [float("nan"), float("inf"), float("-inf"), 0.0, 0.5, -0.5]
+        pcm_values = [values[index % len(values)] for index in range(48_137)]
+        pcm = struct.pack("<" + "f" * len(pcm_values), *pcm_values)
+        data = bytes(
+            reapeaks.generate_f32_reaper(
+                pcm,
+                48_000,
+                1,
+                self.divisions,
+                True,
+                "spectrogram",
+            )
+        )
+        self.assertEqual(data[:4], b"RPKL")
 
 
 if __name__ == "__main__":
