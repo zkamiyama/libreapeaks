@@ -62,14 +62,19 @@ pub fn quantize_rpkn_f32(v: f32) -> i16 {
 
 /// Encode one floating-point amplitude into an RPKL v1.2 peak code.
 ///
-/// REAPER 7.79 was probed with 43,857 finite float values and additional
-/// high-range values through +/-512.  The measured encoder is the official
-/// transform with round-half-up quantization:
-///   |x| <= 1: code_mag = round_half_up(|x| * 24576)
-///   |x| >  1: code_mag = round_half_up(24576 + 1024*log2(|x|))
+/// A pinned REAPER 7.79 x86_64 Linux oracle recovered every finite-f32 decision
+/// boundary: 32,767 positive transitions and 32,768 negative transitions.  The
+/// magnitude transform is the documented RPKL mapping:
+///
+///   |x| <= 1: q = |x| * 24576
+///   |x| >  1: q = 24576 + 1024*log2(|x|)
+///
+/// Quantization is sign-asymmetric at an exactly representable half tie.  It is
+/// equivalent to rounding the signed transformed value with `floor(y + 0.5)`:
+/// positive `q = n + 0.5` maps to `n + 1`, while negative `q = n + 0.5` maps
+/// toward zero to `-n`.  The exhaustive oracle found 8,192 such finite ties;
+/// every other positive/negative transition has the same magnitude boundary.
 /// Positive values saturate at +32767 and negative values at -32768.
-/// Consequently the representable negative endpoint is exactly -256 while the
-/// largest positive code is slightly below +256.
 #[inline]
 pub fn quantize_rpkl_f32(v: f32) -> i16 {
     if v.is_nan() {
@@ -80,26 +85,26 @@ pub fn quantize_rpkl_f32(v: f32) -> i16 {
     }
     let neg = v.is_sign_negative();
     let a = (v as f64).abs();
-    let code = if a <= 1.0 {
-        (a * 24576.0 + 0.5).floor() as i32
-    } else if a.is_infinite() {
-        if neg {
-            32768
-        } else {
-            32767
-        }
+    if a.is_infinite() {
+        return if neg { i16::MIN } else { i16::MAX };
+    }
+    let q = if a <= 1.0 {
+        a * 24576.0
     } else {
-        (24576.0 + 1024.0 * a.log2() + 0.5).floor() as i32
+        24576.0 + 1024.0 * a.log2()
     };
     if neg {
-        let m = code.clamp(0, 32768);
+        // floor(-q + 0.5) == -ceil(q - 0.5).  Writing the magnitude form
+        // avoids a negative-zero/sign conversion corner while preserving the
+        // exact REAPER half-tie direction.
+        let m = ((q - 0.5).ceil() as i32).clamp(0, 32768);
         if m == 32768 {
             i16::MIN
         } else {
             -(m as i16)
         }
     } else {
-        code.clamp(0, 32767) as i16
+        ((q + 0.5).floor() as i32).clamp(0, 32767) as i16
     }
 }
 
@@ -391,6 +396,19 @@ mod tests {
         assert_eq!(quantize_rpkl_f32(-256.0), -32768);
         assert_eq!(decode_rpkl_code(25600), 2.0);
         assert_eq!(decode_rpkl_code(-32768), -256.0);
+    }
+
+    #[test]
+    fn rpkl_exact_half_ties_match_reaper_sign_asymmetry() {
+        let first_tie = f32::from_bits(0x3880_0000); // 1.5 / 24576
+        assert_eq!(first_tie as f64 * 24576.0, 1.5);
+        assert_eq!(quantize_rpkl_f32(first_tie), 2);
+        assert_eq!(quantize_rpkl_f32(-first_tie), -1);
+
+        let observed_six_channel_tie = f32::from_bits(0x3f23_ac00);
+        assert_eq!(observed_six_channel_tie as f64 * 24576.0, 15712.5);
+        assert_eq!(quantize_rpkl_f32(observed_six_channel_tie), 15713);
+        assert_eq!(quantize_rpkl_f32(-observed_six_channel_tie), -15712);
     }
 
     #[test]
