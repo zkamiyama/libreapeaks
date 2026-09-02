@@ -3,6 +3,7 @@ use crate::format::{encode, GeneratedLayer, Version};
 use crate::loudness::{build_loudness_layers_f32, build_loudness_layers_pcm16};
 use crate::spectral::{build_spectral_layers, build_spectral_layers_f32};
 use crate::spectrogram_generate::build_spectrogram_layers_pcm16;
+use crate::spectrogram_generate_f32::build_spectrogram_layers_f32;
 use crate::wave::{build_wave_layers, build_wave_layers_f32, WaveEncoding};
 
 #[derive(Debug, Clone)]
@@ -129,34 +130,14 @@ fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -
     encode_generated(Version::Rpkn, options, &layers)
 }
 
-/// Generate RPKN v1.1 from interleaved decoded PCM16.
-///
-/// Waveform generation is byte-exact against the REAPER 7.79 Linux oracle for
-/// the validated corpus. Spectral generation is closest with `strict-wdl`.
-///
-/// This legacy entry point writes waveform and optional spectral layers only.
-/// Use [`generate_pcm16_mode3`] for REAPER mode-3 waveform, spectral and
-/// loudness output.
 pub fn generate_pcm16(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
     generate_pcm16_impl(pcm, options, false)
 }
 
-/// Generate a complete REAPER peak-cache mode-3 RPKN file.
-///
-/// `options.spectral` must be `true`. The resulting layer order matches REAPER
-/// 7.79: waveform layers, mirrored `-'s'` spectral layers, then `-'r'`
-/// loudness layers for every waveform division except the finest.
 pub fn generate_pcm16_mode3(pcm: &[i16], options: &GenerateOptions) -> Result<Vec<u8>> {
     generate_pcm16_impl(pcm, options, true)
 }
 
-/// Generate REAPER peak-cache mode-3 RPKN with `-'g'` spectrogram layers.
-///
-/// This is intentionally separate from [`generate_pcm16_mode3`] so enabling
-/// spectrogram generation cannot change the byte-exact legacy mode-3 path.
-/// `options.spectral` must be `true`, and waveform divisions must be nested
-/// integer multiples. The resulting layer order matches REAPER 7.79:
-/// waveform, mirrored `-'s'`, mirrored `-'g'`, then `-'r'` layers.
 pub fn generate_pcm16_mode3_with_spectrogram(
     pcm: &[i16],
     options: &GenerateOptions,
@@ -228,26 +209,65 @@ fn generate_f32_impl(
     encode_generated(version, options, &layers)
 }
 
-/// Generate from decoded float32 samples.
-///
-/// `large_range=true` writes RPKL v1.2 (the format REAPER uses for floating
-/// media and, on REAPER 7.79 Linux, MP3/Vorbis/Opus sources). `false` writes
-/// RPKN and is useful for decoded integer PCM such as 24/32-bit WAV or FLAC.
-///
-/// This legacy entry point writes waveform and optional spectral layers only.
-/// Use [`generate_f32_mode3`] for complete mode-3 output.
 pub fn generate_f32(pcm: &[f32], options: &GenerateOptions, large_range: bool) -> Result<Vec<u8>> {
     generate_f32_impl(pcm, options, large_range, false)
 }
 
-/// Generate complete REAPER mode-3 output from decoded float32 samples.
-///
-/// `options.spectral` must be `true`. `large_range` selects RPKL versus RPKN
-/// waveform encoding exactly as in [`generate_f32`].
 pub fn generate_f32_mode3(
     pcm: &[f32],
     options: &GenerateOptions,
     large_range: bool,
 ) -> Result<Vec<u8>> {
     generate_f32_impl(pcm, options, large_range, true)
+}
+
+/// Generate float32 REAPER-shaped mode-3 output including `-'g'` spectrogram layers.
+///
+/// The waveform encoding is RPKL when `large_range=true` and RPKN otherwise.
+/// The `-'g'` DSP path mirrors the recovered PCM16 scheduler/window/quantizer,
+/// but exact byte identity for arbitrary float media is not claimed until a
+/// dedicated live-REAPER float oracle is added. Non-finite source samples are
+/// sanitized to zero for spectrogram analysis so hostile float media cannot
+/// poison FFT output or panic generation.
+pub fn generate_f32_mode3_with_spectrogram(
+    pcm: &[f32],
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.len(), true)?;
+    validate_spectrogram_layer_count(options)?;
+    let encoding = if large_range {
+        WaveEncoding::Rpkl
+    } else {
+        WaveEncoding::Rpkn
+    };
+    let version = if large_range {
+        Version::Rpkl
+    } else {
+        Version::Rpkn
+    };
+
+    let mut layers =
+        build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
+    layers.extend(build_spectral_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    layers.extend(build_spectrogram_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        &options.divisions,
+    )?);
+    layers.extend(build_loudness_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    encode_generated(version, options, &layers)
 }
