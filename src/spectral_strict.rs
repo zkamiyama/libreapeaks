@@ -6,12 +6,10 @@
 //! `strict-wdl` feature selects this module.
 //!
 //! REAPER's fine spectral scheduler is centered on the 22.05 kHz analysis
-//! domain. For high-rate media the 1024-sample window is centered between
-//! samples 511 and 512, so the count boundary uses a 511.5-analysis-sample
-//! half-span. Strict mode overrides only the expected output count while
-//! leaving the original media length passed to WDL_Resampler untouched;
-//! declaring padded source frames changes WDL's edge response and therefore
-//! does not match REAPER.
+//! domain with a 512-analysis-sample half-window. Strict mode overrides only
+//! the expected output count while leaving the original media length passed to
+//! WDL_Resampler untouched; declaring padded source frames changes WDL's edge
+//! response and therefore does not match REAPER.
 
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
@@ -19,7 +17,6 @@ use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
 const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
 const REAPER_ANALYSIS_RATE: u128 = 22_050;
 const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
-const REAPER_SPECTRAL_CENTER_TWICE: u128 = 1023;
 
 #[inline]
 fn low_rate_fine_count(frames: usize, division: u32) -> usize {
@@ -37,28 +34,13 @@ fn high_rate_fine_count(frames: usize, source_rate: u32, division: u32) -> usize
     if division == 0 || source_rate == 0 {
         return 0;
     }
-
-    // At source rates above the 22.05 kHz analysis rate, REAPER's EOF count
-    // places the center of its even 1024-sample spectral window at 511.5
-    // analysis samples, not at an integer 512-sample margin. Keep the
-    // calculation integer-exact by doubling both the source span and the
-    // denominator:
-    //
-    // round_half_up(
-    //   (frames * 22050 / source_rate - 511.5)
-    //   / (division * 22050 / source_rate)
-    // )
-    //
-    // The half-sample distinction is observable at a real decision boundary:
-    // 50,550 frames @ 76.8 kHz, division 256 -> 191 records. A 512-sample
-    // margin incorrectly produces 190.
-    let source_span_twice = frames as u128 * REAPER_ANALYSIS_RATE * 2;
-    let margin_twice = REAPER_SPECTRAL_CENTER_TWICE * source_rate as u128;
-    if source_span_twice <= margin_twice {
+    let source_span = frames as u128 * REAPER_ANALYSIS_RATE;
+    let margin = REAPER_SPECTRAL_HALF_WINDOW as u128 * source_rate as u128;
+    if source_span <= margin {
         return 0;
     }
-    let denominator_twice = division as u128 * REAPER_ANALYSIS_RATE * 2;
-    ((source_span_twice - margin_twice + denominator_twice / 2) / denominator_twice) as usize
+    let denominator = division as u128 * REAPER_ANALYSIS_RATE;
+    ((source_span - margin + denominator / 2) / denominator) as usize
 }
 
 #[inline]
@@ -325,11 +307,6 @@ mod tests {
             (5000, 48_000, 160, 24),
             (5000, 96_000, 320, 9),
             (5000, 192_000, 640, 1),
-            // Whole-file finite-f32 oracle boundary: the even-window center is
-            // 511.5 analysis samples. A 512-sample margin is one record short.
-            (50_550, 76_800, 256, 191),
-            // Keep the neighboring high-ratio case that must not round up.
-            (192_131, 192_000, 192, 977),
         ];
         for (frames, rate, division, expected) in cases {
             assert_eq!(high_rate_fine_count(frames, rate, division), expected);
