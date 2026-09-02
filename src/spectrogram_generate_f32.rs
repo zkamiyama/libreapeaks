@@ -366,11 +366,12 @@ pub(crate) fn build_spectrogram_layers_f32(
     for &ratio in ratios.iter().skip(1) {
         let previous_time_frames = current_frames.len() / channels;
         let output_time_frames = previous_time_frames / ratio;
-        let capacity = output_time_frames
-            .checked_mul(channels)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "spectrogram frame capacity overflow",
-            ))?;
+        let capacity =
+            output_time_frames
+                .checked_mul(channels)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "spectrogram frame capacity overflow",
+                ))?;
         let mut next_frames = Vec::with_capacity(capacity);
         for output_frame in 0..output_time_frames {
             let first = output_frame * ratio;
