@@ -263,7 +263,12 @@ fn analyze_channel(
     }
 
     let total: f64 = mags.iter().sum();
-    if total <= 0.0 {
+    // REAPER's ordered floating-point branch proceeds only when total > 0.
+    // This rejects NaN as well as zero/negative totals.  With very large but
+    // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
+    // emits a zero spectral peak for those frames instead of a Nyquist/zero-
+    // density placeholder.
+    if !(total > 0.0) {
         return (SpectralPeak::default(), next);
     }
 
