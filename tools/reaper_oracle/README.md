@@ -11,6 +11,34 @@ Early reverse-engineering runs processed many media sources in one process and
 observed spectral results that depended on the preceding source. Xvfb can be
 kept alive across the run, but REAPER itself is restarted for every media file.
 
+New oracle code should use `fresh_process.run_one_source()`. That helper makes
+the isolation policy structural: one call creates an isolated `reaper.ini`,
+launches REAPER with `-newinst`, processes exactly one source, waits for REAPER
+to exit, and only then returns the generated peak file.
+
+The permanent `reaper-oracle-hygiene` workflow independently checks this
+assumption. It repeats identical sources through fresh REAPER processes and then
+changes the order in which unrelated sources are processed. A source's raw
+`.reapeaks` bytes must remain identical in every run.
+
+## Evidence before implementation
+
+A whole-file mismatch is not, by itself, evidence for a particular internal
+REAPER rule. Compatibility changes should follow this order:
+
+1. identify the differing layer;
+2. split header/count differences from payload differences;
+3. build a fresh-process local oracle for the smallest relevant boundary;
+4. repeat each oracle point to establish REAPER-side determinism;
+5. test neighboring points and competing explanations;
+6. only then change the strict compatibility implementation.
+
+In particular, scheduler/EOF behavior must not be inferred from one whole-file
+fixture by adding synthetic samples or changing window placement until a local
+sweep distinguishes those hypotheses. `spectral_eof_sweep.py` exists for this
+purpose and records observed `-'s'` counts and final records without treating a
+candidate formula as truth.
+
 ## Usage
 
 Extract a Linux REAPER build and place test media directly in one directory:
