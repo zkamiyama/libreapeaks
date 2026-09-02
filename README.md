@@ -213,9 +213,6 @@ $env:CXXFLAGS="/DNOMINMAX"
 cargo test --release --features strict-wdl
 ```
 
-This only disables the Windows SDK `min`/`max` macros; it does not change MSVC
-floating-point behavior.
-
 ## Python
 
 The distribution name is `libreapeaks`; the import module is `reapeaks`.
