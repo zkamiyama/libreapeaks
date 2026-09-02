@@ -1,7 +1,7 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::generate::{
-    generate_f32, generate_f32_mode3, generate_pcm16, generate_pcm16_mode3,
-    generate_pcm16_mode3_with_spectrogram, GenerateOptions,
+    generate_f32, generate_f32_mode3, generate_f32_mode3_with_spectrogram, generate_pcm16,
+    generate_pcm16_mode3, generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
 
 /// REAPER 7.79 peak-display/cache generation modes observed by the live oracle.
@@ -60,9 +60,11 @@ pub fn generate_pcm16_reaper(
 
 /// Generate one of the REAPER-native float32 peak-cache modes in a single call.
 ///
-/// `Waveform` and `Spectral` are supported for RPKN/RPKL output. Exact `-'g'`
-/// generation is currently implemented only for PCM16, so `Spectrogram`
-/// returns `Unsupported` instead of silently changing sample representation.
+/// Waveform and spectral modes retain their established paths. Spectrogram mode
+/// now emits waveform + `-'s'` + `-'g'` + `-'r'` for float media as well. The
+/// float `-'g'` path follows the recovered PCM16 scheduler/window/quantizer but
+/// remains outside the byte-identical REAPER compatibility claim until a
+/// dedicated float oracle is added.
 pub fn generate_f32_reaper(
     pcm: &[f32],
     options: &GenerateOptions,
@@ -74,8 +76,10 @@ pub fn generate_f32_reaper(
         ReaperPeakMode::Spectral => {
             generate_f32_mode3(pcm, &with_spectral(options, true), large_range)
         }
-        ReaperPeakMode::Spectrogram => Err(ReaPeaksError::Unsupported(
-            "float32 REAPER spectrogram generation",
-        )),
+        ReaperPeakMode::Spectrogram => generate_f32_mode3_with_spectrogram(
+            pcm,
+            &with_spectral(options, true),
+            large_range,
+        ),
     }
 }
