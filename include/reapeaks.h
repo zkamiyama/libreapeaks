@@ -122,8 +122,11 @@ int32_t rpk_generate_pcm16_reaper(const int16_t *pcm, size_t frames,
                                   RpkBuffer *out);
 
 /*
- * Float REAPER modes support WAVEFORM and SPECTRAL. SPECTROGRAM returns -2
- * until exact float32 -'g' generation is implemented.
+ * Float REAPER modes support WAVEFORM, SPECTRAL and SPECTROGRAM. With
+ * large_range=1 the waveform container is RPKL. Float -'g' generation follows
+ * the recovered REAPER 7.79 PCM16 scheduler/window/quantizer but remains
+ * outside the byte-identical compatibility claim until a dedicated float
+ * live-oracle matrix is added.
  */
 int32_t rpk_generate_f32_reaper(const float *pcm, size_t frames,
                                 size_t channels, uint32_t sample_rate,
