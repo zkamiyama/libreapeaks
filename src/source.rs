@@ -47,8 +47,8 @@ impl SourceStamp {
             Ok(duration) => duration.as_secs() as u32,
             Err(error) => {
                 let duration = error.duration();
-                let seconds_before_epoch = duration.as_secs()
-                    + u64::from(duration.subsec_nanos() != 0);
+                let seconds_before_epoch =
+                    duration.as_secs() + u64::from(duration.subsec_nanos() != 0);
                 0u32.wrapping_sub(seconds_before_epoch as u32)
             }
         };
