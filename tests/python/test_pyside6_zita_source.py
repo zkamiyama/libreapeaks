@@ -40,12 +40,15 @@ class PySideZitaSourceTests(unittest.TestCase):
         self.assertNotIn("physical_width =", source)
         self.assertNotIn("_paint_zita_envelope", source)
 
-    def test_high_resolution_source_collapses_to_plain_polyline(self) -> None:
+    def test_high_resolution_source_has_polyline_and_deep_zoom_points(self) -> None:
         source = read_source("pyside6_zita_gl_view.py")
         self.assertIn('if window.mode == "samples":', source)
         self.assertIn("path = QPainterPath()", source)
-        self.assertIn("path.lineTo(x, y)", source)
-        self.assertNotIn("drawEllipse", source)
+        self.assertIn("path.lineTo(point)", source)
+        self.assertIn("SAMPLE_POINT_MIN_DEVICE_PX = 8.0", source)
+        self.assertIn("SAMPLE_POINT_RADIUS_DEVICE_PX = 2.0", source)
+        self.assertIn("device_pixels_per_sample = width * dpr / span", source)
+        self.assertIn("painter.drawEllipse(point, radius, radius)", source)
         self.assertNotIn("pointFade", source)
 
     def test_packed_cache_uses_same_filled_minmax_geometry(self) -> None:
