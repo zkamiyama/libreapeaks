@@ -103,9 +103,10 @@ pub unsafe extern "C" fn rpk_generate_pcm16_reaper(
 /// mode=1: waveform + -'s' spectral + -'r' loudness
 /// mode=2: waveform + -'s' + -'g' spectrogram + -'r'
 ///
-/// Float `-'g'` generation is implemented without a PCM16 approximation, but
-/// remains outside the byte-identical REAPER compatibility claim until a
-/// dedicated float32 live-oracle matrix is added.
+/// Float `-'g'` generation is direct, not a PCM16 approximation. With RPKL
+/// output its decoded bins and packed payload bytes are exact in the permanent
+/// 128-case REAPER 7.79 Linux x86_64 live-oracle matrix. Exceptional float
+/// policy and unrelated whole-file RPKL waveform rounding remain separate.
 #[no_mangle]
 pub unsafe extern "C" fn rpk_generate_f32_reaper(
     pcm: *const f32,
