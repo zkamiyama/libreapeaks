@@ -205,6 +205,17 @@ cargo test --release --features strict-wdl
 `strict-wdl` builds Cockos WDL FFT/resampler code from `third_party/WDL` with
 `WDL_FFT_REALSIZE=8`.
 
+On Windows with MSVC, define `NOMINMAX` when building `strict-wdl` to avoid
+Windows SDK `min`/`max` macro collisions:
+
+```powershell
+$env:CXXFLAGS="/DNOMINMAX"
+cargo test --release --features strict-wdl
+```
+
+This only disables the Windows SDK `min`/`max` macros; it does not change MSVC
+floating-point behavior.
+
 ## Python
 
 The distribution name is `libreapeaks`; the import module is `reapeaks`.
