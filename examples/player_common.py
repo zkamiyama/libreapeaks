@@ -390,7 +390,13 @@ def read_reapeaks_header(path: str | Path) -> ReaPeaksHeader:
 
 
 def _source_metadata(stat_result: os.stat_result) -> tuple[int, int]:
-    return int(stat_result.st_mtime) & 0xFFFF_FFFF, stat_result.st_size & 0xFFFF_FFFF
+    try:
+        mtime, size = reapeaks.source_stamp_from_unix_seconds(
+            int(stat_result.st_mtime), int(stat_result.st_size)
+        )
+    except Exception as exc:
+        raise PlayerCacheError(f"cannot build REAPER source stamp: {exc}") from exc
+    return int(mtime), int(size)
 
 
 def inspect_reapeaks_cache(
@@ -402,19 +408,16 @@ def inspect_reapeaks_cache(
         return CacheInspection(peaks, False, False, False, "missing")
     try:
         header = read_reapeaks_header(peaks)
-        # This is the actual parser used by both demos. Header-only acceptance
-        # would incorrectly reuse truncated or structurally corrupt files.
-        reapeaks.ReaPeaks.open(str(peaks))
+        # Use the Rust parser for structural validation, then the library's
+        # source-stamp comparator instead of duplicating .reapeaks semantics here.
+        parsed = reapeaks.ReaPeaks.open(str(peaks))
         source_stat = audio.stat()
+        expected_mtime, expected_size = _source_metadata(source_stat)
+        fresh = bool(parsed.matches_source_stamp(expected_mtime, expected_size))
     except Exception as exc:
         # PyO3 exceptions do not share a stable class across supported Python
         # versions, so parser failures are intentionally normalised here.
         return CacheInspection(peaks, True, False, False, str(exc))
-    expected_mtime, expected_size = _source_metadata(source_stat)
-    fresh = (
-        header.source_mtime_low32 == expected_mtime
-        and header.source_size_low32 == expected_size
-    )
     reason = "fresh" if fresh else (
         "source metadata mismatch: "
         f"cache(mtime={header.source_mtime_low32},size={header.source_size_low32}) "
