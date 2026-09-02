@@ -104,8 +104,21 @@
     "portable_fft_scale": "2x conventional DFT output to match the recovered WDL real-FFT scale",
     "float32_generation": {
       "implemented": true,
-      "byte_exact_oracle_proven": false,
-      "non_finite_policy": "NaN and +/-Inf are sanitized to zero for -g analysis; finite subnormals are accepted"
+      "byte_exact_oracle_proven": true,
+      "oracle_cases": 128,
+      "oracle_backend": "strict-wdl",
+      "fresh_reaper_process_per_case": true,
+      "source_container": "WAVE IEEE float32",
+      "reaper_cache_version": "RPKL",
+      "sample_rate_range_hz": [8000, 192000],
+      "channel_count_range": [1, 8],
+      "peakcachegenrs_core_values": [100, 150, 300, 500, 1000],
+      "special_rate_boundaries_hz": [76799, 76800, 76801],
+      "fine_division_boundary_scope": "values around 255/256/257",
+      "comparison": "decoded 128-bin spectrogram frames plus packed -g payload bytes",
+      "exact_cases": 128,
+      "payload_failures": 0,
+      "non_finite_policy": "NaN and +/-Inf are sanitized to zero for -g analysis; finite subnormals are accepted; exact REAPER exceptional-value policy remains outside the compatibility claim"
     },
     "property_stress": [
       "exhaustive 12-bit packing",
@@ -239,7 +252,7 @@
     "native_mode_names": ["waveform", "spectral", "spectrogram"],
     "pcm16_native_spectrogram_supported": true,
     "f32_native_spectrogram_supported": true,
-    "f32_native_spectrogram_byte_exact_oracle_proven": false,
+    "f32_native_spectrogram_byte_exact_oracle_proven": true,
     "rust_complete_mode3": [
       "generate_pcm16_mode3",
       "generate_f32_mode3",
@@ -267,7 +280,6 @@
     "REAPER versions other than 7.79 unless separately tested",
     "Windows/macOS or non-x86_64 behavior unless separately tested",
     "every lossy codec/decoder build",
-    "float32/RPKL spectrogram (-g) generation",
     "legacy loudness (-l) payload layout",
     "RPKM compact waveform materialization",
     "exact REAPER NaN/Inf/subnormal float-media policy"
