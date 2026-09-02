@@ -1,0 +1,79 @@
+name: reaper-spectrogram-f32-byte-identical
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-spectrogram-f32-byte-identical.yml'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'src/spectrogram_generate_f32.rs'
+      - 'src/spectral.rs'
+      - 'src/spectral_strict.rs'
+      - 'src/loudness.rs'
+      - 'src/wave.rs'
+      - 'tests/reaper_spectrogram_f32_exact.rs'
+      - 'tools/reaper_oracle/spectrogram_f32_cases.py'
+      - 'tools/reaper_oracle/spectrogram_f32_run.py'
+      - 'tools/reaper_oracle/build_probe.lua'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-spectrogram-f32-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Formatting gate
+        run: cargo fmt --all -- --check
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/spectrogram-f32
+          mkdir -p "$root/reaper" "$root/media" "$root/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/spectrogram-f32/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Generate float32 WAVE corpus
+        run: python3 tools/reaper_oracle/spectrogram_f32_cases.py /tmp/spectrogram-f32/media
+      - name: Run fresh-process REAPER float32 whole-file oracle
+        run: python3 tools/reaper_oracle/spectrogram_f32_run.py /tmp/spectrogram-f32 "$REAPER_BIN"
+      - name: Publish oracle summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/spectrogram-f32/results/summary.txt ]; then
+            cat /tmp/spectrogram-f32/results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-spectrogram-f32-${{ github.sha }}
+          path: |
+            /tmp/spectrogram-f32/results
+            /tmp/spectrogram-f32/media/cases.json
+          if-no-files-found: warn
+          retention-days: 14
