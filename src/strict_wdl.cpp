@@ -175,6 +175,25 @@ long long rpk_wdl_resample_all(
             out_pos += got;
             if (avail < wanted) break;
         }
+
+        // REAPER's spectral consumer advances the analysis-domain ring once
+        // beyond WDL's last valid output sample. This is observable at EOF
+        // scheduler boundaries: 50,550 source frames at 76.8 kHz with a
+        // 256-source-frame fine division produce 191 spectral records, whereas
+        // WDL's valid-output stream alone reaches only 190. The following zero
+        // analysis frame supplies that EOF advance. The Rust strict scheduler
+        // still caps output at the oracle-derived expected record count, so
+        // cases that already reached their target never consume this tail.
+        if (out_pos < output_capacity_frames) {
+            const auto output_offset = static_cast<std::size_t>(out_pos) *
+                                       static_cast<std::size_t>(channels);
+            std::fill_n(
+                output + output_offset,
+                static_cast<std::size_t>(channels),
+                0.0);
+            ++out_pos;
+        }
+
         return out_pos;
     } catch (...) {
         // WDL allocates internally. Convert allocation and other C++ failures
