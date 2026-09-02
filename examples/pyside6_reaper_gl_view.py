@@ -6,10 +6,10 @@ PySide6 6.11's scalar-uniform overload resolution by resolving names to integer
 uniform locations and dispatching scalar values through the explicit
 ``setUniformValue1f``/``setUniformValue1i`` APIs.
 
-It also layers DAW-style spectrogram display transforms on top of the exact
-packed `-'g'` bytes: display gain in dB, floor/ceiling range, contrast, and a
-linear/log frequency-axis switch. These are shader-only transforms and never
-rewrite the cache.
+It also layers DAW-style display controls on top of the exact packed cache
+bytes: an exclusive analysis view mode plus spectrogram gain in dB,
+floor/ceiling range, contrast, and a linear/log frequency-axis switch. These
+are shader-only display transforms and never rewrite the cache.
 """
 from __future__ import annotations
 
@@ -17,13 +17,26 @@ from PySide6.QtCore import Qt, Signal
 
 import pyside6_gl_view as _gl
 
-_gl.FRAGMENT_SHADER = _gl.FRAGMENT_SHADER.replace(
+
+def _replace_required(source: str, old: str, new: str) -> str:
+    if old not in source:
+        raise RuntimeError("pyside6_gl_view shader layout changed")
+    return source.replace(old, new, 1)
+
+
+_shader = _gl.FRAGMENT_SHADER
+_shader = _replace_required(
+    _shader,
     "vec3 active =",
     "vec3 loadedColor =",
-).replace(
+)
+_shader = _replace_required(
+    _shader,
     "? active :",
     "? loadedColor :",
-).replace(
+)
+_shader = _replace_required(
+    _shader,
     "uniform float u_specGain;\nuniform int u_heatmap;",
     "uniform float u_specGain;\n"
     "uniform float u_specGainDb;\n"
@@ -31,29 +44,125 @@ _gl.FRAGMENT_SHADER = _gl.FRAGMENT_SHADER.replace(
     "uniform float u_specCeilingDb;\n"
     "uniform float u_specContrast;\n"
     "uniform int u_specFreqLog;\n"
+    "uniform int u_displayMode;\n"
     "uniform int u_heatmap;",
-).replace(
+)
+_shader = _replace_required(
+    _shader,
+    "bool resident(vec2 range, float x) {",
+    "float sampleG(float recordPosition, int channel, float binPosition) {\n"
+    "    float record = clamp(recordPosition, 0.0, float(max(0, u_gCount - 1)));\n"
+    "    float bin = clamp(binPosition, 0.0, 127.0);\n"
+    "    int r0 = int(floor(record));\n"
+    "    int r1 = min(r0 + 1, max(0, u_gCount - 1));\n"
+    "    int b0 = int(floor(bin));\n"
+    "    int b1 = min(b0 + 1, 127);\n"
+    "    float rt = fract(record);\n"
+    "    float bt = fract(bin);\n"
+    "    float lo = mix(float(unpackG(r0, channel, b0)), float(unpackG(r1, channel, b0)), rt);\n"
+    "    float hi = mix(float(unpackG(r0, channel, b1)), float(unpackG(r1, channel, b1)), rt);\n"
+    "    return mix(lo, hi, bt);\n"
+    "}\n\n"
+    "bool resident(vec2 range, float x) {",
+)
+_shader = _replace_required(
+    _shader,
+    "    if (u_hasG != 0 && u_gCount > 0) {\n"
+    "        int record = recordAt(u_gRecord0, u_gRecordsAcross, u_gCount);\n"
     "        int bin = clamp(int(floor((1.0 - localY) * 128.0)), 0, 127);\n"
     "        float intensity = clamp(\n"
     "            float(unpackG(record, channel, bin)) / 4095.0 * u_specGain,\n"
     "            0.0,\n"
     "            1.0\n"
     "        );",
-    "        int bin;\n"
+    "    if (u_displayMode == 2 && u_hasG != 0 && u_gCount > 0) {\n"
+    "        float record = clamp(\n"
+    "            u_gRecord0 + v_uv.x * u_gRecordsAcross,\n"
+    "            0.0,\n"
+    "            float(max(0, u_gCount - 1))\n"
+    "        );\n"
+    "        float bin;\n"
     "        if (u_specFreqLog != 0) {\n"
     "            float minFreq = max(20.0, u_nyquist / 128.0);\n"
     "            float frequency = exp(mix(log(minFreq), log(max(minFreq + 1.0, u_nyquist)), 1.0 - localY));\n"
-    "            bin = clamp(int(floor(frequency * 128.0 / max(1.0, u_nyquist))) - 1, 0, 127);\n"
+    "            bin = clamp(frequency * 128.0 / max(1.0, u_nyquist) - 0.5, 0.0, 127.0);\n"
     "        } else {\n"
-    "            bin = clamp(int(floor((1.0 - localY) * 128.0)), 0, 127);\n"
+    "            bin = clamp((1.0 - localY) * 128.0 - 0.5, 0.0, 127.0);\n"
     "        }\n"
-    "        float code = float(unpackG(record, channel, bin));\n"
+    "        float code = sampleG(record, channel, bin);\n"
     "        float db = (code - 4095.5) * (10.0 / (88.92179516969081 * log(10.0))) + u_specGainDb;\n"
     "        float lo = min(u_specFloorDb, u_specCeilingDb - 0.001);\n"
     "        float hi = max(u_specCeilingDb, lo + 0.001);\n"
     "        float normalized = clamp((db - lo) / (hi - lo), 0.0, 1.0);\n"
     "        float intensity = clamp(pow(normalized, max(0.05, u_specContrast)) * u_specGain, 0.0, 1.0);",
 )
+_shader = _replace_required(
+    _shader,
+    "    if (u_hasSpectral != 0 && u_sCount > 0) {",
+    "    if (u_displayMode == 1 && u_hasSpectral != 0 && u_sCount > 0) {",
+)
+_shader = _replace_required(
+    _shader,
+    "    if (u_hasWave != 0 && u_waveCount > 0) {",
+    "    if (u_displayMode == 0 && u_hasWave != 0 && u_waveCount > 0) {",
+)
+_shader = _replace_required(
+    _shader,
+    "        float aa = max(fwidth(amplitude) * 1.5, 0.001);\n"
+    "        float inside = smoothstep(mn - aa, mn + aa, amplitude)\n"
+    "                     * (1.0 - smoothstep(mx - aa, mx + aa, amplitude));",
+    "        float lower = amplitude - mn;\n"
+    "        float upper = mx - amplitude;\n"
+    "        float lowerAa = max(fwidth(lower) * 0.85, 0.001);\n"
+    "        float upperAa = max(fwidth(upper) * 0.85, 0.001);\n"
+    "        float inside = smoothstep(-lowerAa, lowerAa, lower)\n"
+    "                     * smoothstep(-upperAa, upperAa, upper);",
+)
+_shader = _replace_required(
+    _shader,
+    "    if (u_pcmMode == 1 && u_pcmCount > 0) {",
+    "    if (u_displayMode == 0 && u_pcmMode == 1 && u_pcmCount > 0) {",
+)
+_shader = _replace_required(
+    _shader,
+    "        float aa = max(fwidth(amplitude) * 1.5, 0.001);\n"
+    "        float inside = smoothstep(extrema.g - aa, extrema.g + aa, amplitude)\n"
+    "                     * (1.0 - smoothstep(extrema.r - aa, extrema.r + aa, amplitude));",
+    "        float lower = amplitude - extrema.g;\n"
+    "        float upper = extrema.r - amplitude;\n"
+    "        float lowerAa = max(fwidth(lower) * 0.85, 0.001);\n"
+    "        float upperAa = max(fwidth(upper) * 0.85, 0.001);\n"
+    "        float inside = smoothstep(-lowerAa, lowerAa, lower)\n"
+    "                     * smoothstep(-upperAa, upperAa, upper);",
+)
+_shader = _replace_required(
+    _shader,
+    "    } else if (u_pcmMode == 2 && u_pcmCount > 0) {",
+    "    } else if (u_displayMode == 0 && u_pcmMode == 2 && u_pcmCount > 0) {",
+)
+_shader = _replace_required(
+    _shader,
+    "        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);\n"
+    "        float line = 1.0 - smoothstep(\n"
+    "            amplitudePerPixel * 0.75,\n"
+    "            amplitudePerPixel * 1.75,\n"
+    "            abs(amplitude - lineSample)\n"
+    "        );",
+    "        float amplitudePerPixel = max(fwidth(amplitude), 1e-6);\n"
+    "        float lineDistance = amplitude - lineSample;\n"
+    "        float lineAa = max(fwidth(lineDistance), amplitudePerPixel);\n"
+    "        float line = 1.0 - smoothstep(\n"
+    "            lineAa * 0.35,\n"
+    "            lineAa * 1.15,\n"
+    "            abs(lineDistance)\n"
+    "        );",
+)
+_shader = _replace_required(
+    _shader,
+    "    if (u_hasLoudness != 0 && u_rCount > 0) {",
+    "    if (u_displayMode == 3 && u_hasLoudness != 0 && u_rCount > 0) {",
+)
+_gl.FRAGMENT_SHADER = _shader
 GpuAnalysisCanvas = _gl.GpuAnalysisCanvas
 
 
@@ -110,6 +219,7 @@ class _UniformNameProxy:
             self._set_optional_float("u_specCeilingDb", self._owner.spectrogram_ceiling_db)
             self._set_optional_float("u_specContrast", self._owner.spectrogram_contrast)
             self._set_optional_int("u_specFreqLog", self._owner.spectrogram_frequency_log)
+            self._set_optional_int("u_displayMode", self._owner.display_mode_index)
         return result
 
     def __getattr__(self, name):
@@ -130,6 +240,13 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
     """Packed GLSL canvas with REAPER-like interaction and DAW display controls."""
 
     verticalScaleChanged = Signal(float)
+    displayModeChanged = Signal(str)
+    DISPLAY_MODES = {
+        "waveform": 0,
+        "spectral": 1,
+        "spectrogram": 2,
+        "loudness": 3,
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -138,6 +255,10 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
         self.spectrogram_ceiling_db = 0.0
         self.spectrogram_contrast = 1.0
         self.spectrogram_frequency_log = True
+        self.display_mode = "waveform"
+        self.display_mode_index = self.DISPLAY_MODES[self.display_mode]
+        self.show_spectral = False
+        self.show_loudness = False
 
     def paintGL(self):  # noqa: N802 - Qt API
         program = self._program
@@ -148,6 +269,36 @@ class ReaperGpuAnalysisCanvas(GpuAnalysisCanvas):
             return super().paintGL()
         finally:
             self._program = program
+
+    def _source_upload_for_view(self):
+        if self.display_mode != "waveform":
+            return None
+        return super()._source_upload_for_view()
+
+    def set_display_mode(self, mode: str):
+        normalized = str(mode).strip().lower()
+        if normalized not in self.DISPLAY_MODES:
+            raise ValueError(f"unknown display mode: {mode}")
+        changed = normalized != self.display_mode
+        self.display_mode = normalized
+        self.display_mode_index = self.DISPLAY_MODES[normalized]
+        self.show_spectral = normalized == "spectral"
+        self.show_loudness = normalized == "loudness"
+        if changed:
+            self.displayModeChanged.emit(normalized)
+        self.update()
+
+    def set_spectral_overlay(self, enabled: bool):
+        if enabled:
+            self.set_display_mode("spectral")
+        elif self.display_mode == "spectral":
+            self.set_display_mode("waveform")
+
+    def set_loudness_overlay(self, enabled: bool):
+        if enabled:
+            self.set_display_mode("loudness")
+        elif self.display_mode == "loudness":
+            self.set_display_mode("waveform")
 
     def set_vertical_full_scale(self, value: float):
         self.vertical_full_scale = max(0.1, min(32.0, float(value)))
