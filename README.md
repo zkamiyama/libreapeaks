@@ -60,21 +60,25 @@ REAPER output byte-for-byte. The permanent gates include:
 
 - 8/8 lossless ALAC/M4A mode-3 files, complete-file byte identical;
 - 16/16 adversarial rate/channel/EOF mode-3 files, complete-file byte identical;
-- 122/122 adversarial **spectrogram mode-3** cases, complete-file byte identical
-  with `generate_pcm16_mode3_with_spectrogram` + `strict-wdl`;
-- the same 122-case spectrogram matrix checked against the portable/default FFT
-  implementation for exact `-'g'` output;
+- 122/122 adversarial **PCM16 spectrogram mode-3** cases, complete-file byte
+  identical with `generate_pcm16_mode3_with_spectrogram` + `strict-wdl`;
+- the same 122-case PCM16 spectrogram matrix checked against the portable/default
+  FFT implementation for exact `-'g'` output;
+- **128/128 adversarial IEEE float32/RPKL spectrogram cases with exact decoded
+  `-'g'` bins and exact packed `-'g'` payload bytes**;
 - a 188-case fresh-process `-'s'` spectral corpus with 10,112/10,112 oracle
   codes exact, plus larger fine/mipmap aggregation corpora;
 - ASan/UBSan, ThreadSanitizer, strict-WDL boundary checks, parser corruption
   tests, packing exhaustiveness, scheduler boundaries, and deterministic
   parallel-generation stress.
 
-The 122-case spectrogram stress matrix spans 8 kHz through 192 kHz, multiple
-`peakcachegenrs` values including 100/150/300/500/1000 and branch-boundary
-values, 1-8 channels, exact scheduler edges, long inputs, silence/DC/Nyquist,
-LSB-level and full-scale signals, exact-bin/off-bin tones, chirps, impulses,
-noise, and deterministic randomized cases.
+The float32/RPKL `-'g'` gate uses one fresh REAPER process per WAVE source and
+spans 8 kHz through 192 kHz, 1-8 channels, multiple `peakcachegenrs` values and
+branch-boundary values, finite values above ±1.0, tiny finite values, exact-bin
+and off-bin tones, chirps, impulses, noise, sparse lanes, scheduler boundaries,
+long inputs, and deterministic randomized cases. This is a `-'g'` layer claim;
+it does not claim REAPER-identical NaN/Inf handling or whole-file identity for
+every possible RPKL waveform rounding edge.
 
 See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for the exact contract and
 [`docs/validation-summary.json`](docs/validation-summary.json) for the
@@ -130,23 +134,24 @@ rpk_generate_pcm16_reaper(...)
 rpk_generate_f32_reaper(...)
 ```
 
-PCM16 supports all three modes. Float32 currently supports waveform and spectral
-modes; float32 spectrogram mode fails closed until exact float32 `-'g'`
-generation is implemented.
+PCM16 and float32 support all three modes. With `large_range=true`, float32
+writes RPKL; its `-'g'` payload is byte-exact against the pinned REAPER 7.79
+Linux x86_64 executable for the permanent 128-case adversarial matrix.
 
 ## Spectrogram (`-'g'`) support
 
-`-'g'` is parsed, serialized, and generated natively for PCM16 mode-3 caches.
-The low-level Rust API exposes:
+`-'g'` is parsed, serialized, and generated natively for PCM16 and float32
+mode-3 caches. The low-level Rust APIs expose:
 
 ```text
 generate_pcm16_mode3_with_spectrogram(...)
+generate_f32_mode3_with_spectrogram(...)
 ```
 
-This entry point is intentionally separate from `generate_pcm16_mode3`, so
-adding spectrogram layers cannot silently change the established byte-exact
-legacy mode-3 path. With `GenerateOptions.spectral = true`, the generated REAPER
-7.79 layer order is:
+These entry points are intentionally separate from the non-spectrogram mode-3
+writers, so adding spectrogram layers cannot silently change the established
+legacy mode-3 paths. With `GenerateOptions.spectral = true`, the generated
+REAPER-shaped layer order is:
 
 ```text
 waveform layers
@@ -177,13 +182,13 @@ frame count.
 | RPKN / RPKL waveform layers | Parse, generate, tile, render |
 | RPKM | Header/layout recognition; compact waveform payload is not exposed through the current waveform pyramid |
 | `-'s'` spectral peaks | Parse, generate, tile |
-| `-'g'` spectrogram | Parse, serialize, PCM16 mode-3 generate |
+| `-'g'` spectrogram | Parse, serialize, PCM16 and float32 mode-3 generate; PCM16 and finite float32/RPKL have live byte-exact gates |
 | `-'r'` loudness | Parse and generate through REAPER-native mode APIs |
 | legacy `-'l'` loudness | Token recognized; payload layout not implemented |
 | REAPER-style divisions | `default_divisions(sample_rate, peakcachegenrs)` in Rust/Python/C |
 | GUI waveform pyramid | Native REAPER levels plus lazy ratio-4 display levels |
-| C ABI | Native waveform / spectral (`s+r`) / PCM16 spectrogram (`s+g+r`) generation plus legacy APIs |
-| Python | Native waveform / spectral (`s+r`) / PCM16 spectrogram (`s+g+r`) generation plus legacy APIs |
+| C ABI | Native waveform / spectral (`s+r`) / spectrogram (`s+g+r`) generation plus legacy APIs |
+| Python | Native waveform / spectral (`s+r`) / spectrogram (`s+g+r`) generation plus legacy APIs |
 
 ## Rust generation entry points
 
@@ -218,6 +223,9 @@ generate_pcm16_reaper(..., ReaperPeakMode::Spectral)
 
 generate_pcm16_reaper(..., ReaperPeakMode::Spectrogram)
     waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
+
+generate_f32_reaper(..., ReaperPeakMode::Spectrogram)
+    float waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
 ```
 
 The lower-level/legacy entry points remain available:
@@ -229,7 +237,7 @@ generate_pcm16 / generate_f32
 generate_pcm16_mode3 / generate_f32_mode3
     waveform + -'s' spectral + -'r' loudness
 
-generate_pcm16_mode3_with_spectrogram
+generate_pcm16_mode3_with_spectrogram / generate_f32_mode3_with_spectrogram
     waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
 ```
 
@@ -281,6 +289,14 @@ Desktop Qt player:
 ```bash
 python -m pip install PySide6
 python examples/pyside6_player.py /path/to/audio.wav
+```
+
+DAW-oriented Qt spectrogram demo with display-only gain/range/contrast and
+linear/log-frequency controls:
+
+```bash
+python examples/pyside6_daw_player.py /path/to/audio.wav \
+  --generation-mode spectrogram --wave-encoding rpkl
 ```
 
 Browser player:
