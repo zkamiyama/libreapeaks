@@ -20,7 +20,7 @@ fn key(namespace: &[u8], kind: &[u8]) -> PyResult<RpkxKey> {
     Ok(RpkxKey::new(namespace, kind))
 }
 
-#[pyclass(name = "RpkxChunk")]
+#[pyclass(name = "RpkxChunk", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyRpkxChunk {
     namespace: [u8; 16],
