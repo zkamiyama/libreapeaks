@@ -1,6 +1,6 @@
 # REAPER 7.79 `.ReaPeaks` reverse-engineering notes
 
-Date updated: 2026-09-01  
+Date updated: 2026-09-02  
 Primary oracle: REAPER 7.79 x86_64 Linux  
 Current scope: waveform, `-'s'` spectral peaks, `-'g'` spectrogram, `-'r'`
 loudness, division selection, decoder provenance, and cache-path policy
@@ -129,16 +129,23 @@ PCM24 corpus gives **50,000 / 50,000** exact buckets.
 
 ## RPKL float waveform encoding — Official + Oracle
 
-For magnitude `m = abs(x)`:
+For magnitude `m = abs(x)`, the established non-tie behavior follows:
 
 ```text
-m <= 1: code_mag = round_half_up(m * 24576)
-m >  1: code_mag = round_half_up(24576 + 1024*log2(m))
+m <= 1: code_mag ~= m * 24576
+m >  1: code_mag ~= 24576 + 1024*log2(m)
 ```
 
 Positive values clamp to 32767; negative magnitude clamps to 32768 before sign
 application. REAPER initializes each RPKL bucket with `max=-1.0`, `min=+1.0`.
 The recorded float corpus is **43,857 / 43,857** exact.
+
+A later float32 spectrogram whole-file diagnostic exposed one exact linear
+half-tie not covered by that corpus: source `-0.63934326171875` gives magnitude
+`15712.5` after the 24576 scale, and REAPER 7.79 stored `-15712` while the old
+half-up implementation stored `-15713`. This is a waveform-quantizer rounding
+edge, independent of `-'g'`; the general exact RPKL tie rule should therefore
+not be inferred from the earlier non-tie corpus alone.
 
 ## Waveform EOF scheduling — Oracle
 
@@ -250,6 +257,11 @@ for coherent tones.
 PCM16 is first scaled by the float32 constant `1/32768`, multiplied by the
 float32 window in float32, then promoted to f64 for the FFT input.
 
+For IEEE float32 WAVE media, the validated RPKL `-'g'` path uses the source f32
+sample directly (no PCM16 normalization), multiplies it by the same f32 window
+in f32, then promotes the product to f64 for the FFT. This direct path is locked
+by the 128-case live oracle below rather than inferred from file-format naming.
+
 ## Scheduler and window placement — Oracle
 
 The recovered base-window shift for fine division `d` is:
@@ -328,22 +340,40 @@ integer multiples.
 
 ## Validation and stress — Validated implementation
 
-The permanent pinned-REAPER stress corpus contains **122 PCM16 WAVE cases**.
+The permanent pinned-REAPER PCM16 stress corpus contains **122 WAVE cases**.
 Every source is built by a fresh REAPER 7.79 process. The strict-WDL test checks
 headers, all non-`g` payloads, decoded bins, packed `-'g'` bytes, and finally the
 whole RPKN byte stream:
 
 ```text
-122 / 122 complete spectrogram mode-3 files byte-identical
+122 / 122 complete PCM16 spectrogram mode-3 files byte-identical
 ```
 
 The portable/default FFT implementation is checked against the same 122 cases
 for exact `-'g'` output.
 
-The corpus covers 8 kHz through 192 kHz, 1-8 channels, preference and fine
-window-placement boundaries, scheduler ±1 boundaries, long coarse mipmaps,
-DC/Nyquist/LSB/full-scale extremes, exact-bin and off-bin tones, chirps, ramps,
-impulses, noise, sparse channels, and deterministic randomized configurations.
+A separate permanent IEEE float32/RPKL gate contains **128 adversarial WAVE
+cases**, again using one fresh REAPER process per source. It deliberately checks
+the spectrogram surface independently of unrelated RPKL waveform rounding:
+
+```text
+128 / 128 float32/RPKL cases: decoded -'g' frames exact
+128 / 128 float32/RPKL cases: packed -'g' payload bytes exact
+0 packed-payload failures
+```
+
+The float32 corpus spans 8 kHz through 192 kHz, 1-8 channels,
+`peakcachegenrs` 100/150/300/500/1000 and neighboring branch values,
+76,799/76,800/76,801 Hz, fine divisions around 255/256/257, scheduler
+boundaries, long multichannel inputs, silence/DC, finite values above ±1.0,
+very small finite values, exact-bin and off-bin tones, chirps, ramps, steps,
+impulses, deterministic noise, sparse lanes, and deterministic randomized
+cases.
+
+The compatibility corpus is finite-valued. NaN/Inf exact REAPER behavior is not
+inferred from it. libreapeaks sanitizes non-finite samples to zero for `-'g'`
+analysis as a safety policy so malformed float media cannot poison FFT output or
+panic generation; finite subnormals are accepted.
 
 Independent property/adversarial tests additionally exhaust 12-bit packing,
 round-trip arbitrary 192-byte frames, reject truncations and malformed counts,
@@ -424,7 +454,8 @@ Representative permanent totals are recorded in
 ```text
 FFmpeg/ALAC mode-3:                 8 / 8 whole files exact
 adversarial mode-3:               16 / 16 whole files exact
-spectrogram mode-3 strict-WDL:   122 / 122 whole files exact
+PCM16 spectrogram strict-WDL:    122 / 122 whole files exact
+float32/RPKL -'g':               128 / 128 payload cases exact
 -'s' fresh-process primary:   10,112 / 10,112 codes exact
 -'s' independent fine total:  16,300 / 16,300 codes exact
 -'s' all-mipmap:              96,222 / 96,222 codes exact
@@ -433,18 +464,17 @@ waveform primary:            122,516 / 122,516 buckets exact
 
 # Intentionally unsupported / unproven areas
 
-The major RPKN PCM16 mode-3 waveform, `-'s'`, `-'g'`, and `-'r'` algorithms are
-now represented in the implementation and live oracle suite. Remaining gaps
-include:
+The major RPKN PCM16 mode-3 waveform, `-'s'`, `-'g'`, and `-'r'` algorithms and
+the finite float32/RPKL `-'g'` path are represented in the implementation and
+live oracle suite. Remaining gaps include:
 
 1. REAPER versions/platforms/architectures outside the named oracle matrices;
-2. f32/RPKL `-'g'` generation;
-3. complete mode-3/`-'g'` writer entry points in public C and Python APIs;
-4. legacy `-'l'` payload layout;
-5. RPKM compact waveform materialization;
-6. exact REAPER NaN/Inf/subnormal policy for arbitrary float media;
-7. broader codec/decoder matrices;
-8. mmap-backed parsing for extremely long files as a performance feature.
+2. legacy `-'l'` payload layout;
+3. RPKM compact waveform materialization;
+4. exact REAPER NaN/Inf/subnormal policy for arbitrary float media;
+5. whole-file RPKL identity across every finite waveform tie/rounding edge;
+6. broader codec/decoder matrices;
+7. mmap-backed parsing for extremely long files as a performance feature.
 
 Future oracle work should continue to use fresh REAPER processes and should
 label observed 7.79 behavior as such rather than silently promoting it to a
