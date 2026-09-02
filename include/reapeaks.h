@@ -52,6 +52,19 @@ typedef struct RpkSourceStamp {
   uint32_t source_size_low32;
 } RpkSourceStamp;
 
+/*
+ * RPKX (REAPER Peaks eXtension) opaque chunk metadata. namespace_id is a
+ * 16-byte application namespace; use a stable UUID to avoid collisions. kind
+ * is an application-defined FourCC. libreapeaks never interprets the payload.
+ */
+typedef struct RpkxChunkInfo {
+  uint8_t namespace_id[16];
+  uint8_t kind[4];
+  uint32_t version;
+  uint32_t flags;
+  size_t payload_len;
+} RpkxChunkInfo;
+
 int32_t rpk_open(const char *path, RpkHandle **out);
 void rpk_close(RpkHandle *h);
 uint8_t rpk_wave_encoding(const RpkHandle *h);
@@ -67,6 +80,37 @@ int32_t rpk_get_source_stamp(const RpkHandle *h, RpkSourceStamp *out);
 int32_t rpk_matches_source_stamp(const RpkHandle *h,
                                  const RpkSourceStamp *stamp);
 int32_t rpk_matches_source(const RpkHandle *h, const char *path);
+
+/* RPKX read access on an opened cache. */
+size_t rpk_rpkx_chunk_count(const RpkHandle *h);
+int32_t rpk_rpkx_get_chunk_info(const RpkHandle *h, size_t index,
+                                RpkxChunkInfo *out);
+int32_t rpk_rpkx_get_chunk_payload(const RpkHandle *h, size_t index,
+                                   RpkBuffer *out);
+
+/*
+ * RPKX byte-to-byte editors. The returned buffer contains a complete .reapeaks
+ * file. set replaces every matching namespace/kind chunk with one value;
+ * append permits duplicate keys; remove deletes every matching key; strip
+ * removes the RPKX container. Unknown chunks and bytes following a recognized
+ * RPKX container are preserved. Existing non-RPKX bytes immediately after the
+ * standard REAPER region are never overwritten implicitly.
+ */
+int32_t rpk_rpkx_set_chunk(const uint8_t *reapeaks, size_t reapeaks_len,
+                           const uint8_t namespace_id[16],
+                           const uint8_t kind[4], uint32_t version,
+                           uint32_t flags, const uint8_t *payload,
+                           size_t payload_len, RpkBuffer *out);
+int32_t rpk_rpkx_append_chunk(const uint8_t *reapeaks, size_t reapeaks_len,
+                              const uint8_t namespace_id[16],
+                              const uint8_t kind[4], uint32_t version,
+                              uint32_t flags, const uint8_t *payload,
+                              size_t payload_len, RpkBuffer *out);
+int32_t rpk_rpkx_remove_chunks(const uint8_t *reapeaks, size_t reapeaks_len,
+                               const uint8_t namespace_id[16],
+                               const uint8_t kind[4], RpkBuffer *out);
+int32_t rpk_rpkx_strip(const uint8_t *reapeaks, size_t reapeaks_len,
+                       RpkBuffer *out);
 
 size_t rpk_level_count(const RpkHandle *h);
 int32_t rpk_get_level_info(const RpkHandle *h, size_t index, RpkLevelInfo *out);
@@ -149,9 +193,8 @@ int32_t rpk_generate_pcm16_reaper(const int16_t *pcm, size_t frames,
  * permanent 128-case REAPER 7.79 Linux x86_64 live-oracle matrix. Exceptional
  * float policy and unrelated whole-file RPKL waveform rounding are separate.
  */
-int32_t rpk_generate_f32_reaper(const float *pcm, size_t frames,
-                                size_t channels, uint32_t sample_rate,
-                                const uint32_t *divisions,
+int32_t rpk_generate_f32_reaper(const float *pcm, size_t frames, size_t channels,
+                                uint32_t sample_rate, const uint32_t *divisions,
                                 size_t division_count,
                                 uint32_t source_mtime_low32,
                                 uint32_t source_size_low32,
