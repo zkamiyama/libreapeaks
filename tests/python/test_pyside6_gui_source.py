@@ -45,6 +45,19 @@ class PySideGuiSourceTests(unittest.TestCase):
         self.assertIn("smoothstep(8.0, 11.0, pixelsPerFrame)", source)
         self.assertNotIn("fwidth(lineDistance)", source)
 
+    def test_daw_waveform_uses_continuous_minmax_lines(self) -> None:
+        source = read_source("pyside6_zita_gl_view.py")
+        self.assertIn("def _disable_fragment_waveform", source)
+        self.assertIn("false && u_displayMode == 0 && u_hasWave", source)
+        self.assertIn("def _paint_source_contours", source)
+        self.assertIn("def _paint_packed_contours", source)
+        self.assertIn("max_path.lineTo(x, top)", source)
+        self.assertIn("min_path.lineTo(x, bottom)", source)
+        self.assertIn("pen.setCosmetic(True)", source)
+        self.assertIn("pen.setWidthF(1.0)", source)
+        self.assertNotIn("_paint_zita_envelope", source)
+        self.assertNotIn("vertical extents and connecting", source)
+
     def test_glsl_waveform_uses_pixel_extrema_and_stable_lod(self) -> None:
         source = read_source("pyside6_reaper_gl_view.py")
         self.assertIn("void wavePixelExtrema(", source)
