@@ -26,8 +26,8 @@ RPKX v1 has five format-level responsibilities:
 The v1 serialized representation is always **packed**. It has no free list,
 allocator arena, tombstones, historical payloads, or internal holes. Updating a
 packed container may require rewriting payload bytes; filesystem-level
-optimizations such as reflinks, `copy_file_range`, temporary files, writer
-locking, and atomic replacement are deliberately outside the wire format.
+optimizations such as reflinks, kernel-side copying, temporary files, writer
+locking, and replacement are deliberately outside the wire format.
 
 ## Placement
 
@@ -257,9 +257,63 @@ Packed serialization means a small mutation can move later payload offsets.
 This is intentional. RPKX v1 optimizes the on-disk representation for simple,
 contiguous reads rather than implementing a miniature allocator.
 
-Filesystem mutation APIs may later optimize physical rewriting with reflinks or
-kernel-side copying, but such optimizations MUST produce the same canonical
-packed bytes.
+Any filesystem-level update path MUST produce the same canonical packed bytes.
+The wire format does not expose or depend on the filesystem mechanism used to
+copy them.
+
+## Rust filesystem updater
+
+For applications that have a cache path rather than an in-memory byte buffer,
+libreapeaks exposes:
+
+```rust
+set_rpkx_chunk_file(path, chunk)?;
+append_rpkx_chunk_file(path, chunk)?;
+remove_rpkx_chunks_file(path, key)?;
+strip_rpkx_file(path)?;
+```
+
+The generic form is `update_rpkx_file(path, RpkxFileUpdate::...)`.
+
+This API owns **transaction mechanics**, not filesystem optimization policy:
+
+1. RPKX-aware writers coordinate on the persistent sidecar
+   `<cache>.rpkx.lock` using Rust's standard file-lock API. Readers do not take
+   this lock.
+2. The current standard/RPKX metadata is scanned without materializing unrelated
+   chunk payloads.
+3. The replacement is constructed in the same directory as the target.
+4. Unchanged bytes are handed to `std::fs::copy` or `std::io::copy`; libreapeaks
+   does not call platform-specific reflink, clone-range, ODX, or equivalent
+   interfaces itself.
+5. The temporary file is flushed and synced, the target generation is checked
+   again, and the temporary path is committed with `std::fs::rename`.
+6. On Unix, the parent directory is synced best-effort after the rename.
+
+A unique `set` whose replacement payload has exactly the old byte length uses
+`std::fs::copy` for the complete cache and then patches only the directory
+version/flags fields and selected payload. Size-changing edits rebuild the
+canonical packed byte sequence while streaming unchanged source ranges through
+`std::io::copy`.
+
+`RpkxFileUpdateReport::source_bytes_copied` is a **logical byte count**: it says
+how many source bytes were handed to Rust's copy APIs. It is not a physical-I/O
+measurement and MUST NOT be interpreted as evidence that the filesystem read
+and rewrote that many storage bytes. Any clone/kernel acceleration selected by
+Rust or the platform remains an implementation detail below libreapeaks.
+
+The sidecar lock only coordinates RPKX-aware writers. REAPER does not honor it.
+The updater therefore captures a stronger local target generation (including
+file identity/timestamps where the platform exposes them) and checks it before
+commit. This is optimistic external-modification detection, not a filesystem
+compare-and-swap primitive: an uncooperative writer can still race in the final
+window between the last generation check and path replacement.
+
+The dedicated `.github/workflows/rpkx-file-updater.yml` gate runs the same
+byte-exact updater tests on `ubuntu-24.04`, `macos-15`, and `windows-2025`. The
+CI contract is correctness and fallback portability; it intentionally does not
+assert which filesystem acceleration Rust selects on a particular hosted
+runner.
 
 ## Earlier experimental and pre-freeze layouts
 

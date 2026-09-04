@@ -24,6 +24,7 @@ pub mod loudness;
 pub mod pyramid;
 pub mod reaper_generate;
 pub mod rpkx;
+pub mod rpkx_file;
 pub mod source;
 
 // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
@@ -72,6 +73,10 @@ pub use rpkx::{
     standard_end, standard_end_reader, strip_rpkx, RpkxAttachPolicy, RpkxChunk, RpkxContainer,
     RpkxEntry, RpkxIndex, RpkxKey, RpkxNamespace, RPKX_CHUNK_HEADER_SIZE,
     RPKX_DIRECTORY_ENTRY_SIZE, RPKX_HEADER_SIZE, RPKX_MAGIC, RPKX_VERSION,
+};
+pub use rpkx_file::{
+    append_rpkx_chunk_file, remove_rpkx_chunks_file, rpkx_file_lock_path, set_rpkx_chunk_file,
+    strip_rpkx_file, update_rpkx_file, RpkxFileUpdate, RpkxFileUpdateReport,
 };
 pub use source::SourceStamp;
 pub use spectrogram::{

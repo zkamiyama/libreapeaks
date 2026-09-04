@@ -1,0 +1,43 @@
+name: rpkx-file-updater
+
+on:
+  pull_request:
+    paths:
+      - "src/rpkx_file.rs"
+      - "src/lib.rs"
+      - "tests/rpkx_file.rs"
+      - ".github/workflows/rpkx-file-updater.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/rpkx_file.rs"
+      - "src/lib.rs"
+      - "tests/rpkx_file.rs"
+      - ".github/workflows/rpkx-file-updater.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  file-updater:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+          - windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Formatting is read-only
+        run: cargo fmt --all -- --check
+      - name: RPKX file updater tests
+        run: cargo test --test rpkx_file
+      - name: RPKX file updater clippy
+        run: cargo clippy --test rpkx_file -- -D warnings
