@@ -61,11 +61,7 @@ fn rpkx_set_preserves_standard_reaper_bytes() {
 fn directory_is_contiguous_and_payloads_are_packed_after_it() {
     let base = base_cache();
     let out = append_rpkx_chunk(
-        &set_rpkx_chunk(
-            &base,
-            RpkxChunk::new(NS_A, *b"AAAA", 1, 0, b"abc".to_vec()),
-        )
-        .unwrap(),
+        &set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"AAAA", 1, 0, b"abc".to_vec())).unwrap(),
         RpkxChunk::new(NS_B, *b"BBBB", 2, 7, b"12345".to_vec()),
     )
     .unwrap();
@@ -130,17 +126,17 @@ impl Seek for CountingCursor {
 fn seekable_scan_does_not_read_large_payload_until_selected() {
     let base = base_cache();
     let payload = vec![0xa5; 2 * 1024 * 1024];
-    let out = set_rpkx_chunk(
-        &base,
-        RpkxChunk::new(NS_A, *b"BIG_", 1, 0, payload.clone()),
-    )
-    .unwrap();
+    let out = set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"BIG_", 1, 0, payload.clone())).unwrap();
     let mut reader = CountingCursor::new(out);
 
     let index = scan_rpkx(&mut reader).unwrap().unwrap();
     assert_eq!(index.entries.len(), 1);
     assert_eq!(index.entries[0].payload_len, payload.len() as u64);
-    assert!(reader.bytes_read < 256, "scan read {} bytes", reader.bytes_read);
+    assert!(
+        reader.bytes_read < 256,
+        "scan read {} bytes",
+        reader.bytes_read
+    );
 
     let before_payload = reader.bytes_read;
     let selected = read_rpkx_payload(&mut reader, &index, &index.entries[0]).unwrap();
