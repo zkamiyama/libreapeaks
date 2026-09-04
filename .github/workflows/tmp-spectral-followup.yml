@@ -25,7 +25,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Fix needless range loop without changing operation order
+      - name: Fix cfg-specific Clippy warnings without changing operations
         shell: bash
         run: |
           python3 - <<'PY'
@@ -33,25 +33,27 @@ jobs:
 
           path = Path("src/spectral.rs")
           text = path.read_text()
+
           start = text.index("fn summarize_spectrum_magnitudes(")
           end = text.index("\nfn analyze_channel(", start)
           section = text[start:end]
-          old = "for k in 0..=HALF_BINS {"
-          if section.count(old) != 1:
-              raise SystemExit(f"expected one range loop in summary helper, found {section.count(old)}")
-          section = section.replace(old, "for (k, bin) in spec.iter().enumerate() {", 1)
+          old_loop = "for k in 0..=HALF_BINS {"
+          if section.count(old_loop) != 1:
+              raise SystemExit(f"expected one range loop in summary helper, found {section.count(old_loop)}")
+          section = section.replace(old_loop, "for (k, bin) in spec.iter().enumerate() {", 1)
           section = section.replace("spec[k].re", "bin.re")
           section = section.replace("spec[k].im", "bin.im")
           text = text[:start] + section + text[end:]
+
+          old_binding = "    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);\n"
+          new_binding = "    #[cfg(feature = \"strict-wdl\")]\n    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);\n    #[cfg(not(feature = \"strict-wdl\"))]\n    let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);\n"
+          if text.count(old_binding) != 1:
+              raise SystemExit(f"expected one FFT input binding, found {text.count(old_binding)}")
+          text = text.replace(old_binding, new_binding, 1)
+
           path.write_text(text)
           PY
           cargo fmt --all
-
-      - name: Test default feature set
-        run: cargo test --locked --all-targets
-
-      - name: Test strict WDL feature set
-        run: cargo test --locked --all-targets --features strict-wdl
 
       - name: Clippy default feature set
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -59,11 +61,17 @@ jobs:
       - name: Clippy strict WDL
         run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
 
-      - name: Commit source fix
+      - name: Test default feature set
+        run: cargo test --locked --all-targets
+
+      - name: Test strict WDL feature set
+        run: cargo test --locked --all-targets --features strict-wdl
+
+      - name: Commit source fixes
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/spectral.rs
-          git commit -m "Satisfy spectral Clippy without changing order"
+          git commit -m "Satisfy spectral Clippy across feature sets"
           git push origin HEAD:optimize/spectral-followup
