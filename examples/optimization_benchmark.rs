@@ -202,7 +202,11 @@ fn main() {
         let output = generate(case, &input);
         let elapsed = start.elapsed().as_nanos();
         black_box(output.len());
-        assert_eq!(output.len(), expected_len, "output length changed between runs");
+        assert_eq!(
+            output.len(),
+            expected_len,
+            "output length changed between runs"
+        );
         assert_eq!(
             fnv1a64(&output),
             expected_hash,
