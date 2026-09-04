@@ -12,11 +12,97 @@ function showLaunch(show) {
   $('launchPanel').classList.toggle('hidden', !show);
 }
 
+function showConfig(show) {
+  $('configPanel').classList.toggle('hidden', !show);
+}
+
 function setProgress(session) {
   $('launchProgress').value = Math.max(0, Math.min(100, Number(session.progress) || 0));
   $('launchStatus').textContent = session.error
     ? `Preparation failed: ${session.error}`
     : session.status || (session.ready ? 'Ready' : 'Waiting for audio');
+}
+
+function updateConfigVisibility() {
+  const policy = $('cachePolicy').value;
+  const central = policy === 'reaper-central';
+  const follow = policy === 'reaper-config';
+  $('centralDirectoryRow').hidden = !central;
+  $('reaperIniRow').hidden = !follow;
+  $('autoReaperIniRow').hidden = !follow;
+  const verifyAvailable = central || follow;
+  $('verifyReaperRow').hidden = !verifyAvailable;
+  $('reaperExecutableRow').hidden = !verifyAvailable || !$('verifyReaper').checked;
+  $('reaperIni').disabled = follow && $('autoReaperIni').checked;
+}
+
+function populateConfig(payload) {
+  const cache = payload.cache || {};
+  $('cachePolicy').value = cache.policy || 'sidecar';
+  $('centralDirectory').value = cache.cache_directory || '';
+  $('reaperIni').value = cache.reaper_ini || '';
+  $('autoReaperIni').checked = Boolean(cache.auto_reaper_ini);
+  $('configPeakRate').value = cache.peak_rate == null ? '0' : String(cache.peak_rate);
+  $('verifyReaper').checked = Boolean(cache.verify_with_reaper);
+  $('reaperExecutable').value = cache.reaper_executable || '';
+  $('configPath').textContent = payload.config_path ? `Saved in ${payload.config_path}` : '';
+  $('configStatus').textContent = '';
+  updateConfigVisibility();
+}
+
+async function loadConfig() {
+  const payload = await json('/api/config');
+  populateConfig(payload);
+  return payload;
+}
+
+function configPayload() {
+  const peakRate = Number.parseInt($('configPeakRate').value || '0', 10);
+  return {
+    version: 1,
+    cache: {
+      policy: $('cachePolicy').value,
+      cache_directory: $('centralDirectory').value.trim(),
+      reaper_ini: $('reaperIni').value.trim(),
+      auto_reaper_ini: $('autoReaperIni').checked,
+      verify_with_reaper: $('verifyReaper').checked,
+      reaper_executable: $('reaperExecutable').value.trim(),
+      peak_rate: Number.isFinite(peakRate) && peakRate > 0 ? peakRate : null,
+    },
+  };
+}
+
+async function saveConfig() {
+  $('configStatus').textContent = 'Saving…';
+  const payload = await json('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(configPayload()),
+  });
+  populateConfig(payload);
+  $('launchStatus').textContent = 'Cache settings saved; they apply to the next opened audio file.';
+  showConfig(false);
+}
+
+function installConfigHandlers() {
+  const open = async () => {
+    try {
+      await loadConfig();
+      showConfig(true);
+    } catch (error) {
+      showConfig(true);
+      $('configStatus').textContent = String(error);
+    }
+  };
+  $('cacheSettingsButton').addEventListener('click', open);
+  $('launchSettingsButton').addEventListener('click', open);
+  $('configCancelButton').addEventListener('click', () => showConfig(false));
+  $('configSaveButton').addEventListener('click', () => {
+    saveConfig().catch(error => { $('configStatus').textContent = String(error); });
+  });
+  $('cachePolicy').addEventListener('change', updateConfigVisibility);
+  $('autoReaperIni').addEventListener('change', updateConfigVisibility);
+  $('verifyReaper').addEventListener('change', updateConfigVisibility);
 }
 
 async function startUi() {
@@ -89,6 +175,8 @@ function installOpenHandlers() {
 
 async function init() {
   installOpenHandlers();
+  installConfigHandlers();
+  await loadConfig();
   const session = await json('/api/session');
   setProgress(session);
   if (!session.ready) {
