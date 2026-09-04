@@ -182,11 +182,8 @@ fn zero_length_same_size_update_and_growth_shrink_round_trip() {
     let dir = TestDir::new("zero-size-oscillation");
     let path = dir.cache();
     let base = base_cache();
-    let mut expected = set_rpkx_chunk(
-        &base,
-        RpkxChunk::new(NS_A, *b"ZERO", 1, 0, Vec::new()),
-    )
-    .unwrap();
+    let mut expected =
+        set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"ZERO", 1, 0, Vec::new())).unwrap();
     write(&path, &expected);
 
     let zero = RpkxChunk::new(NS_A, *b"ZERO", 2, 0x55, Vec::new());
@@ -284,7 +281,10 @@ fn deterministic_adversarial_mutation_sequence_matches_owning_editor() {
 
         let actual = fs::read(&path).unwrap();
         assert_eq!(actual, expected, "byte mismatch after mutation step {step}");
-        assert!(actual.ends_with(SUFFIX), "suffix lost at mutation step {step}");
+        assert!(
+            actual.ends_with(SUFFIX),
+            "suffix lost at mutation step {step}"
+        );
         assert_no_temp_artifacts(&dir);
     }
 
