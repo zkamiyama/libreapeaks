@@ -1,5 +1,6 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, TOKEN_SPECTROGRAM};
+use crate::sample_source::F32SampleSource;
 use crate::spectrogram::{
     encode_spectrogram_frame, SpectrogramFrame, SPECTROGRAM_BINS,
     SPECTROGRAM_BYTES_PER_CHANNEL_FRAME, SPECTROGRAM_WORDS_PER_CHANNEL_FRAME,
@@ -205,8 +206,8 @@ fn finite_sample(value: f32) -> f32 {
     }
 }
 
-fn analyze_base_frame(
-    pcm: &[f32],
+fn analyze_base_frame<S: F32SampleSource + ?Sized>(
+    pcm: &S,
     frames: usize,
     channels: usize,
     channel: usize,
@@ -224,7 +225,7 @@ fn analyze_base_frame(
         let leading_window = blackman_harris_window(available);
         for n in 0..available {
             let sample_index = n * channels + channel;
-            let sample = finite_sample(pcm[sample_index]);
+            let sample = finite_sample(pcm.sample_f32(sample_index));
             input[n] = f64::from(sample * leading_window[n]);
         }
     } else {
@@ -232,7 +233,7 @@ fn analyze_base_frame(
             let source_frame = start + n as i64;
             if source_frame < frames as i64 {
                 let sample_index = source_frame as usize * channels + channel;
-                let sample = finite_sample(pcm[sample_index]);
+                let sample = finite_sample(pcm.sample_f32(sample_index));
                 input[n] = f64::from(sample * full_window[n]);
             }
         }
@@ -304,13 +305,22 @@ pub(crate) fn build_spectrogram_layers_f32(
     channels: usize,
     divisions: &[u32],
 ) -> Result<Vec<GeneratedLayer>> {
+    build_spectrogram_layers_f32_source(pcm, frames, channels, divisions)
+}
+
+pub(crate) fn build_spectrogram_layers_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidArgument("channels=0"));
     }
     let required = frames
         .checked_mul(channels)
         .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
-    if pcm.len() < required {
+    if pcm.sample_len() < required {
         return Err(ReaPeaksError::InvalidArgument(
             "PCM buffer shorter than frames*channels",
         ));
