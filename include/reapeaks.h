@@ -187,6 +187,32 @@ int32_t rpk_generate_pcm16_reaper(const int16_t *pcm, size_t frames,
                                   RpkBuffer *out);
 
 /*
+ * Packed signed PCM24LE, three interleaved bytes per sample. Generates RPKN
+ * using the decoded-PCM24 normalization path; no whole-file float32 copy is
+ * required.
+ */
+int32_t rpk_generate_pcm24_reaper(const uint8_t *pcm24le, size_t frames,
+                                  size_t channels, uint32_t sample_rate,
+                                  const uint32_t *divisions,
+                                  size_t division_count,
+                                  uint32_t source_mtime_low32,
+                                  uint32_t source_size_low32, uint8_t mode,
+                                  RpkBuffer *out);
+
+/*
+ * PCM24 samples stored in int32 slots. Values must be right-justified and
+ * sign-extended in -8388608..=8388607. Generates RPKN without a whole-file
+ * float32 intermediate.
+ */
+int32_t rpk_generate_pcm24_i32_reaper(const int32_t *pcm, size_t frames,
+                                      size_t channels, uint32_t sample_rate,
+                                      const uint32_t *divisions,
+                                      size_t division_count,
+                                      uint32_t source_mtime_low32,
+                                      uint32_t source_size_low32, uint8_t mode,
+                                      RpkBuffer *out);
+
+/*
  * Float REAPER modes support WAVEFORM, SPECTRAL and SPECTROGRAM. With
  * large_range=1 the waveform container is RPKL. Float -'g' generation is
  * direct and its decoded bins plus packed payload bytes are byte-exact in the

@@ -1,8 +1,10 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::generate::{
-    generate_f32, generate_f32_mode3, generate_f32_mode3_with_spectrogram, generate_pcm16,
+    generate_f32, generate_f32_mode3, generate_f32_mode3_with_spectrogram, generate_f32_source,
+    generate_f32_source_mode3, generate_f32_source_mode3_with_spectrogram, generate_pcm16,
     generate_pcm16_mode3, generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
+use crate::sample_source::{F32SampleSource, Pcm24I32Source, Pcm24LeSource};
 
 /// REAPER 7.79 peak-display/cache generation modes observed by the live oracle.
 ///
@@ -58,6 +60,27 @@ pub fn generate_pcm16_reaper(
     }
 }
 
+fn generate_f32_source_reaper<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    options: &GenerateOptions,
+    large_range: bool,
+    mode: ReaperPeakMode,
+) -> Result<Vec<u8>> {
+    match mode {
+        ReaperPeakMode::Waveform => {
+            generate_f32_source(pcm, &with_spectral(options, false), large_range)
+        }
+        ReaperPeakMode::Spectral => {
+            generate_f32_source_mode3(pcm, &with_spectral(options, true), large_range)
+        }
+        ReaperPeakMode::Spectrogram => generate_f32_source_mode3_with_spectrogram(
+            pcm,
+            &with_spectral(options, true),
+            large_range,
+        ),
+    }
+}
+
 /// Generate one of the REAPER-native float32 peak-cache modes in a single call.
 ///
 /// Waveform and spectral modes retain their established paths. Spectrogram mode
@@ -82,4 +105,35 @@ pub fn generate_f32_reaper(
             generate_f32_mode3_with_spectrogram(pcm, &with_spectral(options, true), large_range)
         }
     }
+}
+
+/// Generate a REAPER-style RPKN cache directly from packed signed PCM24LE.
+///
+/// Input samples are interleaved three-byte little-endian signed integers. Each
+/// sample is normalized on demand to the exact f32 value `sample / 2^23`, so a
+/// caller that already caches PCM24 does not need to allocate a whole-file f32
+/// copy. The RPKN waveform mapping is the one validated against 50,000 decoded
+/// PCM24 REAPER 7.79 oracle buckets.
+pub fn generate_pcm24_reaper(
+    pcm24le: &[u8],
+    options: &GenerateOptions,
+    mode: ReaperPeakMode,
+) -> Result<Vec<u8>> {
+    let source = Pcm24LeSource::new(pcm24le)?;
+    generate_f32_source_reaper(&source, options, false, mode)
+}
+
+/// Generate a REAPER-style RPKN cache from signed PCM24 values stored in i32.
+///
+/// Values must be right-justified/sign-extended integers in
+/// `-8_388_608..=8_388_607`. Left-aligned S24-in-S32 buffers should be shifted
+/// right by eight bits by the caller. Samples are normalized on demand; no
+/// whole-file f32 intermediate is materialized.
+pub fn generate_pcm24_i32_reaper(
+    pcm: &[i32],
+    options: &GenerateOptions,
+    mode: ReaperPeakMode,
+) -> Result<Vec<u8>> {
+    let source = Pcm24I32Source::new(pcm)?;
+    generate_f32_source_reaper(&source, options, false, mode)
 }

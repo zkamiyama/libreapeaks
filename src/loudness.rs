@@ -1,5 +1,6 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, LoudnessPeak, TOKEN_LOUDNESS};
+use crate::sample_source::F32SampleSource;
 use std::f64::consts::PI;
 
 const MOMENTARY_BLOCKS_25MS: usize = 16;
@@ -402,16 +403,26 @@ pub fn build_loudness_layers_f32(
     sample_rate: u32,
     divisions: &[u32],
 ) -> Result<Vec<GeneratedLayer>> {
+    build_loudness_layers_f32_source(pcm, frames, channels, sample_rate, divisions)
+}
+
+pub(crate) fn build_loudness_layers_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    sample_rate: u32,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
     let required = frames
         .checked_mul(channels)
         .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
-    if pcm.len() < required {
+    if pcm.sample_len() < required {
         return Err(ReaPeaksError::InvalidArgument(
             "PCM buffer shorter than frames*channels",
         ));
     }
     build_loudness_layers(frames, channels, sample_rate, divisions, |index| {
-        f64::from(pcm[index])
+        f64::from(pcm.sample_f32(index))
     })
 }
 

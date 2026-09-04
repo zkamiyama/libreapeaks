@@ -1,4 +1,7 @@
-use crate::{generate_f32_reaper, generate_pcm16_reaper, GenerateOptions, ReaperPeakMode};
+use crate::{
+    generate_f32_reaper, generate_pcm16_reaper, generate_pcm24_reaper, GenerateOptions,
+    ReaperPeakMode,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
@@ -54,6 +57,40 @@ fn py_generate_pcm16_reaper<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
+#[pyfunction(name = "generate_pcm24_reaper")]
+#[pyo3(signature=(pcm24le, sample_rate, channels, divisions, mode, source_mtime_low32=0, source_size_low32=0))]
+fn py_generate_pcm24_reaper<'py>(
+    py: Python<'py>,
+    pcm24le: &[u8],
+    sample_rate: u32,
+    channels: usize,
+    divisions: Vec<u32>,
+    mode: &str,
+    source_mtime_low32: u32,
+    source_size_low32: u32,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if pcm24le.len() % 3 != 0 {
+        return Err(py_err("PCM24LE byte length must be a multiple of three"));
+    }
+    // Detaching requires owned input. Keep the packed 3-byte representation;
+    // unlike the old workaround, this does not materialize a whole-file f32
+    // buffer before entering the Rust generator.
+    let pcm24le = pcm24le.to_vec();
+    let options = GenerateOptions {
+        sample_rate,
+        channels,
+        divisions,
+        source_mtime_low32,
+        source_size_low32,
+        spectral: false,
+    };
+    let mode = parse_mode(mode)?;
+    let bytes = py
+        .detach(move || generate_pcm24_reaper(&pcm24le, &options, mode))
+        .map_err(py_err)?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
 #[pyfunction(name = "generate_f32_reaper")]
 #[pyo3(signature=(pcm_f32le, sample_rate, channels, divisions, large_range, mode, source_mtime_low32=0, source_size_low32=0))]
 fn py_generate_f32_reaper<'py>(
@@ -94,6 +131,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("REAPER_PEAK_MODE_SPECTRAL", "spectral")?;
     m.add("REAPER_PEAK_MODE_SPECTROGRAM", "spectrogram")?;
     m.add_function(wrap_pyfunction!(py_generate_pcm16_reaper, m)?)?;
+    m.add_function(wrap_pyfunction!(py_generate_pcm24_reaper, m)?)?;
     m.add_function(wrap_pyfunction!(py_generate_f32_reaper, m)?)?;
     crate::python_spectrogram_view::register(m)?;
     Ok(())

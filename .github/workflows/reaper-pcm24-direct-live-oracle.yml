@@ -1,0 +1,113 @@
+name: reaper-pcm24-direct-live-oracle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reaper-pcm24-direct-live-oracle.yml'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'src/sample_source.rs'
+      - 'src/spectral.rs'
+      - 'src/spectrogram_generate_f32.rs'
+      - 'src/loudness.rs'
+      - 'src/wave.rs'
+      - 'examples/pcm24_oracle_fixture.rs'
+      - 'tools/reaper_oracle/pcm24_direct_live_oracle.py'
+      - 'tools/reaper_oracle/build_one.lua'
+      - 'tools/reaper_oracle/fresh_process.py'
+  pull_request:
+    paths:
+      - '.github/workflows/reaper-pcm24-direct-live-oracle.yml'
+      - 'src/generate.rs'
+      - 'src/reaper_generate.rs'
+      - 'src/sample_source.rs'
+      - 'src/spectral.rs'
+      - 'src/spectrogram_generate_f32.rs'
+      - 'src/loudness.rs'
+      - 'src/wave.rs'
+      - 'examples/pcm24_oracle_fixture.rs'
+      - 'tools/reaper_oracle/pcm24_direct_live_oracle.py'
+      - 'tools/reaper_oracle/build_one.lua'
+      - 'tools/reaper_oracle/fresh_process.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reaper-pcm24-direct-live-oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  byte-exact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate oracle helper syntax
+        run: python3 -m py_compile tools/reaper_oracle/pcm24_direct_live_oracle.py
+      - name: Install REAPER runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Download pinned REAPER 7.79 Linux x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/reaper-pcm24-direct
+          mkdir -p "$root/reaper" "$root/oracle/results"
+          curl -fL --retry 3 \
+            https://www.reaper.fm/files/7.x/reaper779_linux_x86_64.tar.xz \
+            -o "$root/reaper779_linux_x86_64.tar.xz"
+          echo 'a420b47fc5a1bef2ba6ecbf4937bb67b094333f0daa318dfe702d5fcdaa38846  /tmp/reaper-pcm24-direct/reaper779_linux_x86_64.tar.xz' | sha256sum -c -
+          tar -xJf "$root/reaper779_linux_x86_64.tar.xz" -C "$root/reaper"
+          REAPER_BIN="$(find "$root/reaper" -type f -name reaper -perm -111 | head -1)"
+          test -n "$REAPER_BIN"
+          echo "REAPER_BIN=$REAPER_BIN" >> "$GITHUB_ENV"
+      - name: Start Xvfb
+        shell: bash
+        run: |
+          Xvfb :97 -screen 0 1280x720x24 -nolisten tcp >/tmp/reaper-pcm24-direct/xvfb.log 2>&1 &
+          echo $! >/tmp/reaper-pcm24-direct/xvfb.pid
+      - name: Compare direct PCM24 and i32 generation with real REAPER
+        env:
+          DISPLAY: ':97'
+        run: |
+          python3 tools/reaper_oracle/pcm24_direct_live_oracle.py \
+            /tmp/reaper-pcm24-direct/oracle "$REAPER_BIN" --display :97
+      - name: Publish evidence summary
+        if: always()
+        shell: bash
+        run: |
+          report=/tmp/reaper-pcm24-direct/oracle/results/pcm24-direct-live-oracle.json
+          if [ -f "$report" ]; then
+            echo '## REAPER 7.79 PCM24/i32 direct-input oracle' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-pcm24-direct/oracle/results/pcm24-direct-live-oracle.json'
+          d=json.load(open(p))
+          print(f"all byte exact: {d['all_byte_exact']}")
+          for case in d['cases']:
+              print(f"- {case['mode']}: PCM24={case['pcm24']['byte_exact']}, i32={case['i32']['byte_exact']}, showpeaks={case['showpeaks']}")
+          PY
+          fi
+      - name: Stop Xvfb
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/reaper-pcm24-direct/xvfb.pid ]; then
+            kill "$(cat /tmp/reaper-pcm24-direct/xvfb.pid)" 2>/dev/null || true
+          fi
+      - name: Upload real-oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper-pcm24-direct-live-oracle-${{ github.sha }}
+          path: |
+            /tmp/reaper-pcm24-direct/oracle/results
+            /tmp/reaper-pcm24-direct/xvfb.log
+          if-no-files-found: warn
+          retention-days: 30

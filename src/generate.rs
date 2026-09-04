@@ -1,10 +1,19 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{encode, GeneratedLayer, Version};
-use crate::loudness::{build_loudness_layers_f32, build_loudness_layers_pcm16};
-use crate::spectral::{build_spectral_layers, build_spectral_layers_f32};
+use crate::loudness::{
+    build_loudness_layers_f32, build_loudness_layers_f32_source, build_loudness_layers_pcm16,
+};
+use crate::sample_source::F32SampleSource;
+use crate::spectral::{
+    build_spectral_layers, build_spectral_layers_f32, build_spectral_layers_f32_source,
+};
 use crate::spectrogram_generate::build_spectrogram_layers_pcm16;
-use crate::spectrogram_generate_f32::build_spectrogram_layers_f32;
-use crate::wave::{build_wave_layers, build_wave_layers_f32, WaveEncoding};
+use crate::spectrogram_generate_f32::{
+    build_spectrogram_layers_f32, build_spectrogram_layers_f32_source,
+};
+use crate::wave::{
+    build_wave_layers, build_wave_layers_f32, build_wave_layers_f32_source, WaveEncoding,
+};
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -265,6 +274,105 @@ pub fn generate_f32_mode3_with_spectrogram(
         &options.divisions,
     )?);
     layers.extend(build_loudness_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    encode_generated(version, options, &layers)
+}
+
+pub(crate) fn generate_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    generate_f32_source_impl(pcm, options, large_range, false)
+}
+
+pub(crate) fn generate_f32_source_mode3<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    generate_f32_source_impl(pcm, options, large_range, true)
+}
+
+fn generate_f32_source_impl<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    options: &GenerateOptions,
+    large_range: bool,
+    loudness: bool,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.sample_len(), loudness)?;
+    let encoding = if large_range {
+        WaveEncoding::Rpkl
+    } else {
+        WaveEncoding::Rpkn
+    };
+    let version = if large_range {
+        Version::Rpkl
+    } else {
+        Version::Rpkn
+    };
+    let mut layers =
+        build_wave_layers_f32_source(pcm, frames, options.channels, &options.divisions, encoding)?;
+    if options.spectral {
+        layers.extend(build_spectral_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+    }
+    if loudness {
+        layers.extend(build_loudness_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+    }
+    encode_generated(version, options, &layers)
+}
+
+pub(crate) fn generate_f32_source_mode3_with_spectrogram<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.sample_len(), true)?;
+    validate_spectrogram_layer_count(options)?;
+    let encoding = if large_range {
+        WaveEncoding::Rpkl
+    } else {
+        WaveEncoding::Rpkn
+    };
+    let version = if large_range {
+        Version::Rpkl
+    } else {
+        Version::Rpkn
+    };
+
+    let mut layers =
+        build_wave_layers_f32_source(pcm, frames, options.channels, &options.divisions, encoding)?;
+    layers.extend(build_spectral_layers_f32_source(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    layers.extend(build_spectrogram_layers_f32_source(
+        pcm,
+        frames,
+        options.channels,
+        &options.divisions,
+    )?);
+    layers.extend(build_loudness_layers_f32_source(
         pcm,
         frames,
         options.channels,
