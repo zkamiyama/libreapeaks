@@ -1,9 +1,11 @@
+use crate::python_pcm::{with_f32_le, with_pcm16_le};
 use crate::{
     generate_f32_reaper, generate_pcm16_reaper, generate_pcm24_reaper, GenerateOptions,
     ReaperPeakMode,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyModule};
 
 fn py_err(error: impl std::fmt::Display) -> PyErr {
@@ -25,7 +27,7 @@ fn parse_mode(mode: &str) -> PyResult<ReaperPeakMode> {
 #[pyo3(signature=(pcm16le, sample_rate, channels, divisions, mode, source_mtime_low32=0, source_size_low32=0))]
 fn py_generate_pcm16_reaper<'py>(
     py: Python<'py>,
-    pcm16le: &[u8],
+    pcm16le: PyBackedBytes,
     sample_rate: u32,
     channels: usize,
     divisions: Vec<u32>,
@@ -36,10 +38,9 @@ fn py_generate_pcm16_reaper<'py>(
     if pcm16le.len() % 2 != 0 {
         return Err(py_err("PCM16 byte length must be even"));
     }
-    let pcm: Vec<i16> = pcm16le
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-        .collect();
+    // PyBackedBytes keeps immutable Python bytes alive across detach. On
+    // little-endian hosts with natural alignment, with_pcm16_le borrows that
+    // backing directly as &[i16]; otherwise it falls back to exact decoding.
     let options = GenerateOptions {
         sample_rate,
         channels,
@@ -52,7 +53,7 @@ fn py_generate_pcm16_reaper<'py>(
     // Cache generation can be CPU-heavy. Detach from the Python interpreter so
     // a Qt/worker-thread frontend can keep pumping UI events and progress.
     let bytes = py
-        .detach(move || generate_pcm16_reaper(&pcm, &options, mode))
+        .detach(move || with_pcm16_le(&pcm16le, |pcm| generate_pcm16_reaper(pcm, &options, mode)))
         .map_err(py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }
@@ -61,7 +62,7 @@ fn py_generate_pcm16_reaper<'py>(
 #[pyo3(signature=(pcm24le, sample_rate, channels, divisions, mode, source_mtime_low32=0, source_size_low32=0))]
 fn py_generate_pcm24_reaper<'py>(
     py: Python<'py>,
-    pcm24le: &[u8],
+    pcm24le: PyBackedBytes,
     sample_rate: u32,
     channels: usize,
     divisions: Vec<u32>,
@@ -72,10 +73,8 @@ fn py_generate_pcm24_reaper<'py>(
     if pcm24le.len() % 3 != 0 {
         return Err(py_err("PCM24LE byte length must be a multiple of three"));
     }
-    // Detaching requires owned input. Keep the packed 3-byte representation;
-    // unlike the old workaround, this does not materialize a whole-file f32
-    // buffer before entering the Rust generator.
-    let pcm24le = pcm24le.to_vec();
+    // PyBackedBytes owns the Python bytes reference, so detach can read the
+    // packed source without cloning it into a Rust Vec first.
     let options = GenerateOptions {
         sample_rate,
         channels,
@@ -95,7 +94,7 @@ fn py_generate_pcm24_reaper<'py>(
 #[pyo3(signature=(pcm_f32le, sample_rate, channels, divisions, large_range, mode, source_mtime_low32=0, source_size_low32=0))]
 fn py_generate_f32_reaper<'py>(
     py: Python<'py>,
-    pcm_f32le: &[u8],
+    pcm_f32le: PyBackedBytes,
     sample_rate: u32,
     channels: usize,
     divisions: Vec<u32>,
@@ -107,10 +106,8 @@ fn py_generate_f32_reaper<'py>(
     if pcm_f32le.len() % 4 != 0 {
         return Err(py_err("float32 byte length must be a multiple of four"));
     }
-    let pcm: Vec<f32> = pcm_f32le
-        .chunks_exact(4)
-        .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-        .collect();
+    // As with PCM16, borrow aligned little-endian backing directly and decode
+    // only on platforms/inputs where a zero-copy typed view is not valid.
     let options = GenerateOptions {
         sample_rate,
         channels,
@@ -121,7 +118,11 @@ fn py_generate_f32_reaper<'py>(
     };
     let mode = parse_mode(mode)?;
     let bytes = py
-        .detach(move || generate_f32_reaper(&pcm, &options, large_range, mode))
+        .detach(move || {
+            with_f32_le(&pcm_f32le, |pcm| {
+                generate_f32_reaper(pcm, &options, large_range, mode)
+            })
+        })
         .map_err(py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }

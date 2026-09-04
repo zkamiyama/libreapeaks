@@ -1,6 +1,7 @@
 use crate::format::ReaPeaks;
 use crate::generate::{generate_f32, generate_pcm16, GenerateOptions};
 use crate::pyramid::{WavePyramid, WaveTileKey};
+use crate::python_pcm::{with_f32_le, with_pcm16_le};
 use crate::source::SourceStamp;
 use crate::texture::{
     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8,
@@ -9,6 +10,7 @@ use crate::texture::{
 use crate::wave::{default_divisions, WaveEncoding};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyModule};
 
 fn py_err(e: impl std::fmt::Display) -> PyErr {
@@ -239,7 +241,7 @@ pub fn py_default_divisions(sample_rate: u32, fine_peaks_per_second: u32) -> Vec
 #[pyo3(signature=(pcm16le, sample_rate, channels, divisions, source_mtime_low32=0, source_size_low32=0, spectral=true))]
 pub fn py_generate_pcm16<'py>(
     py: Python<'py>,
-    pcm16le: &[u8],
+    pcm16le: PyBackedBytes,
     sample_rate: u32,
     channels: usize,
     divisions: Vec<u32>,
@@ -250,10 +252,6 @@ pub fn py_generate_pcm16<'py>(
     if pcm16le.len() % 2 != 0 {
         return Err(py_err("PCM16 byte length must be even"));
     }
-    let pcm: Vec<i16> = pcm16le
-        .chunks_exact(2)
-        .map(|x| i16::from_le_bytes([x[0], x[1]]))
-        .collect();
     let opt = GenerateOptions {
         sample_rate,
         channels,
@@ -262,7 +260,9 @@ pub fn py_generate_pcm16<'py>(
         source_size_low32,
         spectral,
     };
-    let out = generate_pcm16(&pcm, &opt).map_err(py_err)?;
+    let out = py
+        .detach(move || with_pcm16_le(&pcm16le, |pcm| generate_pcm16(pcm, &opt)))
+        .map_err(py_err)?;
     Ok(PyBytes::new(py, &out))
 }
 
@@ -270,7 +270,7 @@ pub fn py_generate_pcm16<'py>(
 #[pyo3(signature=(pcm_f32le, sample_rate, channels, divisions, large_range, source_mtime_low32=0, source_size_low32=0, spectral=true))]
 pub fn py_generate_f32<'py>(
     py: Python<'py>,
-    pcm_f32le: &[u8],
+    pcm_f32le: PyBackedBytes,
     sample_rate: u32,
     channels: usize,
     divisions: Vec<u32>,
@@ -282,10 +282,6 @@ pub fn py_generate_f32<'py>(
     if pcm_f32le.len() % 4 != 0 {
         return Err(py_err("float32 byte length must be a multiple of four"));
     }
-    let pcm: Vec<f32> = pcm_f32le
-        .chunks_exact(4)
-        .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
-        .collect();
     let opt = GenerateOptions {
         sample_rate,
         channels,
@@ -294,7 +290,9 @@ pub fn py_generate_f32<'py>(
         source_size_low32,
         spectral,
     };
-    let out = generate_f32(&pcm, &opt, large_range).map_err(py_err)?;
+    let out = py
+        .detach(move || with_f32_le(&pcm_f32le, |pcm| generate_f32(pcm, &opt, large_range)))
+        .map_err(py_err)?;
     Ok(PyBytes::new(py, &out))
 }
 

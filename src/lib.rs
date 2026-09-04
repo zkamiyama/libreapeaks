@@ -54,6 +54,8 @@ mod python;
 #[cfg(feature = "python")]
 mod python_gpu_cache;
 #[cfg(feature = "python")]
+mod python_pcm;
+#[cfg(feature = "python")]
 mod python_reaper_generate;
 #[cfg(feature = "python")]
 mod python_rpkx;
