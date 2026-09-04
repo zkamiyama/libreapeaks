@@ -1,202 +1,130 @@
 # RPKX EOF extension research
 
-This document records the current evidence for appending non-REAPER metadata to
-a `.reapeaks` file without changing the standard REAPER region.
+This document records the empirical basis for appending application-owned bytes
+after REAPER's standard `.reapeaks` region. It is a research/evidence document,
+not the production wire-format specification.
 
-The central result is narrow but useful:
+For the current production container, read [`RPKX_SPEC.md`](RPKX_SPEC.md).
+RPKX v1 is now frozen in this repository as a packed directory-first layout:
 
-- pinned REAPER 7.79 Linux x86_64 accepts and byte-preserves arbitrary bytes
-  appended after the computed end of the standard `.reapeaks` layers while the
-  cache is reusable;
-- corrected `PCM_Source_GetPeaks` reads from pure EOF-appended caches are
-  identical to reads from the unmodified REAPER cache in the tested matrix; and
-- when REAPER actually rebuilds the cache, the appended bytes are discarded
-  because REAPER rewrites the standard cache from scratch.
+```text
+[standard REAPER region]
+[RPKX 32-byte header]
+[all 48-byte directory entries]
+[all payloads, tightly packed]
+[optional unrelated EOF suffix]
+```
 
-RPKX is therefore a viable **coexistence extension while the REAPER cache is
-reused**, but it must not be treated as metadata that REAPER itself preserves
-across rebuilds.
+Earlier 12-byte and interleaved RPKX layouts discussed below were experiments
+used to establish coexistence behavior. They are not accepted as current RPKX
+v1.
 
-## Scope and oracle
+## Scope
 
 The live evidence in this document is pinned to:
 
 - REAPER 7.79 Linux x86_64;
 - Ubuntu 24.04 under Xvfb;
-- a deterministic 48 kHz mono PCM16 WAV;
-- `peakcachegenrs=300`, `showpeaks=64`, `peakcachegenmode=3`;
-- fresh REAPER process per mutation/read/rebuild case.
+- deterministic 48 kHz mono PCM16 WAV fixtures;
+- fresh REAPER process where the oracle requires process isolation.
 
-The permanent workflow is
-`.github/workflows/reaper-cache-extension-oracle.yml`.
+Do not generalize these observations to other REAPER versions/platforms without
+separate live testing.
 
-A decisive run for the parser-policy and rebuild experiments is GitHub Actions
-run `33612051368` (artifact `9839421017`). The run completed successfully.
+The permanent workflow is:
 
-Do not generalize these observations to all REAPER versions/platforms without a
-separate live oracle.
+`.github/workflows/reaper-cache-extension-oracle.yml`
 
-## Standard `.reapeaks` region
+## Why EOF extension rather than a custom REAPER layer
 
-Cockos documents the file format at:
-
-<https://www.reaper.fm/sdk/reapeaks.txt>
-
-For the RPKN/RPKL family, the standard region is conceptually:
+Cockos' standard `.reapeaks` layout is:
 
 ```text
 fixed header (18 bytes)
-layer header table (8 bytes * layer_count)
-layer 0 payload
-layer 1 payload
-...
-layer N-1 payload
+all layer headers (8 bytes * layer_count)
+all standard layer payloads
+EOF
 ```
 
-The fixed header contains:
+For known modern RPKM/RPKN/RPKL layers, libreapeaks can compute the standard end
+from the layer kind, count, channel count, and container version. The standard
+format does not include a generic payload length for an unknown layer token.
+Consequently an unknown custom layer cannot be safely skipped by a reader that
+does not understand that token.
 
-```text
-offset  size  meaning
-0       4     magic: RPKM/RPKN/RPKL
-4       1     channels
-5       1     layer/mipmap count
-6       4     source sample rate
-10      4     low 32 bits of source stat().st_mtime
-14      4     low 32 bits of source stat().st_size
-```
+An EOF extension avoids modifying the standard layer table and therefore has a
+much smaller compatibility surface.
 
-Each layer header is:
+The legacy terminal `-'l'` loudness layout remains ambiguous to libreapeaks, so
+that historical form cannot currently be split safely from an EOF extension.
 
-```text
-int32  division_or_special_token
-uint32 count
-```
+## Original acceptance experiment
 
-The file does not contain a generic `payload_length` for each layer and does
-not contain a total standard-region byte count. A reader computes the payload
-size from the layer kind, count, channels and container version.
-
-For known modern layers this makes the standard end calculable. Importantly,
-the official format does not define a generic way to skip an unknown layer
-token: there is no independent length field telling a reader how many bytes an
-unknown token owns.
-
-This distinction is why an EOF extension is substantially safer than inventing
-an in-table custom layer.
-
-## The tested standard cache
-
-The deterministic fixture used by the extension oracle produced a 5518-byte
-RPKN cache. Its native shape was the normal REAPER waveform + `-'s'` spectral +
-`-'r'` loudness shape used by the existing source-stamp oracle.
-
-The experimental timeline RPKX fixture appended 238 bytes, making the complete
-file 5756 bytes:
-
-```text
-0                                      5518               5756
-|---------------------------------------|------------------|
-| standard REAPER .reapeaks region      | experimental RPKX|
-|---------------------------------------|------------------|
-                                        ^ computed standard end
-```
-
-The experimental suffix used this intentionally simple envelope:
+The original deterministic REAPER cache was 5,518 bytes. The early oracle used
+a deliberately simple experimental suffix:
 
 ```text
 4 bytes  "RPKX"
 4 bytes  version = 1
 4 bytes  payload length
-N bytes  JSON fixture payload
+N bytes  payload
 ```
 
-The JSON contained example frame-addressed tempo and chord events. This is an
-oracle fixture, **not a frozen RPKX file-format specification**.
+A tempo/chord JSON fixture made the complete file 5,756 bytes. That envelope was
+only an oracle fixture and was never the final RPKX specification.
 
-## EOF append acceptance
+The extension matrix also tested single trailing bytes, 16 zero bytes, a 4 KiB
+deterministic arbitrary suffix, and several deliberately malformed standard
+layer-table mutations.
 
-Starting from one fresh REAPER-generated cache, the oracle changed one region
-at a time and then called `PCM_Source_BuildPeaks(src, 0)` in a fresh process.
-It also hashed the cache before and after REAPER exited.
+For the pure EOF additions REAPER 7.79 returned
+`PCM_Source_BuildPeaks(src, 0) == 0` and preserved the cache bytes. This showed
+that, on this tested path, physical EOF does not need to equal REAPER's computed
+standard-layer end.
 
-The important pure EOF cases all returned `BEGIN=0` and were byte-for-byte
-preserved:
+### `BuildPeaks(..., 0)` is only a reuse signal
 
-| case | input -> output | result |
-| --- | ---: | --- |
-| append one `0x00` byte | 5519 -> 5519 | reused, preserved |
-| append one `0xff` byte | 5519 -> 5519 | reused, preserved |
-| append 16 zero bytes | 5534 -> 5534 | reused, preserved |
-| append empty RPKX envelope | 5530 -> 5530 | reused, preserved |
-| append tempo/chord RPKX | 5756 -> 5756 | reused, preserved |
-| repeat tempo/chord RPKX in a new process | 5756 -> 5756 | reused, preserved |
-| append deterministic arbitrary 4 KiB | 9614 -> 9614 | reused, preserved |
+The wider mutation matrix is important because many malformed standard-layer
+mutations also returned `BEGIN=0`. The decisive historical matrix classified
+27/31 mutations as accepted/preserved while only these four immediately forced
+a rebuild:
 
-This demonstrates that REAPER 7.79 does not require the physical file EOF to
-coincide with its computed standard-layer end in this tested path.
-
-### `BuildPeaks(..., 0)` is not a full structural validator
-
-The broader 31-case matrix is also important because it shows what **not** to
-infer from `BEGIN=0`.
-
-27/31 mutations returned `BEGIN=0`. That set included deliberately malformed
-layer-table/count/truncation cases. Only four tested mutations forced an
-immediate rebuild:
-
-- invalid magic (`RPKX` in place of `RPKN`);
+- invalid magic;
 - `channels=0`;
 - `sample_rate=0`;
 - `layer_count=0`.
 
-Therefore `PCM_Source_BuildPeaks(src, 0) == 0` should be treated as REAPER's
-reuse decision, not as proof that every byte of the cache is structurally
-valid.
+Therefore `BEGIN=0` must not be described as full structural validation.
+libreapeaks remains stricter about the standard region.
 
-libreapeaks remains stricter than this shallow reuse check for the standard
-region: required standard payload bytes must still exist and unknown in-table
-layer tokens remain unsupported.
+## Corrected `PCM_Source_GetPeaks` oracle
 
-## Corrected `PCM_Source_GetPeaks` comparison
+An early read comparator incorrectly compared every allocated ReaScript buffer
+slot, including slots beyond the returned sample count. Those slots are
+unspecified.
 
-An early read oracle compared the entire allocated ReaScript buffer and
-therefore compared unspecified slots after the actual returned sample count.
-That was incorrect.
+The corrected comparator uses the `PCM_Source_GetPeaks` return value:
 
-The corrected comparator uses the `PCM_Source_GetPeaks` return value correctly:
-
-- low 20 bits: number of returned samples;
+- low 20 bits are the number of returned samples;
 - output blocks remain spaced by the requested samples-per-channel count;
-- only returned slots in valid max/min/extra blocks participate in comparison.
+- only valid max/min/optional-extra slots participate in the signature.
 
-With that corrected comparator, all pure EOF-extension cases above were:
+With that corrected comparator, every pure EOF case in the permanent gate was:
 
 - `BEGIN=0`;
 - `READ_OK=1`;
-- `GetPeaks` signature identical to the plain control cache; and
-- byte-for-byte unchanged after the read process exited.
+- `GetPeaks`-identical to the unmodified control cache; and
+- byte-for-byte unchanged after REAPER exited.
 
-The workflow now has a dedicated gate that fails unless these EOF cases remain
-identical to control.
+Some mutations inside the standard layer table were accepted by the shallow
+`BuildPeaks(..., 0)` probe but produced different `GetPeaks` results. This is
+why RPKX stays outside the REAPER layer table.
 
-Some layer-table mutations that were still accepted by `BuildPeaks(..., 0)` did
-produce different `GetPeaks` results. That is further evidence that **EOF append
-and layer-table modification are different risk classes**. RPKX should remain
-outside the REAPER layer table.
+## Forced rebuild behavior
 
-## Forced REAPER rebuild: RPKX is discarded
-
-The rebuild oracle answers the most important lifecycle question.
-
-Procedure:
-
-1. take the plain 5518-byte REAPER cache and the 5756-byte
-   `standard-cache + RPKX` cache;
-2. move the source file mtime forward by 120 seconds without changing its
-   content;
-3. present each old-stamp cache to a fresh REAPER process;
-4. run the normal `PCM_Source_BuildPeaks` Begin/Run/Finish lifecycle;
-5. compare complete rebuilt outputs.
+The rebuild oracle advances the source mtime so the old cache becomes stale and
+runs the normal BuildPeaks lifecycle on both a plain cache and an EOF-extended
+cache.
 
 Observed result:
 
@@ -209,118 +137,103 @@ RPKX extension present after rebuild: false
 RPKX suffix preserved after rebuild: false
 ```
 
-The interpretation is straightforward: when REAPER decides to regenerate the
-cache, it writes the standard `.reapeaks` file it knows how to generate. It does
-not preserve an unknown EOF suffix.
+Thus EOF extensions survive cache **reuse**, but a true REAPER rebuild rewrites
+the standard cache and discards the unknown suffix. Applications must regenerate
+or reattach their RPKX data after such a rebuild.
 
-This is not a defect in the EOF-extension idea; it defines its lifecycle.
-Applications that care about custom metadata must treat RPKX as an extension
-they own and reattach/regenerate it after a REAPER rebuild.
+## Production packed-v1 large-extension oracle
 
-## Parser policy in libreapeaks
+After the production design moved to a packed directory-first container, the
+oracle was extended to answer the performance question: does REAPER read all the
+way to physical EOF when the appended RPKX becomes very large?
 
-The library previously required:
+The production fixture used:
 
 ```text
-computed standard end == physical EOF
+32-byte RPKX v1 header
+48-byte directory entry
+one payload named LOAD
 ```
 
-and returned `trailing bytes after layers` otherwise.
+The payload was sparse/zero-filled and tested at 0, 1, 16, 128, and 512 MiB.
+REAPER ran under `strace` tracing `openat`, `read`, `pread64`, `lseek`, `mmap`,
+`munmap`, and `close`.
 
-That policy was stricter than the tested REAPER behavior and prevented future
-EOF extensions. The parser policy has therefore been changed on the research
-branch:
+Decisive workflow run: `33842942251`.
 
-- `ReaPeaks::parse` accepts bytes after all known standard layers have been
-  parsed;
-- the complete input remains in `ReaPeaks::raw`, including the tail;
-- `GpuCacheView` accepts the same tail and never includes it in a standard
-  layer/tile range;
-- `parse_spectrogram_layers` ignores the tail after the standard layers;
-- truncation *inside* the required standard region remains an error;
-- unknown in-table layer tokens remain an error/unsupported condition because
-  their payload length cannot be derived safely.
+Artifact:
 
-Regression tests cover the decoded parser, raw GPU view and spectrogram
-extractor with an RPKX-like suffix.
+- ID: `9925546482`
+- ZIP SHA-256:
+  `6c15e92e3ee961e35dfd5f39b2fe90d2890774ad2c7855d79f3c75509aef0cf6`
 
-This is deliberately **not** equivalent to accepting arbitrary corruption. The
-new tolerance begins only after the parser has successfully consumed all
-standard layers it knows how to size.
+Observed:
 
-### Legacy `-'l'` caveat
+| case | complete cache bytes | elapsed under strace | `.reapeaks` read bytes | `.reapeaks` pread64 bytes | `.reapeaks` mmap max | peaks |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| plain | 5,518 | 6.728 s | 0 | 5,518 | 0 | control |
+| packed RPKX 0 MiB | 5,598 | 6.727 s | 0 | 5,598 | 0 | identical |
+| packed RPKX 1 MiB | 1,054,174 | 6.627 s | 0 | 65,536 | 0 | identical |
+| packed RPKX 16 MiB | 16,782,814 | 6.577 s | 0 | 65,536 | 0 | identical |
+| packed RPKX 128 MiB | 134,223,326 | 6.779 s | 0 | 65,536 | 0 | identical |
+| packed RPKX 512 MiB | 536,876,510 | 6.578 s | 0 | 65,536 | 0 | identical |
 
-The legacy `-'l'` loudness payload layout is not fully established in
-libreapeaks. The current parser treats a terminal legacy `-'l'` payload as
-opaque remaining data. Consequently it cannot reliably split a hypothetical
-RPKX suffix from that legacy payload until the old layout is recovered.
+All packed-v1 cases returned `BEGIN=0`, completed the corrected GetPeaks probe,
+and left cache size/mtime unchanged. No mmap of the `.reapeaks` file was
+observed. For payloads of 1 MiB and larger, traced `pread64` traffic stayed at
+65,536 bytes rather than increasing with physical EOF.
 
-Modern RPKN/RPKL caches using the known `-'r'` loudness layout do not have this
-ambiguity.
+Within this pinned REAPER 7.79/Linux path, the evidence therefore strongly
+indicates that REAPER does **not** sequentially read the complete RPKX payload
+for these waveform/peak reads. Startup-plus-strace wall time also remained
+roughly flat through the 512 MiB case.
 
-## Recommended RPKX lifecycle
+### Limits of the large-file result
 
-The empirical lifecycle is now:
+The result is deliberately scoped:
+
+- the giant payload is sparse/zero-filled, so this primarily measures REAPER's
+  syscall/control-flow behavior rather than cold physical-disk throughput;
+- fresh REAPER startup and strace dominate wall time;
+- the workflow does not impose a timing threshold, because runner timing is
+  noisy;
+- the compatibility gate is reuse, peak-read identity, and cache preservation;
+- no claim is made for other REAPER versions or operating systems.
+
+## libreapeaks parser policy
+
+The standard parser now tolerates bytes only **after** all known standard layers
+have been consumed. It still rejects truncation inside the required standard
+region and unknown in-table tokens whose payload size cannot be inferred.
+
+Production RPKX v1 adds a contiguous directory before all payloads. The Rust
+seekable API can therefore discover the entire RPKX inventory without reading
+opaque payloads and then seek directly to a selected payload. See
+`RPKX_SPEC.md` for the exact wire format and APIs.
+
+## Lifecycle
+
+The empirical lifecycle remains:
 
 ```text
-standard cache valid + stamp matches
+standard cache valid + source stamp matches
     -> REAPER reuses cache
-    -> EOF RPKX survives unchanged
+    -> RPKX survives unchanged
 
-standard cache becomes stale / REAPER rebuilds
-    -> REAPER rewrites standard cache
+standard cache stale / REAPER rebuilds
+    -> REAPER writes standard cache
     -> RPKX disappears
-    -> libreapeaks/application detects absence
-    -> custom analysis is regenerated or reattached
+    -> application detects absence
+    -> application regenerates or reattaches its extension data
 ```
 
-This maps cleanly onto the existing ownership split:
-
-- REAPER/libreapeaks standard cache freshness uses `SourceStamp` semantics;
-- stronger source identity/change detection remains an application concern;
-- RPKX metadata generation/versioning is owned by libreapeaks or the consuming
-  application;
-- after a rebuild, extension regeneration should be atomic and should not alter
-  the standard REAPER bytes.
-
-If preserving expensive analysis across a REAPER rebuild matters, the
-application may keep a separate durable analysis store and use RPKX as the
-co-located cache representation. A single-file-only design cannot rely on
-REAPER to preserve unknown metadata during its own rewrite.
-
-## Direction for an eventual RPKX format
-
-The current JSON fixture should not be standardized. A production envelope
-should be self-delimiting and forward-compatible independently of REAPER, for
-example:
-
-```text
-RPKX header
-  magic
-  RPKX version
-  total extension length
-  flags/checksum
-
-chunk table / length-delimited chunks
-  TEMP  tempo timeline
-  BEAT  beat/downbeat timeline
-  CHRD  chord timeline
-  KEY_  key timeline
-  SECT  section timeline
-  ...
-```
-
-Timeline positions should normally use source frames rather than floating-point
-seconds so waveform, playback and analysis share one exact source coordinate
-system.
-
-Before freezing such a format, add live-oracle coverage for Windows/macOS and
-multiple REAPER versions, and decide how a writer locates the standard end for
-all supported historical layer layouts.
+If an analysis result must survive independently of REAPER's rewrite, an
+application may maintain a separate durable analysis store and use RPKX as its
+co-located cache representation.
 
 ## Reproduction files
 
-The research/gates live in:
+The current research/gates live in:
 
 - `.github/workflows/reaper-cache-extension-oracle.yml`
 - `tools/reaper_oracle/cache_extension_oracle.py`
@@ -330,8 +243,8 @@ The research/gates live in:
 - `tools/reaper_oracle/cache_read_matrix_fixed.py`
 - `tools/reaper_oracle/cache_read_rpkx_gate.py`
 - `tools/reaper_oracle/cache_rebuild_rpkx.py`
+- `tools/reaper_oracle/rpkx_large_io_oracle.py`
 
-The temporary `*_fixed.py` entrypoints exist because the first experimental
-oracles exposed two mistakes in the research harness itself (`-'r'` byte sizing
-and unused `GetPeaks` buffer-slot comparison). Permanent cleanup can fold those
-corrections back into the base scripts after the evidence is reviewed.
+The `*_fixed.py` wrappers are retained because earlier experiments exposed two
+harness bugs (`-'r'` payload sizing and comparison of unused GetPeaks buffer
+slots). They preserve the evidence history rather than rewriting it silently.

@@ -23,7 +23,6 @@ pub mod gpu_cache;
 pub mod loudness;
 pub mod pyramid;
 pub mod reaper_generate;
-#[allow(clippy::derivable_impls)]
 pub mod rpkx;
 pub mod source;
 
@@ -68,9 +67,11 @@ pub use gpu_cache::{GpuCacheView, GpuLayerKind, GpuLayerMeta, GpuRawTile};
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
 pub use reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
 pub use rpkx::{
-    append_rpkx_chunk, attach_rpkx, read_rpkx, reapeaks_source_stamp, remove_rpkx_chunks,
-    set_rpkx_chunk, standard_end, strip_rpkx, RpkxAttachPolicy, RpkxChunk, RpkxContainer, RpkxKey,
-    RpkxNamespace, RPKX_CHUNK_HEADER_SIZE, RPKX_HEADER_SIZE, RPKX_MAGIC, RPKX_VERSION,
+    append_rpkx_chunk, attach_rpkx, copy_rpkx_payload, read_rpkx, read_rpkx_index,
+    read_rpkx_payload, reapeaks_source_stamp, remove_rpkx_chunks, scan_rpkx, set_rpkx_chunk,
+    standard_end, standard_end_reader, strip_rpkx, RpkxAttachPolicy, RpkxChunk, RpkxContainer,
+    RpkxEntry, RpkxIndex, RpkxKey, RpkxNamespace, RPKX_CHUNK_HEADER_SIZE,
+    RPKX_DIRECTORY_ENTRY_SIZE, RPKX_HEADER_SIZE, RPKX_MAGIC, RPKX_VERSION,
 };
 pub use source::SourceStamp;
 pub use spectrogram::{

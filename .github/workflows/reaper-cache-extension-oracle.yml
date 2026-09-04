@@ -11,6 +11,7 @@ on:
       - 'tools/reaper_oracle/cache_read_rpkx_gate.py'
       - 'tools/reaper_oracle/cache_read_probe.lua'
       - 'tools/reaper_oracle/cache_rebuild_rpkx.py'
+      - 'tools/reaper_oracle/rpkx_large_io_oracle.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   pull_request:
@@ -23,6 +24,7 @@ on:
       - 'tools/reaper_oracle/cache_read_rpkx_gate.py'
       - 'tools/reaper_oracle/cache_read_probe.lua'
       - 'tools/reaper_oracle/cache_rebuild_rpkx.py'
+      - 'tools/reaper_oracle/rpkx_large_io_oracle.py'
       - 'tools/reaper_oracle/build_one.lua'
       - 'tools/reaper_oracle/fresh_process.py'
   workflow_dispatch:
@@ -37,11 +39,11 @@ concurrency:
 jobs:
   extension-matrix:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install REAPER runtime
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install REAPER runtime and syscall tracer
+        run: sudo apt-get update && sudo apt-get install -y xvfb strace
       - name: Download pinned REAPER 7.79 Linux x86_64
         shell: bash
         run: |
@@ -65,6 +67,7 @@ jobs:
           tools/reaper_oracle/cache_read_matrix_fixed.py
           tools/reaper_oracle/cache_read_rpkx_gate.py
           tools/reaper_oracle/cache_rebuild_rpkx.py
+          tools/reaper_oracle/rpkx_large_io_oracle.py
       - name: Start Xvfb
         shell: bash
         run: |
@@ -80,6 +83,10 @@ jobs:
         run: python3 tools/reaper_oracle/cache_read_matrix_fixed.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 20
       - name: Require EOF-appended caches to read exactly like control
         run: python3 tools/reaper_oracle/cache_read_rpkx_gate.py /tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json
+      - name: Measure packed RPKX behavior from 0 MiB through 512 MiB
+        env:
+          DISPLAY: ':96'
+        run: python3 tools/reaper_oracle/rpkx_large_io_oracle.py /tmp/reaper-cache-extension/oracle "$REAPER_BIN" --display :96 --timeout 90
       - name: Force REAPER rebuild of plain and RPKX caches
         env:
           DISPLAY: ':96'
@@ -90,6 +97,7 @@ jobs:
         run: |
           report=/tmp/reaper-cache-extension/oracle/results/cache-extension-oracle.json
           reads=/tmp/reaper-cache-extension/oracle/results/cache-read-matrix.json
+          large=/tmp/reaper-cache-extension/oracle/results/rpkx-large-io-oracle.json
           rebuild=/tmp/reaper-cache-extension/oracle/results/cache-rebuild-rpkx.json
           if [ -f "$report" ]; then
             echo '## REAPER cache extension oracle' >> "$GITHUB_STEP_SUMMARY"
@@ -116,6 +124,21 @@ jobs:
           print('|---|---:|---:|---:|')
           for c in d['cases']:
               print(f"| {c['name']} | {c['read_ok']} | {c['read_signature_equals_control']} | {c['cache_unchanged']} |")
+          PY
+          fi
+          if [ -f "$large" ]; then
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Large packed RPKX I/O' >> "$GITHUB_STEP_SUMMARY"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          p='/tmp/reaper-cache-extension/oracle/results/rpkx-large-io-oracle.json'
+          d=json.load(open(p))
+          print(d['scope'])
+          print('')
+          print('| case | cache MiB | elapsed s | read bytes | pread bytes | max mmap bytes | same peaks |')
+          print('|---|---:|---:|---:|---:|---:|---:|')
+          for c in d['cases']:
+              print(f"| {c['name']} | {c['cache_bytes']/1024/1024:.1f} | {c['elapsed_seconds']:.3f} | {c['reapeaks_read_bytes']} | {c['reapeaks_pread_bytes']} | {c['reapeaks_mmap_max_len']} | {c['read_signature_equals_control']} |")
           PY
           fi
           if [ -f "$rebuild" ]; then

@@ -1,9 +1,11 @@
 use reapeaks::format::{encode, GeneratedLayer, LayerHeader, Version};
 use reapeaks::{
-    append_rpkx_chunk, attach_rpkx, read_rpkx, remove_rpkx_chunks, set_rpkx_chunk, standard_end,
-    strip_rpkx, ReaPeaks, RpkxAttachPolicy, RpkxChunk, RpkxContainer, RpkxKey, SourceStamp,
-    RPKX_HEADER_SIZE,
+    append_rpkx_chunk, attach_rpkx, read_rpkx, read_rpkx_index, read_rpkx_payload,
+    remove_rpkx_chunks, scan_rpkx, set_rpkx_chunk, standard_end, strip_rpkx, ReaPeaks,
+    RpkxAttachPolicy, RpkxChunk, RpkxContainer, RpkxIndex, RpkxKey, SourceStamp,
+    RPKX_DIRECTORY_ENTRY_SIZE, RPKX_HEADER_SIZE,
 };
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 const NS_A: [u8; 16] = [
     0x10, 0x7a, 0x92, 0x8e, 0x49, 0x02, 0x4c, 0x62, 0xa8, 0x27, 0xa0, 0x29, 0x83, 0xee, 0x11, 0x01,
@@ -53,6 +55,93 @@ fn rpkx_set_preserves_standard_reaper_bytes() {
     assert_eq!(chunk.version, 3);
     assert_eq!(chunk.flags, 0x20);
     assert_eq!(chunk.payload, b"opaque chord bytes");
+}
+
+#[test]
+fn directory_is_contiguous_and_payloads_are_packed_after_it() {
+    let base = base_cache();
+    let out = append_rpkx_chunk(
+        &set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"AAAA", 1, 0, b"abc".to_vec())).unwrap(),
+        RpkxChunk::new(NS_B, *b"BBBB", 2, 7, b"12345".to_vec()),
+    )
+    .unwrap();
+
+    let index = read_rpkx_index(&out).unwrap().unwrap();
+    assert_eq!(index.entries.len(), 2);
+    let payload_start = (RPKX_HEADER_SIZE + 2 * RPKX_DIRECTORY_ENTRY_SIZE) as u64;
+    assert_eq!(index.entries[0].payload_offset, payload_start);
+    assert_eq!(index.entries[0].payload_len, 3);
+    assert_eq!(index.entries[1].payload_offset, payload_start + 3);
+    assert_eq!(index.entries[1].payload_len, 5);
+    assert_eq!(index.container_len, payload_start + 8);
+
+    let absolute = base.len() + payload_start as usize;
+    assert_eq!(&out[absolute..absolute + 8], b"abc12345");
+}
+
+#[test]
+fn directory_prefix_can_be_parsed_without_payload_bytes() {
+    let mut container = RpkxContainer::new(SourceStamp::new(11, 22));
+    container.append_chunk(RpkxChunk::new(NS_A, *b"BIG_", 1, 0, vec![0x5a; 1024]));
+    container.append_chunk(RpkxChunk::new(NS_B, *b"SMOL", 1, 0, b"ok".to_vec()));
+    let encoded = container.encode().unwrap();
+    let prefix_len = RPKX_HEADER_SIZE + 2 * RPKX_DIRECTORY_ENTRY_SIZE;
+
+    let index = RpkxIndex::parse_prefix(&encoded[..prefix_len]).unwrap();
+    assert_eq!(index.entries.len(), 2);
+    assert_eq!(index.entries[0].payload_len, 1024);
+    assert_eq!(index.entries[1].payload_len, 2);
+    assert!(index.container_len as usize > prefix_len);
+}
+
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: usize,
+}
+
+impl CountingCursor {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            bytes_read: 0,
+        }
+    }
+}
+
+impl Read for CountingCursor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.bytes_read += read;
+        Ok(read)
+    }
+}
+
+impl Seek for CountingCursor {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[test]
+fn seekable_scan_does_not_read_large_payload_until_selected() {
+    let base = base_cache();
+    let payload = vec![0xa5; 2 * 1024 * 1024];
+    let out = set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"BIG_", 1, 0, payload.clone())).unwrap();
+    let mut reader = CountingCursor::new(out);
+
+    let index = scan_rpkx(&mut reader).unwrap().unwrap();
+    assert_eq!(index.entries.len(), 1);
+    assert_eq!(index.entries[0].payload_len, payload.len() as u64);
+    assert!(
+        reader.bytes_read < 256,
+        "scan read {} bytes",
+        reader.bytes_read
+    );
+
+    let before_payload = reader.bytes_read;
+    let selected = read_rpkx_payload(&mut reader, &index, &index.entries[0]).unwrap();
+    assert_eq!(selected, payload);
+    assert_eq!(reader.bytes_read - before_payload, payload.len());
 }
 
 #[test]
@@ -140,4 +229,31 @@ fn malformed_container_lengths_are_rejected() {
     let impossible = (out.len() as u64 + 100).to_le_bytes();
     out[start + 16..start + 24].copy_from_slice(&impossible);
     assert!(read_rpkx(&out).is_err());
+}
+
+#[test]
+fn old_interleaved_v1_and_experimental_fixture_are_not_new_v1() {
+    let stamp = SourceStamp::new(0x1234_5678, 0x0002_ee2c);
+
+    let experimental = b"RPKX\x01\x00\x00\x00\x00\x00\x00\x00";
+    assert!(RpkxContainer::parse(experimental).is_err());
+
+    let mut old = Vec::new();
+    old.extend_from_slice(b"RPKX");
+    old.extend_from_slice(&1u16.to_le_bytes());
+    old.extend_from_slice(&32u16.to_le_bytes());
+    old.extend_from_slice(&0u32.to_le_bytes());
+    old.extend_from_slice(&1u32.to_le_bytes());
+    old.extend_from_slice(&(75u64).to_le_bytes());
+    old.extend_from_slice(&stamp.mtime_low32.to_le_bytes());
+    old.extend_from_slice(&stamp.size_low32.to_le_bytes());
+    old.extend_from_slice(&NS_A);
+    old.extend_from_slice(b"DATA");
+    old.extend_from_slice(&1u32.to_le_bytes());
+    old.extend_from_slice(&0u32.to_le_bytes());
+    old.extend_from_slice(&0u32.to_le_bytes());
+    old.extend_from_slice(&3u64.to_le_bytes());
+    old.extend_from_slice(b"abc");
+    assert_eq!(old.len(), 75);
+    assert!(RpkxContainer::parse(&old).is_err());
 }
