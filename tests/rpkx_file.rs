@@ -100,7 +100,10 @@ fn file_set_replaces_duplicate_keys_exactly_like_owning_api() {
     let actual = fs::read(&path).unwrap();
 
     assert_eq!(actual, expected);
-    assert_eq!(read_rpkx(&actual).unwrap().unwrap().chunks_for(key).count(), 1);
+    assert_eq!(
+        read_rpkx(&actual).unwrap().unwrap().chunks_for(key).count(),
+        1
+    );
 }
 
 #[test]
