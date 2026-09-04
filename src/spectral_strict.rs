@@ -187,7 +187,16 @@ fn build_high_rate_f32(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    build_high_rate_f32_source(pcm, frames, channels, source_rate, division)
+    validate_source_len(pcm, frames, channels, source_rate, division)?;
+    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
+    crate::spectral_base::build_fine_spectral_f32_with_expected(
+        pcm,
+        frames,
+        channels,
+        source_rate,
+        division,
+        target,
+    )
 }
 
 fn build_high_rate_f32_source<S: F32SampleSource + ?Sized>(
@@ -314,7 +323,11 @@ pub fn build_fine_spectral_f32(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    build_fine_spectral_f32_source(pcm, frames, channels, source_rate, division)
+    if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
+        return build_high_rate_f32(pcm, frames, channels, source_rate, division);
+    }
+    validate_source_len(pcm, frames, channels, source_rate, division)?;
+    Ok(zero_fine(frames, channels, division))
 }
 
 pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
@@ -365,7 +378,15 @@ pub fn build_spectral_layers_f32(
     source_rate: u32,
     divisions: &[u32],
 ) -> Result<Vec<GeneratedLayer>> {
-    build_spectral_layers_f32_source(pcm, frames, channels, source_rate, divisions)
+    if divisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_source_len(pcm, frames, channels, source_rate, divisions[0])?;
+    if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
+        let fine = build_high_rate_f32(pcm, frames, channels, source_rate, divisions[0])?;
+        return assemble_high_rate_layers(&fine, channels, divisions);
+    }
+    zero_layers(frames, channels, divisions)
 }
 
 pub(crate) fn build_spectral_layers_f32_source<S: F32SampleSource + ?Sized>(
