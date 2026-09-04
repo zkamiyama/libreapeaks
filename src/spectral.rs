@@ -1222,6 +1222,68 @@ pub fn aggregate_spectral_from_fine(
     out
 }
 
+pub(crate) fn encode_spectral_layer_from_fine(
+    fine: &[SpectralPeak],
+    channels: usize,
+    ratio: usize,
+    output_count: usize,
+) -> GeneratedLayer {
+    if channels == 0 || ratio == 0 {
+        return GeneratedLayer {
+            header: LayerHeader {
+                division: TOKEN_SPECTRAL,
+                peak_count: 0,
+            },
+            bytes: Vec::new(),
+        };
+    }
+    let fine_count = fine.len() / channels;
+    let count = output_count.min(fine_count / ratio);
+    let mut bytes = Vec::with_capacity(
+        count
+            .saturating_mul(channels)
+            .saturating_mul(std::mem::size_of::<u32>()),
+    );
+
+    if ratio == 1 {
+        for peak in &fine[..count * channels] {
+            bytes.extend_from_slice(&peak.code().to_le_bytes());
+        }
+    } else {
+        for output_index in 0..count {
+            let first = output_index * ratio;
+            let last = first + ratio;
+            for channel in 0..channels {
+                let mut sum_density = 0u64;
+                let mut best = SpectralPeak::default();
+                let mut best_score = 0u64;
+                for fine_index in first..last {
+                    let peak = fine[fine_index * channels + channel];
+                    sum_density += u64::from(peak.density);
+                    let score = u64::from(peak.density) * (32768u64 - u64::from(peak.frequency_hz));
+                    if score > best_score {
+                        best_score = score;
+                        best = peak;
+                    }
+                }
+                let peak = SpectralPeak {
+                    frequency_hz: best.frequency_hz,
+                    density: (sum_density / ratio as u64).min(16383) as u16,
+                };
+                bytes.extend_from_slice(&peak.code().to_le_bytes());
+            }
+        }
+    }
+
+    GeneratedLayer {
+        header: LayerHeader {
+            division: TOKEN_SPECTRAL,
+            peak_count: count as u32,
+        },
+        bytes,
+    }
+}
+
 fn assemble_spectral_layers(
     fine: &[SpectralPeak],
     frames: usize,
@@ -1232,36 +1294,19 @@ fn assemble_spectral_layers(
         return Ok(Vec::new());
     }
     let fine_div = divisions[0];
-    let fine_count = if channels == 0 {
-        0
-    } else {
-        fine.len() / channels
-    };
     let mut out = Vec::with_capacity(divisions.len());
 
-    for (li, &div) in divisions.iter().enumerate() {
+    for &div in divisions {
         if div == 0 || div % fine_div != 0 {
             return Err(ReaPeaksError::Unsupported(
                 "spectral divisions must be nonzero multiples of fine division",
             ));
         }
+        let ratio = (div / fine_div) as usize;
         let expected = frames.saturating_sub(1024) / div as usize;
-        let peaks = if li == 0 {
-            fine[..expected.min(fine_count) * channels].to_vec()
-        } else {
-            aggregate_spectral_from_fine(fine, channels, (div / fine_div) as usize, expected)
-        };
-        let mut bytes = Vec::with_capacity(peaks.len() * 4);
-        for p in &peaks {
-            bytes.extend_from_slice(&p.code().to_le_bytes());
-        }
-        out.push(GeneratedLayer {
-            header: LayerHeader {
-                division: TOKEN_SPECTRAL,
-                peak_count: (peaks.len() / channels) as u32,
-            },
-            bytes,
-        });
+        out.push(encode_spectral_layer_from_fine(
+            fine, channels, ratio, expected,
+        ));
     }
     Ok(out)
 }
@@ -1516,5 +1561,55 @@ mod spectral_magnitude_summary_tests {
         spec[17].re = f64::NAN;
         spec[31].im = f64::INFINITY;
         assert_same(&spec);
+    }
+}
+
+#[cfg(test)]
+mod spectral_direct_encode_tests {
+    use super::*;
+
+    fn reference_layer(
+        fine: &[SpectralPeak],
+        channels: usize,
+        ratio: usize,
+        output_count: usize,
+    ) -> GeneratedLayer {
+        let fine_count = fine.len() / channels;
+        let count = output_count.min(fine_count / ratio);
+        let peaks = if ratio == 1 {
+            fine[..count * channels].to_vec()
+        } else {
+            aggregate_spectral_from_fine(fine, channels, ratio, count)
+        };
+        let mut bytes = Vec::with_capacity(peaks.len() * 4);
+        for peak in &peaks {
+            bytes.extend_from_slice(&peak.code().to_le_bytes());
+        }
+        GeneratedLayer {
+            header: LayerHeader {
+                division: TOKEN_SPECTRAL,
+                peak_count: (peaks.len() / channels) as u32,
+            },
+            bytes,
+        }
+    }
+
+    #[test]
+    fn direct_encode_matches_aggregate_then_encode() {
+        let channels = 2usize;
+        let frames = 60usize;
+        let fine: Vec<SpectralPeak> = (0..frames * channels)
+            .map(|index| SpectralPeak {
+                frequency_hz: ((index * 977 + 31) % 20_000) as u16,
+                density: ((index * 613 + 17) % 16_384) as u16,
+            })
+            .collect();
+        for &(ratio, output_count) in &[(1usize, 57usize), (3, 19), (5, 11), (15, 4)] {
+            let actual = encode_spectral_layer_from_fine(&fine, channels, ratio, output_count);
+            let expected = reference_layer(&fine, channels, ratio, output_count);
+            assert_eq!(actual.header.division, expected.header.division);
+            assert_eq!(actual.header.peak_count, expected.header.peak_count);
+            assert_eq!(actual.bytes, expected.bytes, "ratio={ratio}");
+        }
     }
 }
