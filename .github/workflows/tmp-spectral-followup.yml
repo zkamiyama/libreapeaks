@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up implementation
+name: Temporary spectral follow-up benchmark
 
 on:
   push:
@@ -8,243 +8,114 @@ on:
       - ".github/workflows/tmp-spectral-followup.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  implement-and-test:
+  benchmark:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
+    env:
+      BASELINE_SHA: 6d3a5006e66b52846b2007a795a163e257d33afa
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout optimized branch
+        uses: actions/checkout@v4
         with:
-          ref: optimize/spectral-followup
+          ref: ${{ github.sha }}
+          path: optimized
           submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
+
+      - name: Checkout PR 28 merged baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          submodules: recursive
+          fetch-depth: 1
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
-      - name: Apply step 4 - encode spectral layers directly from fine peaks
+      - name: Use identical benchmark harness
+        run: |
+          mkdir -p baseline/examples
+          cp optimized/examples/optimization_benchmark.rs baseline/examples/optimization_benchmark.rs
+
+      - name: Build release strict-wdl binaries
+        run: |
+          cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+          cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+
+      - name: Benchmark and verify byte identity
         shell: bash
         run: |
           python3 - <<'PY'
+          import json
+          import math
+          import statistics
+          import subprocess
           from pathlib import Path
 
-          spectral = Path("src/spectral.rs")
-          text = spectral.read_text()
-
-          helper = '''pub(crate) fn encode_spectral_layer_from_fine(
-              fine: &[SpectralPeak],
-              channels: usize,
-              ratio: usize,
-              output_count: usize,
-          ) -> GeneratedLayer {
-              if channels == 0 || ratio == 0 {
-                  return GeneratedLayer {
-                      header: LayerHeader {
-                          division: TOKEN_SPECTRAL,
-                          peak_count: 0,
-                      },
-                      bytes: Vec::new(),
-                  };
-              }
-              let fine_count = fine.len() / channels;
-              let count = output_count.min(fine_count / ratio);
-              let mut bytes = Vec::with_capacity(
-                  count
-                      .saturating_mul(channels)
-                      .saturating_mul(std::mem::size_of::<u32>()),
-              );
-
-              if ratio == 1 {
-                  for peak in &fine[..count * channels] {
-                      bytes.extend_from_slice(&peak.code().to_le_bytes());
-                  }
-              } else {
-                  for output_index in 0..count {
-                      let first = output_index * ratio;
-                      let last = first + ratio;
-                      for channel in 0..channels {
-                          let mut sum_density = 0u64;
-                          let mut best = SpectralPeak::default();
-                          let mut best_score = 0u64;
-                          for fine_index in first..last {
-                              let peak = fine[fine_index * channels + channel];
-                              sum_density += u64::from(peak.density);
-                              let score = u64::from(peak.density)
-                                  * (32768u64 - u64::from(peak.frequency_hz));
-                              if score > best_score {
-                                  best_score = score;
-                                  best = peak;
-                              }
-                          }
-                          let peak = SpectralPeak {
-                              frequency_hz: best.frequency_hz,
-                              density: (sum_density / ratio as u64).min(16383) as u16,
-                          };
-                          bytes.extend_from_slice(&peak.code().to_le_bytes());
-                      }
-                  }
-              }
-
-              GeneratedLayer {
-                  header: LayerHeader {
-                      division: TOKEN_SPECTRAL,
-                      peak_count: count as u32,
-                  },
-                  bytes,
-              }
+          cases = [
+              "pcm16-wave-48k-stereo-60s",
+              "pcm16-spectral-48k-stereo-30s",
+              "pcm16-spectrogram-48k-stereo-20s",
+              "pcm16-spectrogram-96k-6ch-8s",
+              "pcm24-spectral-96k-stereo-15s",
+              "f32-spectrogram-48k-stereo-15s",
+          ]
+          binaries = {
+              "baseline": Path("baseline/target/release/examples/optimization_benchmark"),
+              "optimized": Path("optimized/target/release/examples/optimization_benchmark"),
           }
+          samples = {case: {"baseline": [], "optimized": []} for case in cases}
+          metadata = {case: {} for case in cases}
 
-          '''
-          if 'fn encode_spectral_layer_from_fine(' in text:
-              raise SystemExit('step4 helper already present')
-          marker = 'fn assemble_spectral_layers(\n'
-          pos = text.index(marker)
-          text = text[:pos] + helper + text[pos:]
+          for order in (("baseline", "optimized"), ("optimized", "baseline")):
+              for case in cases:
+                  for label in order:
+                      raw = subprocess.check_output([str(binaries[label]), case, "3"], text=True).strip()
+                      result = json.loads(raw)
+                      samples[case][label].extend(result["samples_ns"])
+                      metadata[case][label] = {"bytes": result["bytes"], "hash": result["hash"]}
 
-          start = text.index('fn assemble_spectral_layers(\n')
-          end = text.index('\npub fn build_spectral_layers(\n', start)
-          replacement = '''fn assemble_spectral_layers(
-              fine: &[SpectralPeak],
-              frames: usize,
-              channels: usize,
-              divisions: &[u32],
-          ) -> Result<Vec<GeneratedLayer>> {
-              if divisions.is_empty() {
-                  return Ok(Vec::new());
-              }
-              let fine_div = divisions[0];
-              let mut out = Vec::with_capacity(divisions.len());
+          rows = []
+          speedups = []
+          for case in cases:
+              if metadata[case]["baseline"] != metadata[case]["optimized"]:
+                  raise SystemExit(
+                      f"byte identity failed in {case}: baseline={metadata[case]['baseline']} "
+                      f"optimized={metadata[case]['optimized']}"
+                  )
+              baseline_ns = statistics.median(samples[case]["baseline"])
+              optimized_ns = statistics.median(samples[case]["optimized"])
+              speedup = baseline_ns / optimized_ns
+              speedups.append(speedup)
+              rows.append({
+                  "case": case,
+                  "baseline_median_ns": baseline_ns,
+                  "optimized_median_ns": optimized_ns,
+                  "speedup": speedup,
+                  "bytes": metadata[case]["baseline"]["bytes"],
+                  "hash": metadata[case]["baseline"]["hash"],
+                  "baseline_samples_ns": samples[case]["baseline"],
+                  "optimized_samples_ns": samples[case]["optimized"],
+              })
 
-              for &div in divisions {
-                  if div == 0 || div % fine_div != 0 {
-                      return Err(ReaPeaksError::Unsupported(
-                          "spectral divisions must be nonzero multiples of fine division",
-                      ));
-                  }
-                  let ratio = (div / fine_div) as usize;
-                  let expected = frames.saturating_sub(1024) / div as usize;
-                  out.push(encode_spectral_layer_from_fine(
-                      fine, channels, ratio, expected,
-                  ));
-              }
-              Ok(out)
+          payload = {
+              "baseline": "6d3a5006e66b52846b2007a795a163e257d33afa",
+              "optimized": subprocess.check_output(
+                  ["git", "-C", "optimized", "rev-parse", "HEAD"], text=True
+              ).strip(),
+              "geomean_speedup": math.exp(sum(math.log(x) for x in speedups) / len(speedups)),
+              "cases": rows,
           }
-          '''
-          text = text[:start] + replacement + text[end:]
-
-          tests = '''
-
-          #[cfg(test)]
-          mod spectral_direct_encode_tests {
-              use super::*;
-
-              fn reference_layer(
-                  fine: &[SpectralPeak],
-                  channels: usize,
-                  ratio: usize,
-                  output_count: usize,
-              ) -> GeneratedLayer {
-                  let fine_count = fine.len() / channels;
-                  let count = output_count.min(fine_count / ratio);
-                  let peaks = if ratio == 1 {
-                      fine[..count * channels].to_vec()
-                  } else {
-                      aggregate_spectral_from_fine(fine, channels, ratio, count)
-                  };
-                  let mut bytes = Vec::with_capacity(peaks.len() * 4);
-                  for peak in &peaks {
-                      bytes.extend_from_slice(&peak.code().to_le_bytes());
-                  }
-                  GeneratedLayer {
-                      header: LayerHeader {
-                          division: TOKEN_SPECTRAL,
-                          peak_count: (peaks.len() / channels) as u32,
-                      },
-                      bytes,
-                  }
-              }
-
-              #[test]
-              fn direct_encode_matches_aggregate_then_encode() {
-                  let channels = 2usize;
-                  let frames = 60usize;
-                  let fine: Vec<SpectralPeak> = (0..frames * channels)
-                      .map(|index| SpectralPeak {
-                          frequency_hz: ((index * 977 + 31) % 20_000) as u16,
-                          density: ((index * 613 + 17) % 16_384) as u16,
-                      })
-                      .collect();
-                  for &(ratio, output_count) in &[(1usize, 57usize), (3, 19), (5, 11), (15, 4)] {
-                      let actual = encode_spectral_layer_from_fine(
-                          &fine,
-                          channels,
-                          ratio,
-                          output_count,
-                      );
-                      let expected = reference_layer(&fine, channels, ratio, output_count);
-                      assert_eq!(actual.header.division, expected.header.division);
-                      assert_eq!(actual.header.peak_count, expected.header.peak_count);
-                      assert_eq!(actual.bytes, expected.bytes, "ratio={ratio}");
-                  }
-              }
-          }
-          '''
-          if 'mod spectral_direct_encode_tests' in text:
-              raise SystemExit('step4 tests already present')
-          spectral.write_text(text + tests)
-
-          strict = Path("src/spectral_strict.rs")
-          strict_text = strict.read_text()
-          encode_start = strict_text.index('fn encode_layer(')
-          assemble_start = strict_text.index('fn assemble_high_rate_layers(', encode_start)
-          strict_text = strict_text[:encode_start] + strict_text[assemble_start:]
-
-          assemble_start = strict_text.index('fn assemble_high_rate_layers(')
-          assemble_end = strict_text.index('\nfn zero_layers(', assemble_start)
-          assemble = '''fn assemble_high_rate_layers(
-              fine: &[SpectralPeak],
-              channels: usize,
-              divisions: &[u32],
-          ) -> Result<Vec<GeneratedLayer>> {
-              let fine_div = validate_divisions(divisions)?;
-              let fine_count = fine.len() / channels;
-              let mut out = Vec::with_capacity(divisions.len());
-
-              for &div in divisions {
-                  let ratio = (div / fine_div) as usize;
-                  // REAPER's mipmaps are assembled directly from the fine spectral
-                  // stream. Counts are therefore floor(fine_count / ratio), not a
-                  // second source-domain scheduler calculation.
-                  let count = fine_count / ratio;
-                  out.push(crate::spectral_base::encode_spectral_layer_from_fine(
-                      fine, channels, ratio, count,
-                  ));
-              }
-              Ok(out)
-          }
-          '''
-          strict_text = strict_text[:assemble_start] + assemble + strict_text[assemble_end:]
-          strict.write_text(strict_text)
+          Path("spectral-followup-benchmark.json").write_text(json.dumps(payload, indent=2) + "\n")
+          print(json.dumps(payload, indent=2))
           PY
-          cargo fmt --all
 
-      - name: Test default feature set
-        run: cargo test --locked --all-targets
-
-      - name: Test strict WDL feature set
-        run: cargo test --locked --all-targets --features strict-wdl
-
-      - name: Clippy strict WDL
-        run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
-
-      - name: Commit step 4
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/spectral.rs src/spectral_strict.rs
-          git commit -m "Encode spectral layers directly from fine peaks"
-          git push origin HEAD:optimize/spectral-followup
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: spectral-followup-benchmark
+          path: spectral-followup-benchmark.json
+          retention-days: 7
