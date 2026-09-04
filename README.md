@@ -37,6 +37,8 @@ The strongest current results are:
 - PCM16 strict-WDL mode-3 whole-file gates are byte-identical on the permanent
   lossless/adversarial matrices;
 - PCM16 spectrogram mode-3: **122 / 122 complete files byte-identical**;
+- RPKN PCM24 waveform quantization: **50,000 / 50,000 constant buckets exact**
+  against a deterministic 24-bit WAV oracle;
 - finite float32/RPKL `-'g'`: **128 / 128 adversarial cases exact**, including
   every decoded 128-bin frame and every packed payload byte;
 - RPKL waveform quantization: **exhaustively matched for every finite IEEE-754
@@ -99,6 +101,8 @@ Rust:
 ```text
 ReaperPeakMode::{Waveform, Spectral, Spectrogram}
 generate_pcm16_reaper(...)
+generate_pcm24_reaper(...)
+generate_pcm24_i32_reaper(...)
 generate_f32_reaper(...)
 ```
 
@@ -109,6 +113,7 @@ REAPER_PEAK_MODE_WAVEFORM
 REAPER_PEAK_MODE_SPECTRAL
 REAPER_PEAK_MODE_SPECTROGRAM
 generate_pcm16_reaper(..., mode)
+generate_pcm24_reaper(..., mode)
 generate_f32_reaper(..., mode)
 ```
 
@@ -119,11 +124,26 @@ RPK_REAPER_PEAK_MODE_WAVEFORM
 RPK_REAPER_PEAK_MODE_SPECTRAL
 RPK_REAPER_PEAK_MODE_SPECTROGRAM
 rpk_generate_pcm16_reaper(...)
+rpk_generate_pcm24_reaper(...)
+rpk_generate_pcm24_i32_reaper(...)
 rpk_generate_f32_reaper(...)
 ```
 
 PCM16 and float32 support all three modes. `large_range=true` selects RPKL for
 float32 generation.
+
+Packed signed PCM24LE and signed PCM24 values stored right-justified/sign-extended
+in `i32` also support all three modes as RPKN generation paths. Each 24-bit sample
+is normalized on demand to the exact float32 value `sample / 2^23`; the Rust and
+C paths therefore do not materialize a second whole-file float32 PCM buffer.
+Left-aligned S24-in-S32 data must be shifted right by eight bits before using the
+`i32` entry point.
+
+The direct PCM24 paths are regression-tested byte-for-byte against the existing
+float32/RPKN generator for waveform, spectral, and spectrogram native modes. The
+separate live-REAPER PCM24 claim remains the 50,000 / 50,000 RPKN waveform
+quantizer oracle above; do not infer an additional PCM24 source-container oracle
+for every stateful special layer from the adapter regression alone.
 
 Lower-level writers remain available for applications that intentionally need a
 non-native layer shape:
@@ -139,16 +159,16 @@ generate_f32_mode3_with_spectrogram
 
 | Area | Current support |
 |---|---|
-| RPKN waveform | Parse, generate, tile, render |
+| RPKN waveform | Parse, generate, tile, render; PCM16, PCM24 and float32 generation inputs |
 | RPKL waveform | Parse, generate, tile, render; finite-f32 quantizer exhaustive against REAPER 7.79 |
 | RPKM | Header/layout recognition; compact waveform payload not materialized through `WavePyramid` |
 | `-'s'` spectral peaks | Parse, generate, tile; strict-WDL live-oracle validated |
-| `-'g'` spectrogram | Parse, serialize, PCM16 + float32 generate; permanent live byte-exact gates |
+| `-'g'` spectrogram | Parse, serialize, PCM16 + PCM24 + float32 generate; permanent live byte-exact gates cover the documented PCM16/float32 matrices |
 | `-'r'` loudness | Parse and generate through REAPER-native modes |
 | legacy `-'l'` loudness | Token recognized; payload layout not implemented |
 | REAPER-style divisions | `default_divisions(sample_rate, peakcachegenrs)` in Rust/Python/C |
-| C ABI | Parse/render/native generation plus lower-level writers |
-| Python | Parse/render/native generation plus lower-level writers |
+| C ABI | Parse/render/native generation plus PCM16/PCM24/f32 writers |
+| Python | Parse/render/native generation plus packed PCM24 and existing PCM16/f32 writers |
 
 RPKM materialization and legacy `-'l'` are functional gaps. Exact source
 NaN/Inf behavior is a compatibility-proof gap. These are intentionally listed
@@ -230,6 +250,18 @@ import reapeaks
 divisions = reapeaks.default_divisions(48_000, 300)
 cache = reapeaks.generate_pcm16_reaper(
     pcm16le,
+    48_000,
+    2,
+    divisions,
+    reapeaks.REAPER_PEAK_MODE_SPECTROGRAM,
+)
+```
+
+Packed PCM24LE can be passed without expanding the whole source to float32:
+
+```python
+cache = reapeaks.generate_pcm24_reaper(
+    pcm24le,
     48_000,
     2,
     divisions,
