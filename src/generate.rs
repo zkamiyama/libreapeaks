@@ -1,8 +1,6 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{encode, GeneratedLayer, Version};
-use crate::loudness::{
-    build_loudness_layers_f32_source, build_loudness_layers_pcm16,
-};
+use crate::loudness::{build_loudness_layers_f32_source, build_loudness_layers_pcm16};
 use crate::sample_source::F32SampleSource;
 use crate::spectral::{build_spectral_layers, build_spectral_layers_f32_source};
 use crate::spectrogram_generate::build_spectrogram_layers_pcm16;
