@@ -227,10 +227,11 @@ fn build_plan(layout: &FileLayout, update: RpkxFileUpdate) -> UpdatePlan {
 
     match update {
         RpkxFileUpdate::Set(chunk) => {
+            let replacement_key = chunk.key;
             let matches: Vec<usize> = entries
                 .iter()
                 .enumerate()
-                .filter_map(|(index, entry)| (entry.key == chunk.key).then_some(index))
+                .filter_map(|(index, entry)| (entry.key == replacement_key).then_some(index))
                 .collect();
             let same_size_set_index = if matches.len() == 1
                 && entries[matches[0]].payload_len == chunk.payload.len() as u64
@@ -242,12 +243,10 @@ fn build_plan(layout: &FileLayout, update: RpkxFileUpdate) -> UpdatePlan {
 
             let mut replacement = Some(PlannedChunk::new(chunk));
             let mut chunks = Vec::with_capacity(entries.len() + usize::from(matches.is_empty()));
-            let mut inserted = false;
             for entry in entries {
-                if entry.key == replacement.as_ref().unwrap().key {
-                    if !inserted {
-                        chunks.push(replacement.take().unwrap());
-                        inserted = true;
+                if entry.key == replacement_key {
+                    if let Some(replacement) = replacement.take() {
+                        chunks.push(replacement);
                     }
                 } else {
                     chunks.push(PlannedChunk::existing(*entry));
@@ -341,11 +340,12 @@ fn encode_prefix(
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&payload_offset.to_le_bytes());
         out.extend_from_slice(&payload_len.to_le_bytes());
-        payload_offset = payload_offset
-            .checked_add(payload_len)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "RPKX payload offset overflow",
-            ))?;
+        payload_offset =
+            payload_offset
+                .checked_add(payload_len)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "RPKX payload offset overflow",
+                ))?;
     }
     debug_assert_eq!(out.len(), directory_len);
     Ok((out, container_len))
@@ -384,10 +384,7 @@ fn create_temp_file(target: &Path) -> Result<(File, TempGuard)> {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut name = OsString::from(".");
         name.push(file_name);
-        name.push(format!(
-            ".rpkx-tmp-{}-{counter}",
-            std::process::id()
-        ));
+        name.push(format!(".rpkx-tmp-{}-{counter}", std::process::id()));
         let path = parent_dir(target).join(name);
         match OpenOptions::new()
             .read(true)
@@ -511,13 +508,7 @@ fn copy_range_optimized(
     if len == 0 {
         return Ok(());
     }
-    if try_reflink_range(
-        source,
-        destination,
-        source_offset,
-        destination_offset,
-        len,
-    ) {
+    if try_reflink_range(source, destination, source_offset, destination_offset, len) {
         report.reflinked_source_bytes = report.reflinked_source_bytes.saturating_add(len);
         return Ok(());
     }
@@ -549,9 +540,8 @@ fn copy_range_optimized(
             break;
         }
         if copied != 0 {
-            report.copy_file_range_source_bytes = report
-                .copy_file_range_source_bytes
-                .saturating_add(copied);
+            report.copy_file_range_source_bytes =
+                report.copy_file_range_source_bytes.saturating_add(copied);
         }
         if copied == len {
             return Ok(());
@@ -563,21 +553,13 @@ fn copy_range_optimized(
             destination_offset + copied,
             len - copied,
         )?;
-        report.buffered_source_bytes = report
-            .buffered_source_bytes
-            .saturating_add(len - copied);
+        report.buffered_source_bytes = report.buffered_source_bytes.saturating_add(len - copied);
         return Ok(());
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        buffered_copy_range(
-            source,
-            destination,
-            source_offset,
-            destination_offset,
-            len,
-        )?;
+        buffered_copy_range(source, destination, source_offset, destination_offset, len)?;
         report.buffered_source_bytes = report.buffered_source_bytes.saturating_add(len);
         Ok(())
     }
@@ -667,9 +649,7 @@ fn try_same_size_reflink_update(
     let directory_entry = layout
         .standard_end
         .checked_add(RPKX_HEADER_SIZE as u64)
-        .and_then(|offset| {
-            offset.checked_add((index_position * RPKX_DIRECTORY_ENTRY_SIZE) as u64)
-        })
+        .and_then(|offset| offset.checked_add((index_position * RPKX_DIRECTORY_ENTRY_SIZE) as u64))
         .ok_or(ReaPeaksError::InvalidHeader("RPKX file offset overflow"))?;
     destination.seek(SeekFrom::Start(directory_entry + 20))?;
     destination.write_all(&chunk.version.to_le_bytes())?;
@@ -702,14 +682,7 @@ fn write_general_update(
             .checked_add(suffix_len)
             .ok_or(ReaPeaksError::InvalidArgument("RPKX output size overflow"))?;
         destination.set_len(new_len)?;
-        copy_range_optimized(
-            source,
-            destination,
-            0,
-            0,
-            layout.standard_end,
-            report,
-        )?;
+        copy_range_optimized(source, destination, 0, 0, layout.standard_end, report)?;
         copy_range_optimized(
             source,
             destination,
@@ -732,14 +705,7 @@ fn write_general_update(
         .ok_or(ReaPeaksError::InvalidArgument("RPKX output size overflow"))?;
     destination.set_len(new_len)?;
 
-    copy_range_optimized(
-        source,
-        destination,
-        0,
-        0,
-        layout.standard_end,
-        report,
-    )?;
+    copy_range_optimized(source, destination, 0, 0, layout.standard_end, report)?;
     destination.seek(SeekFrom::Start(layout.standard_end))?;
     destination.write_all(&prefix)?;
     report.metadata_bytes_written = prefix.len() as u64;
@@ -805,7 +771,7 @@ pub fn update_rpkx_file(
         .read(true)
         .write(true)
         .open(lock_path)?;
-    lock_file.lock()?;
+    File::lock(&lock_file)?;
 
     let mut source = File::open(path)?;
     let source_metadata = source.metadata()?;
@@ -849,18 +815,14 @@ pub fn update_rpkx_file(
         report.buffered_source_bytes = 0;
         report.payload_bytes_written = 0;
         report.metadata_bytes_written = 0;
-        write_general_update(
-            &source,
-            &mut destination,
-            &layout,
-            &plan,
-            &mut report,
-        )?;
+        write_general_update(&source, &mut destination, &layout, &plan, &mut report)?;
     }
 
     destination.flush()?;
     destination.sync_all()?;
     verify_generation(path, &generation)?;
+    drop(destination);
+    drop(source);
     atomic_replace(&temp.path, path)?;
     temp.commit();
     sync_parent_directory(path);
