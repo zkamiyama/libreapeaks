@@ -122,15 +122,20 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+fn real_fft_1024_into(input: &mut [f64; FFT_N], out: &mut [C64; HALF_BINS + 1]) {
     unsafe extern "C" {
         fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-    let mut out = [C64::default(); HALF_BINS + 1];
     let rc = unsafe {
         rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
     };
     assert_eq!(rc, 0, "WDL FFT bridge failed");
+}
+
+#[cfg(feature = "strict-wdl")]
+fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+    let mut out = [C64::default(); HALF_BINS + 1];
+    real_fft_1024_into(input, &mut out);
     out
 }
 
@@ -365,6 +370,8 @@ struct StreamingSpectralAnalyzer {
     previous: Vec<[C32; HALF_BINS + 1]>,
     out: Vec<SpectralPeak>,
     expected: Option<usize>,
+    fft_in: Box<[f64; FFT_N]>,
+    spectrum: Box<[C64; HALF_BINS + 1]>,
 }
 
 #[cfg(feature = "strict-wdl")]
@@ -410,6 +417,8 @@ impl StreamingSpectralAnalyzer {
             previous: vec![[C32::default(); HALF_BINS + 1]; channels],
             out: Vec::with_capacity(output_capacity),
             expected,
+            fft_in: Box::new([0.0f64; FFT_N]),
+            spectrum: Box::new([C64::default(); HALF_BINS + 1]),
         }
     }
 
@@ -428,13 +437,15 @@ impl StreamingSpectralAnalyzer {
             self.elapsed += 1;
             while self.phase >= self.hop {
                 for channel in 0..self.channels {
-                    let peak = analyze_channel(
+                    let peak = analyze_channel_with_scratch(
                         &self.ring,
                         self.write_pos,
                         channel,
                         &self.window,
                         &mut self.previous[channel],
                         self.elapsed,
+                        self.fft_in.as_mut(),
+                        self.spectrum.as_mut(),
                     );
                     self.out.push(peak);
                 }
@@ -605,15 +616,20 @@ fn resample_to_analysis(
 }
 
 #[inline]
-fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]) -> [f64; FFT_N] {
+fn fill_fft_input_into(
+    ring: &[f32],
+    write_pos: usize,
+    channel: usize,
+    window: &[f32],
+    fft_in: &mut [f64; FFT_N],
+) {
     let nwin = window.len();
     let lane_start = channel * nwin;
     let lane = &ring[lane_start..lane_start + nwin];
-    let mut fft_in = [0.0f64; FFT_N];
+    fft_in.fill(0.0);
     if nwin == FFT_N {
         let mut i = 0usize;
         for &sample in &lane[write_pos..] {
-            // Preserve REAPER's scalar f32 multiply before promotion.
             let product = sample * window[i];
             fft_in[i] += product as f64;
             i += 1;
@@ -630,6 +646,12 @@ fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]
             fft_in[i & (FFT_N - 1)] += product as f64;
         }
     }
+}
+
+#[inline]
+fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]) -> [f64; FFT_N] {
+    let mut fft_in = [0.0f64; FFT_N];
+    fill_fft_input_into(ring, write_pos, channel, window, &mut fft_in);
     fft_in
 }
 
@@ -674,28 +696,12 @@ fn summarize_spectrum_magnitudes(
     }
 }
 
-fn analyze_channel(
-    ring: &[f32],
-    write_pos: usize,
-    channel: usize,
-    window: &[f32],
+fn analyze_spectrum(
+    spec: &[C64; HALF_BINS + 1],
     previous: &mut [C32; HALF_BINS + 1],
     elapsed: usize,
 ) -> SpectralPeak {
-    #[cfg(feature = "strict-wdl")]
-    let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
-    #[cfg(not(feature = "strict-wdl"))]
-    let fft_in = fill_fft_input(ring, write_pos, channel, window);
-    #[cfg(feature = "strict-wdl")]
-    let spec = real_fft_1024(&mut fft_in);
-    #[cfg(not(feature = "strict-wdl"))]
-    let spec = real_fft_1024(&fft_in);
-
-    // REAPER stores the current complex spectrum to its f32 phase-history
-    // buffer before checking whether the magnitude sum is zero. Capture the
-    // winning bin's old history while replacing the buffer in place, avoiding
-    // a second 513-bin array and the copy back into per-channel history.
-    let (total, mags_f32, kmax, previous_at_kmax) = summarize_spectrum_magnitudes(&spec, previous);
+    let (total, mags_f32, kmax, previous_at_kmax) = summarize_spectrum_magnitudes(spec, previous);
     if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return SpectralPeak::default();
     }
@@ -730,6 +736,41 @@ fn analyze_channel(
         frequency_hz,
         density,
     }
+}
+
+fn analyze_channel(
+    ring: &[f32],
+    write_pos: usize,
+    channel: usize,
+    window: &[f32],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+) -> SpectralPeak {
+    #[cfg(feature = "strict-wdl")]
+    let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
+    #[cfg(not(feature = "strict-wdl"))]
+    let fft_in = fill_fft_input(ring, write_pos, channel, window);
+    #[cfg(feature = "strict-wdl")]
+    let spec = real_fft_1024(&mut fft_in);
+    #[cfg(not(feature = "strict-wdl"))]
+    let spec = real_fft_1024(&fft_in);
+    analyze_spectrum(&spec, previous, elapsed)
+}
+
+#[cfg(feature = "strict-wdl")]
+fn analyze_channel_with_scratch(
+    ring: &[f32],
+    write_pos: usize,
+    channel: usize,
+    window: &[f32],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+    fft_in: &mut [f64; FFT_N],
+    spec: &mut [C64; HALF_BINS + 1],
+) -> SpectralPeak {
+    fill_fft_input_into(ring, write_pos, channel, window, fft_in);
+    real_fft_1024_into(fft_in, spec);
+    analyze_spectrum(spec, previous, elapsed)
 }
 
 fn analyze_resampled_spectral(
