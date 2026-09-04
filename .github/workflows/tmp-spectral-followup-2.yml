@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up 2 final benchmark
+name: Temporary spectral follow-up 2 pinned confirmation
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
         run: |
           cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
           cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
-      - name: Benchmark all cases and verify byte identity
+      - name: Confirm benchmark on one CPU
         shell: bash
         run: |
           python3 - <<'PY'
@@ -66,17 +66,17 @@ jobs:
           }
           samples = {case: {"baseline": [], "optimized": []} for case in cases}
           metadata = {case: {} for case in cases}
-          orders = (
+          label_orders = [
               ("baseline", "optimized"),
               ("optimized", "baseline"),
-              ("baseline", "optimized"),
-              ("optimized", "baseline"),
-          )
-          for order in orders:
-              for case in cases:
-                  for label in order:
+          ] * 4
+          for pass_index, label_order in enumerate(label_orders):
+              case_order = cases if pass_index % 2 == 0 else list(reversed(cases))
+              for case in case_order:
+                  for label in label_order:
                       raw = subprocess.check_output(
-                          [str(binaries[label]), case, "5"], text=True
+                          ["taskset", "-c", "0", str(binaries[label]), case, "5"],
+                          text=True,
                       ).strip()
                       result = json.loads(raw)
                       samples[case][label].extend(result["samples_ns"])
@@ -120,8 +120,9 @@ jobs:
               "optimized": subprocess.check_output(
                   ["git", "-C", "optimized", "rev-parse", "HEAD"], text=True
               ).strip(),
-              "samples_per_side_per_case": 20,
-              "order_balanced_passes": 4,
+              "samples_per_side_per_case": 40,
+              "cpu_affinity": "0",
+              "case_order_reversed_on_alternate_passes": True,
               "release": True,
               "strict_wdl": True,
               "geomean_speedup_all_6": math.exp(
@@ -137,7 +138,7 @@ jobs:
               },
               "cases": rows,
           }
-          Path("spectral-followup-2-final-benchmark.json").write_text(
+          Path("spectral-followup-2-pinned-confirmation.json").write_text(
               json.dumps(payload, indent=2) + "\n"
           )
           print(json.dumps(payload, indent=2))
@@ -145,6 +146,6 @@ jobs:
       - name: Upload benchmark evidence
         uses: actions/upload-artifact@v4
         with:
-          name: spectral-followup-2-final-benchmark
-          path: spectral-followup-2-final-benchmark.json
+          name: spectral-followup-2-pinned-confirmation
+          path: spectral-followup-2-pinned-confirmation.json
           retention-days: 7
