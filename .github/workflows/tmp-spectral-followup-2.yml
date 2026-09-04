@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up 2 magnitude scratch benchmark
+name: Temporary spectral follow-up 2 final benchmark
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     env:
-      BASELINE_SHA: fd30ba5fa4c253914cdda9d3c8ef7994acc4471d
+      BASELINE_SHA: 7693e4f6c261ffab227d61d86264ee5a2ce5edb2
     steps:
       - name: Checkout optimized branch
         uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
           path: optimized
           submodules: recursive
           fetch-depth: 1
-      - name: Checkout FFT-scratch baseline
+      - name: Checkout merged main baseline
         uses: actions/checkout@v4
         with:
           ref: ${{ env.BASELINE_SHA }}
@@ -40,32 +40,111 @@ jobs:
         run: |
           cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
           cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
-      - name: Benchmark spectral cases and verify byte identity
+      - name: Benchmark all cases and verify byte identity
+        shell: bash
         run: |
           python3 - <<'PY'
-          import json, math, os, statistics, subprocess
+          import json
+          import math
+          import os
+          import platform
+          import statistics
+          import subprocess
           from pathlib import Path
-          cases=["pcm16-spectral-48k-stereo-30s","pcm16-spectrogram-48k-stereo-20s","pcm16-spectrogram-96k-6ch-8s","pcm24-spectral-96k-stereo-15s","f32-spectrogram-48k-stereo-15s"]
-          bins={"baseline":Path("baseline/target/release/examples/optimization_benchmark"),"optimized":Path("optimized/target/release/examples/optimization_benchmark")}
-          samples={c:{k:[] for k in bins} for c in cases}; meta={c:{} for c in cases}
-          orders=(("baseline","optimized"),("optimized","baseline"),("baseline","optimized"),("optimized","baseline"))
+
+          cases = [
+              "pcm16-wave-48k-stereo-60s",
+              "pcm16-spectral-48k-stereo-30s",
+              "pcm16-spectrogram-48k-stereo-20s",
+              "pcm16-spectrogram-96k-6ch-8s",
+              "pcm24-spectral-96k-stereo-15s",
+              "f32-spectrogram-48k-stereo-15s",
+          ]
+          binaries = {
+              "baseline": Path("baseline/target/release/examples/optimization_benchmark"),
+              "optimized": Path("optimized/target/release/examples/optimization_benchmark"),
+          }
+          samples = {case: {"baseline": [], "optimized": []} for case in cases}
+          metadata = {case: {} for case in cases}
+          orders = (
+              ("baseline", "optimized"),
+              ("optimized", "baseline"),
+              ("baseline", "optimized"),
+              ("optimized", "baseline"),
+          )
           for order in orders:
               for case in cases:
                   for label in order:
-                      r=json.loads(subprocess.check_output([str(bins[label]),case,"3"],text=True).strip())
-                      samples[case][label].extend(r["samples_ns"]); m={"bytes":r["bytes"],"hash":r["hash"]}
-                      if label in meta[case] and meta[case][label]!=m: raise SystemExit(f"nondeterministic {case}/{label}")
-                      meta[case][label]=m
-          rows=[]; speedups=[]
+                      raw = subprocess.check_output(
+                          [str(binaries[label]), case, "5"], text=True
+                      ).strip()
+                      result = json.loads(raw)
+                      samples[case][label].extend(result["samples_ns"])
+                      current = {"bytes": result["bytes"], "hash": result["hash"]}
+                      previous = metadata[case].get(label)
+                      if previous is not None and previous != current:
+                          raise SystemExit(
+                              f"nondeterministic metadata in {case}/{label}: "
+                              f"previous={previous} current={current}"
+                          )
+                      metadata[case][label] = current
+
+          rows = []
+          all_speedups = []
+          spectral_speedups = []
           for case in cases:
-              if meta[case]["baseline"]!=meta[case]["optimized"]: raise SystemExit(f"byte identity failed {case}: {meta[case]}")
-              b=statistics.median(samples[case]["baseline"]); o=statistics.median(samples[case]["optimized"]); s=b/o; speedups.append(s)
-              rows.append({"case":case,"baseline_median_ns":b,"optimized_median_ns":o,"speedup":s,"bytes":meta[case]["baseline"]["bytes"],"hash":meta[case]["baseline"]["hash"],"baseline_samples_ns":samples[case]["baseline"],"optimized_samples_ns":samples[case]["optimized"]})
-          payload={"baseline":os.environ["BASELINE_SHA"],"optimized":subprocess.check_output(["git","-C","optimized","rev-parse","HEAD"],text=True).strip(),"samples_per_side_per_case":12,"geomean_speedup":math.exp(sum(math.log(x) for x in speedups)/len(speedups)),"cases":rows}
-          Path("magnitude-scratch-benchmark.json").write_text(json.dumps(payload,indent=2)+"\n"); print(json.dumps(payload,indent=2))
+              if metadata[case]["baseline"] != metadata[case]["optimized"]:
+                  raise SystemExit(
+                      f"byte identity failed in {case}: baseline={metadata[case]['baseline']} "
+                      f"optimized={metadata[case]['optimized']}"
+                  )
+              baseline_ns = statistics.median(samples[case]["baseline"])
+              optimized_ns = statistics.median(samples[case]["optimized"])
+              speedup = baseline_ns / optimized_ns
+              all_speedups.append(speedup)
+              if case != "pcm16-wave-48k-stereo-60s":
+                  spectral_speedups.append(speedup)
+              rows.append({
+                  "case": case,
+                  "baseline_median_ns": baseline_ns,
+                  "optimized_median_ns": optimized_ns,
+                  "speedup": speedup,
+                  "bytes": metadata[case]["baseline"]["bytes"],
+                  "hash": metadata[case]["baseline"]["hash"],
+                  "baseline_samples_ns": samples[case]["baseline"],
+                  "optimized_samples_ns": samples[case]["optimized"],
+              })
+
+          payload = {
+              "baseline": os.environ["BASELINE_SHA"],
+              "optimized": subprocess.check_output(
+                  ["git", "-C", "optimized", "rev-parse", "HEAD"], text=True
+              ).strip(),
+              "samples_per_side_per_case": 20,
+              "order_balanced_passes": 4,
+              "release": True,
+              "strict_wdl": True,
+              "geomean_speedup_all_6": math.exp(
+                  sum(math.log(x) for x in all_speedups) / len(all_speedups)
+              ),
+              "geomean_speedup_spectral_5": math.exp(
+                  sum(math.log(x) for x in spectral_speedups) / len(spectral_speedups)
+              ),
+              "machine": {
+                  "platform": platform.platform(),
+                  "nproc": os.cpu_count(),
+                  "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+              },
+              "cases": rows,
+          }
+          Path("spectral-followup-2-final-benchmark.json").write_text(
+              json.dumps(payload, indent=2) + "\n"
+          )
+          print(json.dumps(payload, indent=2))
           PY
-      - uses: actions/upload-artifact@v4
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
         with:
-          name: magnitude-scratch-benchmark
-          path: magnitude-scratch-benchmark.json
+          name: spectral-followup-2-final-benchmark
+          path: spectral-followup-2-final-benchmark.json
           retention-days: 7
