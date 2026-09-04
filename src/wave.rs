@@ -594,7 +594,8 @@ mod tests {
                 .map(|index| ((index as i32 * 7_919 + 1_237) % 65_536 - 32_768) as i16)
                 .collect();
             let fast = build_wave_layers(&pcm, frames, channels, &divisions).unwrap();
-            let direct = build_wave_layers_pcm16_direct(&pcm, frames, channels, &divisions).unwrap();
+            let direct =
+                build_wave_layers_pcm16_direct(&pcm, frames, channels, &divisions).unwrap();
             assert_eq!(fast.len(), direct.len(), "frames={frames}");
             for (fast, direct) in fast.iter().zip(&direct) {
                 assert_eq!(fast.header, direct.header, "frames={frames}");

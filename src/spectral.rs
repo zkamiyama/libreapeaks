@@ -38,11 +38,7 @@ fn wrap_phase(mut x: f64) -> f64 {
 }
 
 #[inline]
-fn analysis_domain_fine_count(
-    analysis_frames: usize,
-    source_rate: u32,
-    division: u32,
-) -> usize {
+fn analysis_domain_fine_count(analysis_frames: usize, source_rate: u32, division: u32) -> usize {
     if analysis_frames == 0 || division == 0 || source_rate == 0 {
         return 0;
     }
@@ -607,9 +603,7 @@ pub(crate) fn build_fine_spectral_f32_analysis_counted(
 }
 
 #[cfg(feature = "strict-wdl")]
-pub(crate) fn build_fine_spectral_f32_source_analysis_counted<
-    S: F32SampleSource + ?Sized,
->(
+pub(crate) fn build_fine_spectral_f32_source_analysis_counted<S: F32SampleSource + ?Sized>(
     pcm: &S,
     frames: usize,
     channels: usize,

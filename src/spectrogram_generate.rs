@@ -461,11 +461,12 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     let window = blackman_harris_window(FFT_SIZE);
 
     let first_count = counts[0];
-    let first_capacity = first_count
-        .checked_mul(channels)
-        .ok_or(ReaPeaksError::InvalidArgument(
-            "spectrogram frame capacity overflow",
-        ))?;
+    let first_capacity =
+        first_count
+            .checked_mul(channels)
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "spectrogram frame capacity overflow",
+            ))?;
     let mut current_frames = vec![SpectrogramFrame::default(); first_capacity];
     let first_ratio = ratios[0];
     fill_first_frames(
@@ -485,11 +486,12 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     for &ratio in ratios.iter().skip(1) {
         let previous_time_frames = current_frames.len() / channels;
         let output_time_frames = previous_time_frames / ratio;
-        let capacity = output_time_frames
-            .checked_mul(channels)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "spectrogram frame capacity overflow",
-            ))?;
+        let capacity =
+            output_time_frames
+                .checked_mul(channels)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "spectrogram frame capacity overflow",
+                ))?;
         let mut next_frames = Vec::with_capacity(capacity);
         for output_frame in 0..output_time_frames {
             let first = output_frame * ratio;

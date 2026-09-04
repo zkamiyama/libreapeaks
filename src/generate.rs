@@ -136,9 +136,8 @@ fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -
 
     let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
         let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
-            let wave = scope.spawn(|| {
-                build_wave_layers(pcm, frames, options.channels, &options.divisions)
-            });
+            let wave = scope
+                .spawn(|| build_wave_layers(pcm, frames, options.channels, &options.divisions));
             let spectral = options.spectral.then(|| {
                 scope.spawn(|| {
                     build_spectral_layers(
@@ -220,9 +219,8 @@ pub fn generate_pcm16_mode3_with_spectrogram(
 
     let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
         let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
-            let wave = scope.spawn(|| {
-                build_wave_layers(pcm, frames, options.channels, &options.divisions)
-            });
+            let wave = scope
+                .spawn(|| build_wave_layers(pcm, frames, options.channels, &options.divisions));
             let spectral = scope.spawn(|| {
                 build_spectral_layers(
                     pcm,
@@ -233,12 +231,7 @@ pub fn generate_pcm16_mode3_with_spectrogram(
                 )
             });
             let spectrogram = scope.spawn(|| {
-                build_spectrogram_layers_pcm16(
-                    pcm,
-                    frames,
-                    options.channels,
-                    &options.divisions,
-                )
+                build_spectrogram_layers_pcm16(pcm, frames, options.channels, &options.divisions)
             });
             let loudness = scope.spawn(|| {
                 build_loudness_layers_pcm16(
@@ -310,13 +303,7 @@ fn generate_f32_impl(
     let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
         let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
-                build_wave_layers_f32(
-                    pcm,
-                    frames,
-                    options.channels,
-                    &options.divisions,
-                    encoding,
-                )
+                build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)
             });
             let spectral = options.spectral.then(|| {
                 scope.spawn(|| {
@@ -424,13 +411,7 @@ pub fn generate_f32_mode3_with_spectrogram(
     let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
         let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
-                build_wave_layers_f32(
-                    pcm,
-                    frames,
-                    options.channels,
-                    &options.divisions,
-                    encoding,
-                )
+                build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)
             });
             let spectral = scope.spawn(|| {
                 build_spectral_layers_f32(
@@ -442,12 +423,7 @@ pub fn generate_f32_mode3_with_spectrogram(
                 )
             });
             let spectrogram = scope.spawn(|| {
-                build_spectrogram_layers_f32(
-                    pcm,
-                    frames,
-                    options.channels,
-                    &options.divisions,
-                )
+                build_spectrogram_layers_f32(pcm, frames, options.channels, &options.divisions)
             });
             let loudness = scope.spawn(|| {
                 build_loudness_layers_f32(
