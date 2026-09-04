@@ -1,0 +1,286 @@
+name: optimization-benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - optimize/byte-identical-analysis
+    paths:
+      - "src/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "pyproject.toml"
+      - "examples/optimization_benchmark.rs"
+      - ".github/workflows/optimization-benchmark.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    env:
+      BASELINE_SHA: 300dcdf961db3807231205b94cef97ff61d902ee
+    steps:
+      - name: Checkout optimized branch
+        uses: actions/checkout@v4
+        with:
+          path: optimized
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Checkout pre-optimization baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Use the identical benchmark harness for both revisions
+        shell: bash
+        run: |
+          mkdir -p baseline/examples
+          cp optimized/examples/optimization_benchmark.rs baseline/examples/optimization_benchmark.rs
+
+      - name: Build release benchmark binaries
+        shell: bash
+        run: |
+          cargo build --manifest-path baseline/Cargo.toml --release --features strict-wdl --example optimization_benchmark
+          cargo build --manifest-path optimized/Cargo.toml --release --features strict-wdl --example optimization_benchmark
+
+      - name: Record runner information
+        shell: bash
+        run: |
+          {
+            echo "baseline=${BASELINE_SHA}"
+            echo "optimized=${GITHUB_SHA}"
+            echo "rustc=$(rustc --version)"
+            echo "nproc=$(nproc)"
+            uname -a
+            lscpu
+          } > benchmark-machine.txt
+
+      - name: Compare Rust core generation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import math
+          import statistics
+          import subprocess
+          from pathlib import Path
+
+          cases = [
+              "pcm16-wave-48k-stereo-60s",
+              "pcm16-spectral-48k-stereo-30s",
+              "pcm16-spectrogram-48k-stereo-20s",
+              "pcm16-spectrogram-96k-6ch-8s",
+              "pcm24-spectral-96k-stereo-15s",
+              "f32-spectrogram-48k-stereo-15s",
+          ]
+          binaries = {
+              "baseline": Path("baseline/target/release/examples/optimization_benchmark"),
+              "optimized": Path("optimized/target/release/examples/optimization_benchmark"),
+          }
+          samples = {case: {"baseline": [], "optimized": []} for case in cases}
+          metadata = {case: {} for case in cases}
+
+          # Alternate order to reduce bias from runner temperature/frequency drift.
+          for order in (("baseline", "optimized"), ("optimized", "baseline")):
+              for case in cases:
+                  for label in order:
+                      raw = subprocess.check_output(
+                          [str(binaries[label]), case, "3"], text=True
+                      ).strip()
+                      result = json.loads(raw)
+                      samples[case][label].extend(result["samples_ns"])
+                      metadata[case][label] = {
+                          "bytes": result["bytes"],
+                          "hash": result["hash"],
+                      }
+
+          results = []
+          speedups = []
+          for case in cases:
+              base_meta = metadata[case]["baseline"]
+              opt_meta = metadata[case]["optimized"]
+              if base_meta != opt_meta:
+                  raise SystemExit(
+                      f"byte identity failed in benchmark case {case}: "
+                      f"baseline={base_meta} optimized={opt_meta}"
+                  )
+              base_ns = statistics.median(samples[case]["baseline"])
+              opt_ns = statistics.median(samples[case]["optimized"])
+              speedup = base_ns / opt_ns
+              improvement = (base_ns - opt_ns) * 100.0 / base_ns
+              speedups.append(speedup)
+              results.append(
+                  {
+                      "case": case,
+                      "baseline_median_ns": base_ns,
+                      "optimized_median_ns": opt_ns,
+                      "speedup": speedup,
+                      "improvement_pct": improvement,
+                      "bytes": base_meta["bytes"],
+                      "hash": base_meta["hash"],
+                      "baseline_samples_ns": samples[case]["baseline"],
+                      "optimized_samples_ns": samples[case]["optimized"],
+                  }
+              )
+
+          geomean = math.exp(sum(math.log(x) for x in speedups) / len(speedups))
+          payload = {"geomean_speedup": geomean, "cases": results}
+          Path("core-benchmark.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+          lines = [
+              "# Optimization benchmark",
+              "",
+              f"Rust core geometric-mean speedup: **{geomean:.3f}x**",
+              "",
+              "| Case | Baseline median | Optimized median | Speedup | Improvement |",
+              "|---|---:|---:|---:|---:|",
+          ]
+          for row in results:
+              lines.append(
+                  f"| {row['case']} | {row['baseline_median_ns']/1e6:.2f} ms | "
+                  f"{row['optimized_median_ns']/1e6:.2f} ms | {row['speedup']:.3f}x | "
+                  f"{row['improvement_pct']:+.1f}% |"
+              )
+          Path("benchmark-results.md").write_text("\n".join(lines) + "\n")
+          print(Path("benchmark-results.md").read_text())
+          PY
+
+      - name: Build baseline and optimized Python wheels
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip maturin
+          mkdir -p baseline-dist optimized-dist
+          (cd baseline && maturin build --release --out ../baseline-dist)
+          (cd optimized && maturin build --release --out ../optimized-dist)
+          python3 -m venv baseline-venv
+          python3 -m venv optimized-venv
+          baseline-venv/bin/pip install --no-deps baseline-dist/*.whl
+          optimized-venv/bin/pip install --no-deps optimized-dist/*.whl
+
+      - name: Compare Python bytes-input generation
+        shell: bash
+        run: |
+          cat > /tmp/python_input_bench.py <<'PY'
+          import hashlib
+          import json
+          import statistics
+          import struct
+          import sys
+          import time
+
+          import reapeaks
+
+          def repeat_bytes(pattern, length):
+              return (pattern * ((length + len(pattern) - 1) // len(pattern)))[:length]
+
+          cases = []
+
+          rate, channels, seconds = 48_000, 2, 60
+          frames = rate * seconds
+          pcm16 = repeat_bytes(b"\x34\x12\xcc\xed", frames * channels * 2)
+          cases.append(("python-pcm16-wave-48k-stereo-60s", pcm16, lambda data: reapeaks.generate_pcm16_reaper(
+              data, rate, channels, reapeaks.default_divisions(rate, 300), "waveform"
+          )))
+
+          rate, channels, seconds = 96_000, 2, 15
+          frames = rate * seconds
+          pcm24 = repeat_bytes(b"\x12\x34\x56\xab\xcd\xef", frames * channels * 3)
+          cases.append(("python-pcm24-spectral-96k-stereo-15s", pcm24, lambda data: reapeaks.generate_pcm24_reaper(
+              data, rate, channels, reapeaks.default_divisions(rate, 300), "spectral"
+          )))
+
+          rate, channels, seconds = 48_000, 2, 60
+          frames = rate * seconds
+          f32_pattern = struct.pack("<ff", 0.25, -0.5)
+          pcmf32 = repeat_bytes(f32_pattern, frames * channels * 4)
+          cases.append(("python-f32-wave-48k-stereo-60s", pcmf32, lambda data: reapeaks.generate_f32_reaper(
+              data, rate, channels, reapeaks.default_divisions(rate, 300), False, "waveform"
+          )))
+
+          rows = []
+          for name, data, generate in cases:
+              warm = generate(data)
+              expected_len = len(warm)
+              expected_hash = hashlib.sha256(warm).hexdigest()
+              del warm
+              samples = []
+              for _ in range(4):
+                  start = time.perf_counter_ns()
+                  output = generate(data)
+                  samples.append(time.perf_counter_ns() - start)
+                  if len(output) != expected_len or hashlib.sha256(output).hexdigest() != expected_hash:
+                      raise RuntimeError(f"nondeterministic output for {name}")
+              rows.append({
+                  "case": name,
+                  "median_ns": statistics.median(samples),
+                  "samples_ns": samples,
+                  "bytes": expected_len,
+                  "sha256": expected_hash,
+              })
+          json.dump(rows, sys.stdout)
+          PY
+
+          baseline-venv/bin/python /tmp/python_input_bench.py > python-baseline.json
+          optimized-venv/bin/python /tmp/python_input_bench.py > python-optimized.json
+
+          python3 - <<'PY'
+          import json
+          import statistics
+          from pathlib import Path
+
+          baseline = {row["case"]: row for row in json.loads(Path("python-baseline.json").read_text())}
+          optimized = {row["case"]: row for row in json.loads(Path("python-optimized.json").read_text())}
+          rows = []
+          for case in baseline:
+              b = baseline[case]
+              o = optimized[case]
+              if (b["bytes"], b["sha256"]) != (o["bytes"], o["sha256"]):
+                  raise SystemExit(f"Python output identity failed for {case}")
+              base_ns = b["median_ns"]
+              opt_ns = o["median_ns"]
+              rows.append({
+                  "case": case,
+                  "baseline_median_ns": base_ns,
+                  "optimized_median_ns": opt_ns,
+                  "speedup": base_ns / opt_ns,
+                  "improvement_pct": (base_ns - opt_ns) * 100.0 / base_ns,
+                  "bytes": b["bytes"],
+                  "sha256": b["sha256"],
+                  "baseline_samples_ns": b["samples_ns"],
+                  "optimized_samples_ns": o["samples_ns"],
+              })
+          Path("python-benchmark.json").write_text(json.dumps(rows, indent=2) + "\n")
+          with Path("benchmark-results.md").open("a") as handle:
+              handle.write("\n## Python bytes-input API\n\n")
+              handle.write("| Case | Baseline median | Optimized median | Speedup | Improvement |\n")
+              handle.write("|---|---:|---:|---:|---:|\n")
+              for row in rows:
+                  handle.write(
+                      f"| {row['case']} | {row['baseline_median_ns']/1e6:.2f} ms | "
+                      f"{row['optimized_median_ns']/1e6:.2f} ms | {row['speedup']:.3f}x | "
+                      f"{row['improvement_pct']:+.1f}% |\n"
+                  )
+          print(Path("benchmark-results.md").read_text())
+          PY
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimization-benchmark-results
+          path: |
+            benchmark-results.md
+            core-benchmark.json
+            python-benchmark.json
+            python-baseline.json
+            python-optimized.json
+            benchmark-machine.txt
+          retention-days: 7
