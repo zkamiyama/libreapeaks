@@ -13,6 +13,8 @@ const BH_A1: f64 = 0.48829;
 const BH_A2: f64 = 0.14128;
 const BH_A3: f64 = 0.01168;
 const PCM_SCALE_F32: f32 = 1.0 / 32768.0;
+const INTERNAL_PARALLEL_MIN_TASKS: usize = 8;
+const INTERNAL_PARALLEL_MAX_WORKERS: usize = 4;
 // REAPER quantizes squared FFT magnitude directly.  Because the WDL real FFT
 // is 2x the conventional DFT scale and the Blackman-Harris coefficients are
 // normalized to unit sum, an exact-bin sine of amplitude A produces power A^2.
@@ -334,6 +336,107 @@ fn encode_layer(frames: &[SpectrogramFrame], channels: usize) -> Result<Generate
     })
 }
 
+#[inline]
+fn internal_worker_count(task_count: usize) -> usize {
+    if task_count < INTERNAL_PARALLEL_MIN_TASKS {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |parallelism| {
+        parallelism
+            .get()
+            .min(INTERNAL_PARALLEL_MAX_WORKERS)
+            .min(task_count)
+    })
+}
+
+fn build_first_frame(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    channel: usize,
+    time_frame: usize,
+    first_ratio: usize,
+    base_count: usize,
+    fine_division: u32,
+    window: &[f32; FFT_SIZE],
+) -> SpectrogramFrame {
+    let first_base = time_frame * first_ratio;
+    let last_base = (first_base + first_ratio).min(base_count);
+    let actual_count = last_base - first_base;
+    let mut sums = [0u64; SPECTROGRAM_BINS];
+    for base_index in first_base..last_base {
+        let frame = analyze_base_frame(
+            pcm,
+            frames,
+            channels,
+            channel,
+            base_index,
+            fine_division,
+            window,
+        );
+        for bin in 0..SPECTROGRAM_BINS {
+            sums[bin] += u64::from(frame.bins[bin]);
+        }
+    }
+    let mut bins = [0u16; SPECTROGRAM_BINS];
+    for bin in 0..SPECTROGRAM_BINS {
+        bins[bin] = (sums[bin] / actual_count as u64) as u16;
+    }
+    SpectrogramFrame { bins }
+}
+
+fn fill_first_frames(
+    output: &mut [SpectrogramFrame],
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    first_ratio: usize,
+    base_count: usize,
+    fine_division: u32,
+    window: &[f32; FFT_SIZE],
+) {
+    let workers = internal_worker_count(output.len());
+    if workers <= 1 {
+        for (index, slot) in output.iter_mut().enumerate() {
+            *slot = build_first_frame(
+                pcm,
+                frames,
+                channels,
+                index % channels,
+                index / channels,
+                first_ratio,
+                base_count,
+                fine_division,
+                window,
+            );
+        }
+        return;
+    }
+
+    let chunk_size = output.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in output.chunks_mut(chunk_size).enumerate() {
+            let start_index = chunk_index * chunk_size;
+            scope.spawn(move || {
+                for (local_index, slot) in chunk.iter_mut().enumerate() {
+                    let index = start_index + local_index;
+                    *slot = build_first_frame(
+                        pcm,
+                        frames,
+                        channels,
+                        index % channels,
+                        index / channels,
+                        first_ratio,
+                        base_count,
+                        fine_division,
+                        window,
+                    );
+                }
+            });
+        }
+    });
+}
+
 pub(crate) fn build_spectrogram_layers_pcm16(
     pcm: &[i16],
     frames: usize,
@@ -358,41 +461,23 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     let window = blackman_harris_window(FFT_SIZE);
 
     let first_count = counts[0];
-    let first_capacity =
-        first_count
-            .checked_mul(channels)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "spectrogram frame capacity overflow",
-            ))?;
-    let mut current_frames = Vec::with_capacity(first_capacity);
+    let first_capacity = first_count
+        .checked_mul(channels)
+        .ok_or(ReaPeaksError::InvalidArgument(
+            "spectrogram frame capacity overflow",
+        ))?;
+    let mut current_frames = vec![SpectrogramFrame::default(); first_capacity];
     let first_ratio = ratios[0];
-    for time_frame in 0..first_count {
-        let first_base = time_frame * first_ratio;
-        let last_base = (first_base + first_ratio).min(base_count);
-        let actual_count = last_base - first_base;
-        for channel in 0..channels {
-            let mut sums = [0u64; SPECTROGRAM_BINS];
-            for base_index in first_base..last_base {
-                let frame = analyze_base_frame(
-                    pcm,
-                    frames,
-                    channels,
-                    channel,
-                    base_index,
-                    divisions[0],
-                    &window,
-                );
-                for bin in 0..SPECTROGRAM_BINS {
-                    sums[bin] += u64::from(frame.bins[bin]);
-                }
-            }
-            let mut bins = [0u16; SPECTROGRAM_BINS];
-            for bin in 0..SPECTROGRAM_BINS {
-                bins[bin] = (sums[bin] / actual_count as u64) as u16;
-            }
-            current_frames.push(SpectrogramFrame { bins });
-        }
-    }
+    fill_first_frames(
+        &mut current_frames,
+        pcm,
+        frames,
+        channels,
+        first_ratio,
+        base_count,
+        divisions[0],
+        &window,
+    );
 
     let mut layers = Vec::with_capacity(divisions.len() - 1);
     layers.push(encode_layer(&current_frames, channels)?);
@@ -400,12 +485,11 @@ pub(crate) fn build_spectrogram_layers_pcm16(
     for &ratio in ratios.iter().skip(1) {
         let previous_time_frames = current_frames.len() / channels;
         let output_time_frames = previous_time_frames / ratio;
-        let capacity =
-            output_time_frames
-                .checked_mul(channels)
-                .ok_or(ReaPeaksError::InvalidArgument(
-                    "spectrogram frame capacity overflow",
-                ))?;
+        let capacity = output_time_frames
+            .checked_mul(channels)
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "spectrogram frame capacity overflow",
+            ))?;
         let mut next_frames = Vec::with_capacity(capacity);
         for output_frame in 0..output_time_frames {
             let first = output_frame * ratio;
