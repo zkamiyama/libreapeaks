@@ -22,7 +22,16 @@ class RpkxInventoryWidget(QWidget):
     def __init__(self, peaks_path: str | Path, parent=None):
         super().__init__(parent)
         self.peaks_path = Path(peaks_path)
-        self.inventory = rpkx_inventory(self.peaks_path)
+        try:
+            self.inventory = rpkx_inventory(self.peaks_path)
+        except Exception as exc:  # RPKX is optional; never take down playback.
+            self.inventory = {
+                "present": False,
+                "chunks": [],
+                "chunk_count": 0,
+                "file_bytes": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
         self.summary = QLabel(self)
         self.summary.setWordWrap(True)
@@ -57,10 +66,15 @@ class RpkxInventoryWidget(QWidget):
     def _populate(self) -> None:
         info = self.inventory
         if not info["present"]:
-            self.summary.setText(
-                f"{self.peaks_path.name}: no RPKX container is attached. "
-                f"File size: {info.get('file_bytes', 0):,} bytes."
-            )
+            if info.get("error"):
+                self.summary.setText(
+                    f"{self.peaks_path.name}: RPKX inventory unavailable — {info['error']}"
+                )
+            else:
+                self.summary.setText(
+                    f"{self.peaks_path.name}: no RPKX container is attached. "
+                    f"File size: {info.get('file_bytes', 0):,} bytes."
+                )
             self.table.setRowCount(0)
             return
 
