@@ -1,0 +1,275 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -54,6 +54,8 @@
+ #[cfg(feature = "python")]
+ mod python_gpu_cache;
+ #[cfg(feature = "python")]
++mod python_pcm;
++#[cfg(feature = "python")]
+ mod python_reaper_generate;
+ #[cfg(feature = "python")]
+ mod python_rpkx;
+--- a/src/python.rs
++++ b/src/python.rs
+@@ -1,6 +1,7 @@
+ use crate::format::ReaPeaks;
+ use crate::generate::{generate_f32, generate_pcm16, GenerateOptions};
+ use crate::pyramid::{WavePyramid, WaveTileKey};
++use crate::python_pcm::{with_f32_le, with_pcm16_le};
+ use crate::source::SourceStamp;
+ use crate::texture::{
+     encode_envelope_rgba8, encode_spectral_rgba8, encode_wave_tile_rgba8,
+@@ -9,6 +10,7 @@
+ use crate::wave::{default_divisions, WaveEncoding};
+ use pyo3::exceptions::PyValueError;
+ use pyo3::prelude::*;
++use pyo3::pybacked::PyBackedBytes;
+ use pyo3::types::{PyBytes, PyModule};
+ 
+ fn py_err(e: impl std::fmt::Display) -> PyErr {
+@@ -239,7 +241,7 @@
+ #[pyo3(signature=(pcm16le, sample_rate, channels, divisions, source_mtime_low32=0, source_size_low32=0, spectral=true))]
+ pub fn py_generate_pcm16<'py>(
+     py: Python<'py>,
+-    pcm16le: &[u8],
++    pcm16le: PyBackedBytes,
+     sample_rate: u32,
+     channels: usize,
+     divisions: Vec<u32>,
+@@ -250,10 +252,6 @@
+     if pcm16le.len() % 2 != 0 {
+         return Err(py_err("PCM16 byte length must be even"));
+     }
+-    let pcm: Vec<i16> = pcm16le
+-        .chunks_exact(2)
+-        .map(|x| i16::from_le_bytes([x[0], x[1]]))
+-        .collect();
+     let opt = GenerateOptions {
+         sample_rate,
+         channels,
+@@ -262,7 +260,9 @@
+         source_size_low32,
+         spectral,
+     };
+-    let out = generate_pcm16(&pcm, &opt).map_err(py_err)?;
++    let out = py
++        .detach(move || with_pcm16_le(&pcm16le, |pcm| generate_pcm16(pcm, &opt)))
++        .map_err(py_err)?;
+     Ok(PyBytes::new(py, &out))
+ }
+ 
+@@ -270,7 +270,7 @@
+ #[pyo3(signature=(pcm_f32le, sample_rate, channels, divisions, large_range, source_mtime_low32=0, source_size_low32=0, spectral=true))]
+ pub fn py_generate_f32<'py>(
+     py: Python<'py>,
+-    pcm_f32le: &[u8],
++    pcm_f32le: PyBackedBytes,
+     sample_rate: u32,
+     channels: usize,
+     divisions: Vec<u32>,
+@@ -282,10 +282,6 @@
+     if pcm_f32le.len() % 4 != 0 {
+         return Err(py_err("float32 byte length must be a multiple of four"));
+     }
+-    let pcm: Vec<f32> = pcm_f32le
+-        .chunks_exact(4)
+-        .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+-        .collect();
+     let opt = GenerateOptions {
+         sample_rate,
+         channels,
+@@ -294,7 +290,11 @@
+         source_size_low32,
+         spectral,
+     };
+-    let out = generate_f32(&pcm, &opt, large_range).map_err(py_err)?;
++    let out = py
++        .detach(move || {
++            with_f32_le(&pcm_f32le, |pcm| generate_f32(pcm, &opt, large_range))
++        })
++        .map_err(py_err)?;
+     Ok(PyBytes::new(py, &out))
+ }
+ 
+--- a/src/python_reaper_generate.rs
++++ b/src/python_reaper_generate.rs
+@@ -2,8 +2,10 @@
+     generate_f32_reaper, generate_pcm16_reaper, generate_pcm24_reaper, GenerateOptions,
+     ReaperPeakMode,
+ };
++use crate::python_pcm::{with_f32_le, with_pcm16_le};
+ use pyo3::exceptions::PyValueError;
+ use pyo3::prelude::*;
++use pyo3::pybacked::PyBackedBytes;
+ use pyo3::types::{PyBytes, PyModule};
+ 
+ fn py_err(error: impl std::fmt::Display) -> PyErr {
+@@ -25,7 +27,7 @@
+ #[pyo3(signature=(pcm16le, sample_rate, channels, divisions, mode, source_mtime_low32=0, source_size_low32=0))]
+ fn py_generate_pcm16_reaper<'py>(
+     py: Python<'py>,
+-    pcm16le: &[u8],
++    pcm16le: PyBackedBytes,
+     sample_rate: u32,
+     channels: usize,
+     divisions: Vec<u32>,
+@@ -36,10 +38,9 @@
+     if pcm16le.len() % 2 != 0 {
+         return Err(py_err("PCM16 byte length must be even"));
+     }
+-    let pcm: Vec<i16> = pcm16le
+-        .chunks_exact(2)
+-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+-        .collect();
++    // PyBackedBytes keeps immutable Python bytes alive across detach. On
++    // little-endian hosts with natural alignment, with_pcm16_le borrows that
++    // backing directly as &[i16]; otherwise it falls back to exact decoding.
+     let options = GenerateOptions {
+         sample_rate,
+         channels,
+@@ -52,7 +53,9 @@
+     // Cache generation can be CPU-heavy. Detach from the Python interpreter so
+     // a Qt/worker-thread frontend can keep pumping UI events and progress.
+     let bytes = py
+-        .detach(move || generate_pcm16_reaper(&pcm, &options, mode))
++        .detach(move || {
++            with_pcm16_le(&pcm16le, |pcm| generate_pcm16_reaper(pcm, &options, mode))
++        })
+         .map_err(py_err)?;
+     Ok(PyBytes::new(py, &bytes))
+ }
+@@ -61,7 +64,7 @@
+ #[pyo3(signature=(pcm24le, sample_rate, channels, divisions, mode, source_mtime_low32=0, source_size_low32=0))]
+ fn py_generate_pcm24_reaper<'py>(
+     py: Python<'py>,
+-    pcm24le: &[u8],
++    pcm24le: PyBackedBytes,
+     sample_rate: u32,
+     channels: usize,
+     divisions: Vec<u32>,
+@@ -72,10 +75,8 @@
+     if pcm24le.len() % 3 != 0 {
+         return Err(py_err("PCM24LE byte length must be a multiple of three"));
+     }
+-    // Detaching requires owned input. Keep the packed 3-byte representation;
+-    // unlike the old workaround, this does not materialize a whole-file f32
+-    // buffer before entering the Rust generator.
+-    let pcm24le = pcm24le.to_vec();
++    // PyBackedBytes owns the Python bytes reference, so detach can read the
++    // packed source without cloning it into a Rust Vec first.
+     let options = GenerateOptions {
+         sample_rate,
+         channels,
+@@ -95,7 +96,7 @@
+ #[pyo3(signature=(pcm_f32le, sample_rate, channels, divisions, large_range, mode, source_mtime_low32=0, source_size_low32=0))]
+ fn py_generate_f32_reaper<'py>(
+     py: Python<'py>,
+-    pcm_f32le: &[u8],
++    pcm_f32le: PyBackedBytes,
+     sample_rate: u32,
+     channels: usize,
+     divisions: Vec<u32>,
+@@ -107,10 +108,8 @@
+     if pcm_f32le.len() % 4 != 0 {
+         return Err(py_err("float32 byte length must be a multiple of four"));
+     }
+-    let pcm: Vec<f32> = pcm_f32le
+-        .chunks_exact(4)
+-        .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
+-        .collect();
++    // As with PCM16, borrow aligned little-endian backing directly and decode
++    // only on platforms/inputs where a zero-copy typed view is not valid.
+     let options = GenerateOptions {
+         sample_rate,
+         channels,
+@@ -121,7 +120,11 @@
+     };
+     let mode = parse_mode(mode)?;
+     let bytes = py
+-        .detach(move || generate_f32_reaper(&pcm, &options, large_range, mode))
++        .detach(move || {
++            with_f32_le(&pcm_f32le, |pcm| {
++                generate_f32_reaper(pcm, &options, large_range, mode)
++            })
++        })
+         .map_err(py_err)?;
+     Ok(PyBytes::new(py, &bytes))
+ }
+--- /dev/null
++++ b/src/python_pcm.rs
+@@ -0,0 +1,75 @@
++#[cfg(target_endian = "little")]
++use std::mem::align_of;
++
++#[inline]
++fn aligned_pcm16_le(bytes: &[u8]) -> Option<&[i16]> {
++    #[cfg(target_endian = "little")]
++    {
++        if bytes.as_ptr().align_offset(align_of::<i16>()) == 0 {
++            // SAFETY: i16 accepts every 16-bit pattern, the byte count is
++            // checked by the callers, and the pointer alignment is verified
++            // immediately above. The returned slice cannot outlive `bytes`.
++            return Some(unsafe {
++                std::slice::from_raw_parts(bytes.as_ptr().cast::<i16>(), bytes.len() / 2)
++            });
++        }
++    }
++    None
++}
++
++#[inline]
++fn aligned_f32_le(bytes: &[u8]) -> Option<&[f32]> {
++    #[cfg(target_endian = "little")]
++    {
++        if bytes.as_ptr().align_offset(align_of::<f32>()) == 0 {
++            // SAFETY: Rust f32 permits every IEEE-754 bit pattern, the byte
++            // count is checked by the callers, and alignment is verified.
++            return Some(unsafe {
++                std::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / 4)
++            });
++        }
++    }
++    None
++}
++
++pub(crate) fn with_pcm16_le<R>(bytes: &[u8], f: impl FnOnce(&[i16]) -> R) -> R {
++    if let Some(samples) = aligned_pcm16_le(bytes) {
++        return f(samples);
++    }
++    let decoded: Vec<i16> = bytes
++        .chunks_exact(2)
++        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
++        .collect();
++    f(&decoded)
++}
++
++pub(crate) fn with_f32_le<R>(bytes: &[u8], f: impl FnOnce(&[f32]) -> R) -> R {
++    if let Some(samples) = aligned_f32_le(bytes) {
++        return f(samples);
++    }
++    let decoded: Vec<f32> = bytes
++        .chunks_exact(4)
++        .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
++        .collect();
++    f(&decoded)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn pcm16_view_or_fallback_decodes_exact_bits() {
++        let bytes = [0x00, 0x80, 0xff, 0xff, 0x34, 0x12, 0xff, 0x7f];
++        let values = with_pcm16_le(&bytes, |samples| samples.to_vec());
++        assert_eq!(values, vec![i16::MIN, -1, 0x1234, i16::MAX]);
++    }
++
++    #[test]
++    fn f32_view_or_fallback_decodes_exact_bits() {
++        let words = [0x0000_0000u32, 0x8000_0000, 0x3f80_0000, 0x7fc0_1234];
++        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
++        let values = with_f32_le(&bytes, |samples| samples.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
++        assert_eq!(values, words);
++    }
++}
