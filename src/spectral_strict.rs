@@ -401,7 +401,7 @@ pub(crate) fn build_spectral_layers_f32_source<S: F32SampleSource + ?Sized>(
     }
     validate_f32_source_len(pcm, frames, channels, source_rate, divisions[0])?;
     if source_rate > REAPER_ZERO_SPECTRAL_MAX_RATE {
-        let fine = build_high_rate_f32_source(pcm, frames, channels, source_rate, divisions[0])?;
+        let fine = build_fine_spectral_f32_source(pcm, frames, channels, source_rate, divisions[0])?;
         return assemble_high_rate_layers(&fine, channels, divisions);
     }
     zero_layers(frames, channels, divisions)
