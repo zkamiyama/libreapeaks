@@ -25,144 +25,209 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Apply step 3 - remove the f64 magnitude scratch array
+      - name: Apply step 4 - encode spectral layers directly from fine peaks
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("src/spectral.rs")
-          text = path.read_text()
+          spectral = Path("src/spectral.rs")
+          text = spectral.read_text()
 
-          helper = '''#[inline]
-          fn summarize_spectrum_magnitudes(
-              spec: &[C64; HALF_BINS + 1],
-          ) -> (f64, [f32; HALF_BINS + 1], usize) {
-              let mut total = 0.0f64;
-              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-              let mut interior_kmax = 1usize;
-              let mut interior_mmax = f64::NEG_INFINITY;
-              let mut nyquist_magnitude = 0.0f64;
-
-              for k in 0..=HALF_BINS {
-                  let m = if k == 0 || k == HALF_BINS {
-                      spec[k].re.abs()
-                  } else {
-                      (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+          helper = '''pub(crate) fn encode_spectral_layer_from_fine(
+              fine: &[SpectralPeak],
+              channels: usize,
+              ratio: usize,
+              output_count: usize,
+          ) -> GeneratedLayer {
+              if channels == 0 || ratio == 0 {
+                  return GeneratedLayer {
+                      header: LayerHeader {
+                          division: TOKEN_SPECTRAL,
+                          peak_count: 0,
+                      },
+                      bytes: Vec::new(),
                   };
-                  total += m;
-                  mags_f32[k] = m as f32;
-                  if k == HALF_BINS {
-                      nyquist_magnitude = m;
-                  } else if k != 0 && m > interior_mmax {
-                      interior_mmax = m;
-                      interior_kmax = k;
+              }
+              let fine_count = fine.len() / channels;
+              let count = output_count.min(fine_count / ratio);
+              let mut bytes = Vec::with_capacity(
+                  count
+                      .saturating_mul(channels)
+                      .saturating_mul(std::mem::size_of::<u32>()),
+              );
+
+              if ratio == 1 {
+                  for peak in &fine[..count * channels] {
+                      bytes.extend_from_slice(&peak.code().to_le_bytes());
+                  }
+              } else {
+                  for output_index in 0..count {
+                      let first = output_index * ratio;
+                      let last = first + ratio;
+                      for channel in 0..channels {
+                          let mut sum_density = 0u64;
+                          let mut best = SpectralPeak::default();
+                          let mut best_score = 0u64;
+                          for fine_index in first..last {
+                              let peak = fine[fine_index * channels + channel];
+                              sum_density += u64::from(peak.density);
+                              let score = u64::from(peak.density)
+                                  * (32768u64 - u64::from(peak.frequency_hz));
+                              if score > best_score {
+                                  best_score = score;
+                                  best = peak;
+                              }
+                          }
+                          let peak = SpectralPeak {
+                              frequency_hz: best.frequency_hz,
+                              density: (sum_density / ratio as u64).min(16383) as u16,
+                          };
+                          bytes.extend_from_slice(&peak.code().to_le_bytes());
+                      }
                   }
               }
 
-              let kmax = if interior_mmax > nyquist_magnitude {
-                  interior_kmax
-              } else {
-                  HALF_BINS
-              };
-              (total, mags_f32, kmax)
+              GeneratedLayer {
+                  header: LayerHeader {
+                      division: TOKEN_SPECTRAL,
+                      peak_count: count as u32,
+                  },
+                  bytes,
+              }
           }
 
           '''
-          if 'fn summarize_spectrum_magnitudes(' in text:
-              raise SystemExit('step3 helper already present')
-          marker = 'fn analyze_channel(\n'
+          if 'fn encode_spectral_layer_from_fine(' in text:
+              raise SystemExit('step4 helper already present')
+          marker = 'fn assemble_spectral_layers(\n'
           pos = text.index(marker)
           text = text[:pos] + helper + text[pos:]
 
-          start = text.index('    let mut mags = [0.0f64; HALF_BINS + 1];')
-          end = text.index('    let best_bin = if kmax == HALF_BINS || elapsed == 0 {', start)
-          replacement = '''    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
-              // REAPER's ordered floating-point branch proceeds only when total > 0.
-              // This rejects NaN as well as zero/negative totals.  With very large but
-              // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
-              // emits a zero spectral peak for those frames instead of a Nyquist/zero-
-              // density placeholder.
-              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-                  return (SpectralPeak::default(), next);
+          start = text.index('fn assemble_spectral_layers(\n')
+          end = text.index('\npub fn build_spectral_layers(\n', start)
+          replacement = '''fn assemble_spectral_layers(
+              fine: &[SpectralPeak],
+              frames: usize,
+              channels: usize,
+              divisions: &[u32],
+          ) -> Result<Vec<GeneratedLayer>> {
+              if divisions.is_empty() {
+                  return Ok(Vec::new());
               }
+              let fine_div = divisions[0];
+              let mut out = Vec::with_capacity(divisions.len());
 
+              for &div in divisions {
+                  if div == 0 || div % fine_div != 0 {
+                      return Err(ReaPeaksError::Unsupported(
+                          "spectral divisions must be nonzero multiples of fine division",
+                      ));
+                  }
+                  let ratio = (div / fine_div) as usize;
+                  let expected = frames.saturating_sub(1024) / div as usize;
+                  out.push(encode_spectral_layer_from_fine(
+                      fine, channels, ratio, expected,
+                  ));
+              }
+              Ok(out)
+          }
           '''
           text = text[:start] + replacement + text[end:]
 
           tests = '''
 
           #[cfg(test)]
-          mod spectral_magnitude_summary_tests {
+          mod spectral_direct_encode_tests {
               use super::*;
 
-              fn reference_summary(
-                  spec: &[C64; HALF_BINS + 1],
-              ) -> (f64, [f32; HALF_BINS + 1], usize) {
-                  let mut mags = [0.0f64; HALF_BINS + 1];
-                  let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-                  for k in 0..=HALF_BINS {
-                      let m = if k == 0 || k == HALF_BINS {
-                          spec[k].re.abs()
-                      } else {
-                          (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
-                      };
-                      mags[k] = m;
-                      mags_f32[k] = m as f32;
+              fn reference_layer(
+                  fine: &[SpectralPeak],
+                  channels: usize,
+                  ratio: usize,
+                  output_count: usize,
+              ) -> GeneratedLayer {
+                  let fine_count = fine.len() / channels;
+                  let count = output_count.min(fine_count / ratio);
+                  let peaks = if ratio == 1 {
+                      fine[..count * channels].to_vec()
+                  } else {
+                      aggregate_spectral_from_fine(fine, channels, ratio, count)
+                  };
+                  let mut bytes = Vec::with_capacity(peaks.len() * 4);
+                  for peak in &peaks {
+                      bytes.extend_from_slice(&peak.code().to_le_bytes());
                   }
-                  let total: f64 = mags.iter().sum();
-                  let mut kmax = HALF_BINS;
-                  let mut mmax = mags[HALF_BINS];
-                  for k in 1..HALF_BINS {
-                      if mags[k] > mmax {
-                          mmax = mags[k];
-                          kmax = k;
-                      }
-                  }
-                  (total, mags_f32, kmax)
-              }
-
-              fn assert_same(spec: &[C64; HALF_BINS + 1]) {
-                  let (actual_total, actual_f32, actual_kmax) =
-                      summarize_spectrum_magnitudes(spec);
-                  let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);
-                  assert_eq!(actual_total.to_bits(), expected_total.to_bits());
-                  assert_eq!(actual_kmax, expected_kmax);
-                  for (index, (&actual, &expected)) in
-                      actual_f32.iter().zip(expected_f32.iter()).enumerate()
-                  {
-                      assert_eq!(
-                          actual.to_bits(),
-                          expected.to_bits(),
-                          "magnitude bin={index}"
-                      );
+                  GeneratedLayer {
+                      header: LayerHeader {
+                          division: TOKEN_SPECTRAL,
+                          peak_count: (peaks.len() / channels) as u32,
+                      },
+                      bytes,
                   }
               }
 
               #[test]
-              fn compact_summary_matches_reference_bits() {
-                  let mut spec = [C64::default(); HALF_BINS + 1];
-                  for (k, value) in spec.iter_mut().enumerate() {
-                      value.re = ((k * 37 + 11) as f64).sin() * (1.0 + k as f64 / 17.0);
-                      value.im = ((k * 53 + 7) as f64).cos() * (0.5 + k as f64 / 31.0);
+              fn direct_encode_matches_aggregate_then_encode() {
+                  let channels = 2usize;
+                  let frames = 60usize;
+                  let fine: Vec<SpectralPeak> = (0..frames * channels)
+                      .map(|index| SpectralPeak {
+                          frequency_hz: ((index * 977 + 31) % 20_000) as u16,
+                          density: ((index * 613 + 17) % 16_384) as u16,
+                      })
+                      .collect();
+                  for &(ratio, output_count) in &[(1usize, 57usize), (3, 19), (5, 11), (15, 4)] {
+                      let actual = encode_spectral_layer_from_fine(
+                          &fine,
+                          channels,
+                          ratio,
+                          output_count,
+                      );
+                      let expected = reference_layer(&fine, channels, ratio, output_count);
+                      assert_eq!(actual.header.division, expected.header.division);
+                      assert_eq!(actual.header.peak_count, expected.header.peak_count);
+                      assert_eq!(actual.bytes, expected.bytes, "ratio={ratio}");
                   }
-                  assert_same(&spec);
-
-                  spec.fill(C64::default());
-                  spec[1].re = 3.0;
-                  spec[2].re = 3.0;
-                  spec[HALF_BINS].re = 2.0;
-                  assert_same(&spec);
-
-                  spec[17].re = f64::NAN;
-                  spec[31].im = f64::INFINITY;
-                  assert_same(&spec);
               }
           }
           '''
-          if 'mod spectral_magnitude_summary_tests' in text:
-              raise SystemExit('step3 tests already present')
-          path.write_text(text + tests)
+          if 'mod spectral_direct_encode_tests' in text:
+              raise SystemExit('step4 tests already present')
+          spectral.write_text(text + tests)
+
+          strict = Path("src/spectral_strict.rs")
+          strict_text = strict.read_text()
+          encode_start = strict_text.index('fn encode_layer(')
+          assemble_start = strict_text.index('fn assemble_high_rate_layers(', encode_start)
+          strict_text = strict_text[:encode_start] + strict_text[assemble_start:]
+
+          assemble_start = strict_text.index('fn assemble_high_rate_layers(')
+          assemble_end = strict_text.index('\nfn zero_layers(', assemble_start)
+          assemble = '''fn assemble_high_rate_layers(
+              fine: &[SpectralPeak],
+              channels: usize,
+              divisions: &[u32],
+          ) -> Result<Vec<GeneratedLayer>> {
+              let fine_div = validate_divisions(divisions)?;
+              let fine_count = fine.len() / channels;
+              let mut out = Vec::with_capacity(divisions.len());
+
+              for &div in divisions {
+                  let ratio = (div / fine_div) as usize;
+                  // REAPER's mipmaps are assembled directly from the fine spectral
+                  // stream. Counts are therefore floor(fine_count / ratio), not a
+                  // second source-domain scheduler calculation.
+                  let count = fine_count / ratio;
+                  out.push(crate::spectral_base::encode_spectral_layer_from_fine(
+                      fine, channels, ratio, count,
+                  ));
+              }
+              Ok(out)
+          }
+          '''
+          strict_text = strict_text[:assemble_start] + assemble + strict_text[assemble_end:]
+          strict.write_text(strict_text)
           PY
           cargo fmt --all
 
@@ -175,11 +240,11 @@ jobs:
       - name: Clippy strict WDL
         run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
 
-      - name: Commit step 3
+      - name: Commit step 4
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/spectral.rs
-          git commit -m "Reduce spectral magnitude scratch storage"
+          git add src/spectral.rs src/spectral_strict.rs
+          git commit -m "Encode spectral layers directly from fine peaks"
           git push origin HEAD:optimize/spectral-followup
