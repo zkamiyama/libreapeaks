@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import sys
 
@@ -90,27 +91,50 @@ class DemoCacheConfigTests(unittest.TestCase):
         self.assertEqual(plan.peak_rate, 321)
         self.assertEqual(plan.path_origin, "reaper.ini-sidecar")
 
-    def test_follow_ini_source_list_selects_central_offline(self) -> None:
+    def test_follow_ini_source_list_uses_oracle_instead_of_guessing(self) -> None:
         cache = self.root / "central"
         ini = self.write_ini(
             flags=0,
             cache=cache,
             source_list=str(self.media.parent),
         )
-        plan = dc.resolve_demo_cache_plan(
-            self.media,
-            dc.DemoCacheConfig(policy="reaper-config", reaper_ini=str(ini)),
-        )
-        self.assertTrue(str(plan.peaks_path).startswith(str(cache.resolve())))
-        self.assertEqual(plan.path_origin, "reaper.ini-central-sha1")
-
-    def test_unknown_ini_flags_require_oracle_instead_of_guessing(self) -> None:
-        ini = self.write_ini(flags=2, cache=self.root / "central")
-        with self.assertRaisesRegex(dc.DemoConfigError, "does not reproduce"):
-            dc.resolve_demo_cache_plan(
+        exact = self.root / "oracle" / "selective.reapeaks"
+        with mock.patch.object(dc, "_oracle_path", return_value=exact) as oracle:
+            plan = dc.resolve_demo_cache_plan(
                 self.media,
                 dc.DemoCacheConfig(policy="reaper-config", reaper_ini=str(ini)),
             )
+        self.assertEqual(plan.peaks_path, exact)
+        self.assertEqual(plan.path_origin, "reaper-oracle-selective-policy")
+        oracle.assert_called_once()
+
+    def test_unknown_ini_flags_use_oracle_instead_of_guessing(self) -> None:
+        ini = self.write_ini(flags=2, cache=self.root / "central")
+        exact = self.root / "oracle" / "flags.reapeaks"
+        with mock.patch.object(dc, "_oracle_path", return_value=exact) as oracle:
+            plan = dc.resolve_demo_cache_plan(
+                self.media,
+                dc.DemoCacheConfig(policy="reaper-config", reaper_ini=str(ini)),
+            )
+        self.assertEqual(plan.peaks_path, exact)
+        self.assertEqual(plan.path_origin, "reaper-oracle-selective-policy")
+        oracle.assert_called_once()
+
+    def test_reaper_central_verification_is_optional_oracle(self) -> None:
+        cache = self.root / "central"
+        exact = self.root / "oracle" / "verified.reapeaks"
+        with mock.patch.object(dc, "_oracle_path", return_value=exact) as oracle:
+            plan = dc.resolve_demo_cache_plan(
+                self.media,
+                dc.DemoCacheConfig(
+                    policy="reaper-central",
+                    cache_directory=str(cache),
+                    verify_with_reaper=True,
+                ),
+            )
+        self.assertEqual(plan.peaks_path, exact)
+        self.assertEqual(plan.path_origin, "reaper-oracle-override")
+        oracle.assert_called_once()
 
     def test_browser_upload_reaper_policy_is_rejected(self) -> None:
         upload_root = self.root / "libreapeaks-web-daw-test"
@@ -135,6 +159,12 @@ class DemoCacheConfigTests(unittest.TestCase):
         )
         dc.save_demo_cache_config(config, path)
         self.assertEqual(dc.load_demo_cache_config(path), config)
+
+    def test_config_rejects_string_booleans(self) -> None:
+        with self.assertRaisesRegex(dc.DemoConfigError, "must be a boolean"):
+            dc.config_from_mapping(
+                {"version": 1, "cache": {"policy": "sidecar", "auto_reaper_ini": "false"}}
+            )
 
     def test_cli_override_beats_saved_policy(self) -> None:
         config = dc.DemoCacheConfig(
