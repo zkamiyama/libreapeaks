@@ -47,15 +47,16 @@ async function fetchJson(url, options = {}) {
 function cssCanvasSize(canvas) {
   const width = Math.max(1, Math.floor(canvas.clientWidth));
   const height = Math.max(1, Math.floor(canvas.clientHeight));
-  const dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
-  const pixelWidth = Math.max(1, Math.round(width * dpr));
-  const pixelHeight = Math.max(1, Math.round(height * dpr));
-  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-    canvas.width = pixelWidth;
-    canvas.height = pixelHeight;
+  // Keep the parity canvas in CSS-pixel coordinates. In particular,
+  // putImageData() ignores the current transform, so a DPR-scaled backing
+  // store would only fill part of the spectrogram on HiDPI displays.
+  const dpr = 1;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
   }
   const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   return {ctx, width, height, dpr};
 }
 
@@ -615,7 +616,15 @@ function installMirrorInteraction(element) {
   let drag = null;
   element.addEventListener('wheel', event => {
     const steps = wheelSteps(event, element);
-    if (!steps || event.ctrlKey) return;
+    if (!steps) return;
+    if (event.ctrlKey) {
+      const control = $('verticalScale');
+      const next = clamp(Number(control?.value || 1) * (1.15 ** (-steps)), 0.1, 32);
+      if (control) control.value = String(next);
+      if ($('verticalValue')) $('verticalValue').textContent = next.toFixed(2);
+      scheduleRender();
+      return;
+    }
     const rect = element.getBoundingClientRect();
     const anchor = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
     zoom(0.72 ** steps, anchor);
