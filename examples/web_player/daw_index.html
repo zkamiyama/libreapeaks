@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>libreapeaks DAW web player</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/daw_style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>libreapeaks DAW web player</h1>
+      <p>PySide DAW display parity, packed-cache/source-PCM rendering, and RPKX inventory.</p>
+    </div>
+    <div class="headerActions">
+      <div id="mediaInfo" class="pill">loading…</div>
+      <button id="openAudioButton" type="button">Open audio…</button>
+      <input id="audioFileInput" type="file" hidden>
+    </div>
+  </header>
+
+  <section id="launchPanel" class="launchPanel hidden" aria-live="polite">
+    <div id="launchDrop" class="launchDrop">
+      <strong>Drop an audio file here</strong>
+      <span>A complete waveform + spectral + spectrogram + loudness cache will be prepared.</span>
+    </div>
+    <progress id="launchProgress" max="100" value="0"></progress>
+    <div id="launchStatus">Ready</div>
+  </section>
+
+  <main>
+    <section class="overview panel">
+      <div class="panelTitle">Overview — click to seek</div>
+      <div class="canvasStack overviewStack" title="Click to seek">
+        <canvas id="overviewBase"></canvas>
+        <canvas id="overviewOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="panel" id="webglPanel">
+      <div class="panelTitle">DAW analysis view — exclusive waveform / spectral peaks / spectrogram / loudness</div>
+      <div class="canvasStack webglStack" id="webglStack"
+           title="Wheel: horizontal zoom at pointer · Ctrl+Wheel: vertical waveform zoom · Drag: pan · Click: seek">
+        <canvas id="analysisGl"></canvas>
+        <canvas id="dawCanvas" class="dawCanvas" aria-label="DAW analysis canvas"></canvas>
+      </div>
+    </section>
+
+    <section class="panel fallbackPanel" id="wavePanel">
+      <div class="panelTitle">Canvas2D fallback waveform</div>
+      <div class="canvasStack mainStack" id="waveStack">
+        <canvas id="waveBase"></canvas>
+        <canvas id="waveOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="panel fallbackPanel" id="spectrumPanel">
+      <div class="panelTitle">Canvas2D fallback spectral codes</div>
+      <div class="canvasStack spectrumStack" id="spectrumStack">
+        <canvas id="spectrumBase"></canvas>
+        <canvas id="spectrumOverlay" class="overlay"></canvas>
+      </div>
+    </section>
+
+    <section class="controls panel">
+      <div class="transportRow">
+        <button id="playButton">Play</button>
+        <button id="stopButton">Stop</button>
+        <button id="zoomInButton">Zoom +</button>
+        <button id="zoomOutButton">Zoom −</button>
+        <button id="fullButton">Full</button>
+        <label class="baseRendererControl">Renderer
+          <select id="rendererSelect">
+            <option value="webgl2">WebGL2 packed</option>
+            <option value="canvas2d">Canvas2D tiled</option>
+          </select>
+        </label>
+        <label><input id="followPlayhead" type="checkbox" checked> follow playhead</label>
+        <label>Vertical FS
+          <input id="verticalScale" type="range" min="0.1" max="32" value="1" step="0.05">
+          <output id="verticalValue" for="verticalScale">1.00</output>
+        </label>
+        <span id="timeLabel">00:00.00 / 00:00.00</span>
+      </div>
+      <div class="analysisRow baseAnalysisControls">
+        <label>Spectrogram gain
+          <input id="spectrogramGain" type="range" min="0.05" max="8" value="1" step="0.05">
+          <output id="spectrogramGainValue" for="spectrogramGain">1.00×</output>
+        </label>
+        <label><input id="heatmap" type="checkbox" checked> heatmap</label>
+        <label><input id="showSpectral" type="checkbox" checked> <code>-'s'</code> overlay</label>
+        <label><input id="showLoudness" type="checkbox" checked> <code>-'r'</code> overlay</label>
+        <label><input id="showGpuTiles" type="checkbox" checked> GPU residency strip</label>
+        <label><input id="showTiles" type="checkbox" checked> Canvas tile boundaries</label>
+      </div>
+      <input id="positionSlider" type="range" min="0" max="100000" value="0" aria-label="Playback position">
+      <audio id="audio" preload="metadata" src="/audio"></audio>
+    </section>
+
+    <section class="panel dawControls" id="dawControls">
+      <div class="panelTitle">DAW display controls</div>
+      <div class="controlGrid primaryControls">
+        <label>View
+          <select id="displayMode">
+            <option value="waveform">Waveform</option>
+            <option value="spectral">Spectral peaks</option>
+            <option value="spectrogram">Spectrogram</option>
+            <option value="loudness">Loudness</option>
+          </select>
+        </label>
+        <span id="dawInfo" class="dawInfo">initializing…</span>
+      </div>
+
+      <div id="analysisCommonGroup" class="controlGrid" hidden>
+        <label>Peak zoom
+          <input id="analysisZoomDb" type="range" min="-24" max="24" value="0" step="0.5">
+          <output>−24…+24 dB</output>
+        </label>
+        <label>Opacity
+          <input id="analysisOpacity" type="range" min="0" max="100" value="92" step="1">
+        </label>
+      </div>
+
+      <div id="spectralGroup" class="controlGrid" hidden>
+        <label>Range
+          <select id="spectralRange">
+            <option value="0">Full spectrum</option>
+            <option value="1">Every octave</option>
+          </select>
+        </label>
+        <label>Low Hz <input id="spectralLowHz" type="number" min="10" max="20000" value="20" step="10"></label>
+        <label>High Hz <input id="spectralHighHz" type="number" min="20" max="30000" value="10000" step="100"></label>
+        <label><input id="spectralReverse" type="checkbox"> Reverse</label>
+        <label><input id="spectralFadeNoise" type="checkbox" checked> Fade noise</label>
+      </div>
+
+      <div id="loudnessGroup" class="controlGrid" hidden>
+        <label>Measure
+          <select id="loudnessMetric"><option value="0">LUFS-M</option><option value="1">LUFS-S</option></select>
+        </label>
+        <label>Style
+          <select id="loudnessStyle"><option value="1">Graph + peaks</option><option value="0">Colored peaks</option></select>
+        </label>
+        <label>Low LUFS <input id="loudnessFloorLu" type="number" min="-70" max="-0.1" value="-48" step="1"></label>
+        <label>High LUFS <input id="loudnessCeilingLu" type="number" min="-69" max="6" value="0" step="1"></label>
+        <label>Offset LU <input id="loudnessOffsetLu" type="number" min="-24" max="24" value="0" step="1"></label>
+        <label>Transition LU <input id="loudnessTransitionLu" type="number" min="0.05" max="12" value="1.5" step="0.25"></label>
+      </div>
+
+      <div id="spectrogramGroup" class="controlGrid" hidden>
+        <label><input id="specHeatmap" type="checkbox" checked> Heatmap</label>
+        <label>Intensity / gain dB <input id="specGainDb" type="range" min="-60" max="60" value="0" step="1"></label>
+        <label>Floor dB <input id="specFloorDb" type="number" min="-200" max="-0.1" value="-100" step="5"></label>
+        <label>Ceiling dB <input id="specCeilingDb" type="number" min="-199" max="24" value="0" step="1"></label>
+        <label>Contrast <input id="specContrast" type="number" min="0.05" max="8" value="1" step="0.1"></label>
+        <label>Frequency
+          <select id="specFrequency"><option value="log">Log frequency</option><option value="linear">Linear frequency</option></select>
+        </label>
+      </div>
+    </section>
+
+    <section class="diagnostics panel">
+      <div><strong>Renderer:</strong> <span id="rendererInfo"></span></div>
+      <div><strong>Viewport:</strong> <span id="viewportInfo"></span></div>
+      <div><strong>Visible / resident:</strong> <span id="tileInfo"></span></div>
+      <div><strong>CPU tile LRU:</strong> <span id="cacheInfo"></span></div>
+      <div><strong>PCM range events:</strong> <span id="pcmRangeInfo" aria-live="polite">none</span></div>
+      <div><strong>Cache/API:</strong> <span id="apiInfo"></span></div>
+      <div class="hint"><kbd>Wheel</kbd> zoom · <kbd>Ctrl</kbd>+<kbd>Wheel</kbd> vertical waveform zoom · drag pan · click seek.</div>
+    </section>
+
+    <section class="panel rpkxPanel">
+      <div class="panelTitle">RPKX container inventory</div>
+      <div id="rpkxSummary" class="rpkxSummary">loading…</div>
+      <div class="tableScroll">
+        <table class="rpkxTable">
+          <thead><tr><th>#</th><th>Namespace</th><th>Kind</th><th>Version</th><th>Flags</th><th>Payload bytes</th><th>Preview</th></tr></thead>
+          <tbody id="rpkxBody"></tbody>
+        </table>
+      </div>
+      <pre id="rpkxDetail" class="rpkxDetail">Select a chunk to inspect its opaque payload preview.</pre>
+    </section>
+  </main>
+
+  <script type="module" src="/daw_bootstrap.mjs"></script>
+</body>
+</html>
