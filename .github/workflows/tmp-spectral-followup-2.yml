@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up 2 magnitude scratch gate
+name: Temporary spectral follow-up 2 magnitude scratch benchmark
 
 on:
   push:
@@ -8,201 +8,64 @@ on:
       - ".github/workflows/tmp-spectral-followup-2.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  optimize-and-test:
+  benchmark:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
+    env:
+      BASELINE_SHA: fd30ba5fa4c253914cdda9d3c8ef7994acc4471d
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout optimized branch
+        uses: actions/checkout@v4
         with:
-          ref: optimize/spectral-followup-2
+          ref: ${{ github.sha }}
+          path: optimized
           submodules: recursive
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+          fetch-depth: 1
+      - name: Checkout FFT-scratch baseline
+        uses: actions/checkout@v4
         with:
-          components: rustfmt, clippy
-
-      - name: Reuse spectral magnitude scratch
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          submodules: recursive
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use identical benchmark harness
+        run: |
+          mkdir -p baseline/examples
+          cp optimized/examples/optimization_benchmark.rs baseline/examples/optimization_benchmark.rs
+      - name: Build release strict-wdl binaries
+        run: |
+          cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+          cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+      - name: Benchmark spectral cases and verify byte identity
         run: |
           python3 - <<'PY'
+          import json, math, os, statistics, subprocess
           from pathlib import Path
-          path=Path("src/spectral.rs")
-          text=path.read_text()
-
-          start=text.index('#[inline]\nfn summarize_spectrum_magnitudes(')
-          end=text.index('\nfn analyze_channel(', start)
-          replacement=r'''#[inline]
-          fn summarize_spectrum_magnitudes_into(
-              spec: &[C64; HALF_BINS + 1],
-              previous: &mut [C32; HALF_BINS + 1],
-              mags_f32: &mut [f32; HALF_BINS + 1],
-          ) -> (f64, usize, C32) {
-              let mut total = 0.0f64;
-              let mut interior_kmax = 1usize;
-              let mut interior_mmax = f64::NEG_INFINITY;
-              let mut interior_previous = C32::default();
-              let mut nyquist_magnitude = 0.0f64;
-
-              for (k, bin) in spec.iter().enumerate() {
-                  let old_previous = previous[k];
-                  previous[k] = C32 {
-                      re: bin.re as f32,
-                      im: bin.im as f32,
-                  };
-                  let m = if k == 0 || k == HALF_BINS {
-                      bin.re.abs()
-                  } else {
-                      (bin.re * bin.re + bin.im * bin.im).sqrt()
-                  };
-                  total += m;
-                  mags_f32[k] = m as f32;
-                  if k == HALF_BINS {
-                      nyquist_magnitude = m;
-                  } else if k != 0 && m > interior_mmax {
-                      interior_mmax = m;
-                      interior_kmax = k;
-                      interior_previous = old_previous;
-                  }
-              }
-
-              if interior_mmax > nyquist_magnitude {
-                  (total, interior_kmax, interior_previous)
-              } else {
-                  (total, HALF_BINS, C32::default())
-              }
-          }
-
-          #[inline]
-          fn summarize_spectrum_magnitudes(
-              spec: &[C64; HALF_BINS + 1],
-              previous: &mut [C32; HALF_BINS + 1],
-          ) -> (f64, [f32; HALF_BINS + 1], usize, C32) {
-              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-              let (total, kmax, previous_at_kmax) =
-                  summarize_spectrum_magnitudes_into(spec, previous, &mut mags_f32);
-              (total, mags_f32, kmax, previous_at_kmax)
-          }
-
-          fn finish_spectral_peak(
-              spec: &[C64; HALF_BINS + 1],
-              total: f64,
-              mags_f32: &[f32; HALF_BINS + 1],
-              kmax: usize,
-              previous_at_kmax: C32,
-              elapsed: usize,
-          ) -> SpectralPeak {
-              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-                  return SpectralPeak::default();
-              }
-
-              let best_bin = if kmax == HALF_BINS || elapsed == 0 {
-                  HALF_BINS as f64
-              } else {
-                  let cur = spec[kmax];
-                  let prev = previous_at_kmax;
-                  let phase_cur = cur.im.atan2(cur.re);
-                  let phase_prev = (prev.im as f64).atan2(prev.re as f64);
-                  let residual = wrap_phase(
-                      (phase_cur - phase_prev) / PI
-                          - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
-                  );
-                  kmax as f64 + HALF_BINS as f64 / elapsed as f64 * residual
-              };
-
-              let frequency_hz = (0.5 + best_bin * ANALYSIS_RATE / FFT_N as f64)
-                  .trunc()
-                  .clamp(0.0, 32767.0) as u16;
-
-              let mut spread = 0.0f64;
-              for (k, &magnitude) in mags_f32.iter().enumerate() {
-                  let d = k as f64 - best_bin;
-                  spread += magnitude as f64 * d * d;
-              }
-              let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
-                  .trunc()
-                  .clamp(0.0, 16383.0) as u16;
-
-              SpectralPeak {
-                  frequency_hz,
-                  density,
-              }
-          }
-
-          fn analyze_spectrum(
-              spec: &[C64; HALF_BINS + 1],
-              previous: &mut [C32; HALF_BINS + 1],
-              elapsed: usize,
-          ) -> SpectralPeak {
-              let (total, mags_f32, kmax, previous_at_kmax) =
-                  summarize_spectrum_magnitudes(spec, previous);
-              finish_spectral_peak(spec, total, &mags_f32, kmax, previous_at_kmax, elapsed)
-          }
-
-          #[cfg(feature = "strict-wdl")]
-          fn analyze_spectrum_with_magnitude_scratch(
-              spec: &[C64; HALF_BINS + 1],
-              previous: &mut [C32; HALF_BINS + 1],
-              elapsed: usize,
-              mags_f32: &mut [f32; HALF_BINS + 1],
-          ) -> SpectralPeak {
-              let (total, kmax, previous_at_kmax) =
-                  summarize_spectrum_magnitudes_into(spec, previous, mags_f32);
-              finish_spectral_peak(spec, total, mags_f32, kmax, previous_at_kmax, elapsed)
-          }
-          '''
-          text=text[:start]+replacement+text[end:]
-
-          # Extend the strict scratch entry point with the reusable magnitude buffer.
-          start=text.index('#[cfg(feature = "strict-wdl")]\nfn analyze_channel_with_scratch(')
-          end=text.index('\nfn analyze_resampled_spectral(', start)
-          section=text[start:end]
-          old='''    spec: &mut [C64; HALF_BINS + 1],\n) -> SpectralPeak {'''
-          new='''    spec: &mut [C64; HALF_BINS + 1],\n    mags_f32: &mut [f32; HALF_BINS + 1],\n) -> SpectralPeak {'''
-          if section.count(old)!=1: raise SystemExit("scratch signature fragment not found")
-          section=section.replace(old,new,1)
-          old='''    analyze_spectrum(spec, previous, elapsed)'''
-          new='''    analyze_spectrum_with_magnitude_scratch(spec, previous, elapsed, mags_f32)'''
-          if section.count(old)!=1: raise SystemExit("scratch analysis call not found")
-          section=section.replace(old,new,1)
-          text=text[:start]+section+text[end:]
-
-          old='''    spectrum: Box<[C64; HALF_BINS + 1]>,\n}'''
-          new='''    spectrum: Box<[C64; HALF_BINS + 1]>,\n    magnitudes: Box<[f32; HALF_BINS + 1]>,\n}'''
-          if text.count(old)!=1: raise SystemExit("stream struct scratch tail not found")
-          text=text.replace(old,new,1)
-          old='''            spectrum: Box::new([C64::default(); HALF_BINS + 1]),\n        }'''
-          new='''            spectrum: Box::new([C64::default(); HALF_BINS + 1]),\n            magnitudes: Box::new([0.0f32; HALF_BINS + 1]),\n        }'''
-          if text.count(old)!=1: raise SystemExit("stream init scratch tail not found")
-          text=text.replace(old,new,1)
-
-          start=text.index('    fn push_interleaved(&mut self, samples: &[f64]) -> bool {')
-          end=text.index('\n    fn into_output', start)
-          section=text[start:end]
-          old='''                        self.spectrum.as_mut(),\n                    );'''
-          new='''                        self.spectrum.as_mut(),\n                        self.magnitudes.as_mut(),\n                    );'''
-          if section.count(old)!=1: raise SystemExit("stream scratch call tail not found")
-          section=section.replace(old,new,1)
-          text=text[:start]+section+text[end:]
-
-          path.write_text(text)
+          cases=["pcm16-spectral-48k-stereo-30s","pcm16-spectrogram-48k-stereo-20s","pcm16-spectrogram-96k-6ch-8s","pcm24-spectral-96k-stereo-15s","f32-spectrogram-48k-stereo-15s"]
+          bins={"baseline":Path("baseline/target/release/examples/optimization_benchmark"),"optimized":Path("optimized/target/release/examples/optimization_benchmark")}
+          samples={c:{k:[] for k in bins} for c in cases}; meta={c:{} for c in cases}
+          orders=(("baseline","optimized"),("optimized","baseline"),("baseline","optimized"),("optimized","baseline"))
+          for order in orders:
+              for case in cases:
+                  for label in order:
+                      r=json.loads(subprocess.check_output([str(bins[label]),case,"3"],text=True).strip())
+                      samples[case][label].extend(r["samples_ns"]); m={"bytes":r["bytes"],"hash":r["hash"]}
+                      if label in meta[case] and meta[case][label]!=m: raise SystemExit(f"nondeterministic {case}/{label}")
+                      meta[case][label]=m
+          rows=[]; speedups=[]
+          for case in cases:
+              if meta[case]["baseline"]!=meta[case]["optimized"]: raise SystemExit(f"byte identity failed {case}: {meta[case]}")
+              b=statistics.median(samples[case]["baseline"]); o=statistics.median(samples[case]["optimized"]); s=b/o; speedups.append(s)
+              rows.append({"case":case,"baseline_median_ns":b,"optimized_median_ns":o,"speedup":s,"bytes":meta[case]["baseline"]["bytes"],"hash":meta[case]["baseline"]["hash"],"baseline_samples_ns":samples[case]["baseline"],"optimized_samples_ns":samples[case]["optimized"]})
+          payload={"baseline":os.environ["BASELINE_SHA"],"optimized":subprocess.check_output(["git","-C","optimized","rev-parse","HEAD"],text=True).strip(),"samples_per_side_per_case":12,"geomean_speedup":math.exp(sum(math.log(x) for x in speedups)/len(speedups)),"cases":rows}
+          Path("magnitude-scratch-benchmark.json").write_text(json.dumps(payload,indent=2)+"\n"); print(json.dumps(payload,indent=2))
           PY
-          cargo fmt --all
-
-      - name: Test default feature set
-        run: cargo test --locked --all-targets
-      - name: Test strict WDL feature set
-        run: cargo test --locked --all-targets --features strict-wdl
-      - name: Clippy default feature set
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Clippy strict WDL
-        run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
-      - name: Commit source optimization
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/spectral.rs
-          git diff --cached --quiet && exit 1
-          git commit -m "Reuse spectral magnitude scratch buffer"
-          git push origin HEAD:optimize/spectral-followup-2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magnitude-scratch-benchmark
+          path: magnitude-scratch-benchmark.json
+          retention-days: 7
