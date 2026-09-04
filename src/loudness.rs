@@ -6,6 +6,9 @@ use std::f64::consts::PI;
 const MOMENTARY_BLOCKS_25MS: usize = 16;
 const SHORT_TERM_BLOCKS_25MS: usize = 120;
 
+const LOUDNESS_PARALLEL_MIN_FRAMES: usize = 16 * 1024;
+const LOUDNESS_PARALLEL_MAX_WORKERS: usize = 4;
+
 #[derive(Debug, Clone, Copy)]
 struct FilterCoefficients {
     b: [f64; 5],
@@ -242,6 +245,71 @@ fn encode_loudness_layer(records: &[LoudnessPeak], channels: usize) -> Result<Ge
     })
 }
 
+fn analyze_loudness_channel<F>(
+    frames: usize,
+    channels: usize,
+    channel: usize,
+    sample_rate: u32,
+    base_division: usize,
+    base_record_count: usize,
+    block_frames: usize,
+    momentary_window: usize,
+    short_term_window: usize,
+    sample: &F,
+) -> Result<Vec<LoudnessPeak>>
+where
+    F: Fn(usize) -> f64 + Sync,
+{
+    let mut filter = KWeightingFilter::new(sample_rate)?;
+    let mut records = Vec::with_capacity(base_record_count);
+
+    let mut momentary = BlockEnergyRing::new(MOMENTARY_BLOCKS_25MS)?;
+    let mut short_term = BlockEnergyRing::new(SHORT_TERM_BLOCKS_25MS)?;
+    let mut block_energy = 0.0f64;
+    let mut block_fill = 0usize;
+
+    for frame in 0..frames {
+        let filtered = filter.process(sample(frame * channels + channel));
+        block_energy += filtered * filtered;
+        block_fill += 1;
+
+        let completed_frame = frame + 1;
+        if block_fill == block_frames {
+            momentary.push(block_energy);
+            short_term.push(block_energy);
+            block_energy = 0.0;
+            block_fill = 0;
+        }
+
+        if completed_frame % base_division == 0 || completed_frame == frames {
+            records.push(LoudnessPeak {
+                momentary_energy: momentary.normalized(momentary_window) as f32,
+                short_term_energy: short_term.normalized(short_term_window) as f32,
+            });
+        }
+    }
+
+    if records.len() != base_record_count {
+        return Err(ReaPeaksError::InvalidArgument(
+            "loudness record count mismatch",
+        ));
+    }
+    Ok(records)
+}
+
+#[inline]
+fn loudness_worker_count(frames: usize, channels: usize) -> usize {
+    if frames < LOUDNESS_PARALLEL_MIN_FRAMES || channels < 2 {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |parallelism| {
+        parallelism
+            .get()
+            .min(LOUDNESS_PARALLEL_MAX_WORKERS)
+            .min(channels)
+    })
+}
+
 fn build_loudness_layers<F>(
     frames: usize,
     channels: usize,
@@ -250,7 +318,7 @@ fn build_loudness_layers<F>(
     sample: F,
 ) -> Result<Vec<GeneratedLayer>>
 where
-    F: Fn(usize) -> f64,
+    F: Fn(usize) -> f64 + Sync,
 {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidArgument("channels=0"));
@@ -284,41 +352,69 @@ where
     let block_frames = loudness_block_frames(sample_rate)?;
     let (momentary_window, short_term_window) = loudness_windows(sample_rate)?;
 
-    for channel in 0..channels {
-        let mut filter = KWeightingFilter::new(sample_rate)?;
-        let mut record_index = 0usize;
-
-        let mut momentary = BlockEnergyRing::new(MOMENTARY_BLOCKS_25MS)?;
-        let mut short_term = BlockEnergyRing::new(SHORT_TERM_BLOCKS_25MS)?;
-        let mut block_energy = 0.0f64;
-        let mut block_fill = 0usize;
-
-        for frame in 0..frames {
-            let filtered = filter.process(sample(frame * channels + channel));
-            block_energy += filtered * filtered;
-            block_fill += 1;
-
-            let completed_frame = frame + 1;
-            if block_fill == block_frames {
-                momentary.push(block_energy);
-                short_term.push(block_energy);
-                block_energy = 0.0;
-                block_fill = 0;
-            }
-
-            if completed_frame % base_division == 0 || completed_frame == frames {
-                base_records[record_index * channels + channel] = LoudnessPeak {
-                    momentary_energy: momentary.normalized(momentary_window) as f32,
-                    short_term_energy: short_term.normalized(short_term_window) as f32,
-                };
-                record_index += 1;
+    let workers = loudness_worker_count(frames, channels);
+    if workers <= 1 {
+        for channel in 0..channels {
+            let records = analyze_loudness_channel(
+                frames,
+                channels,
+                channel,
+                sample_rate,
+                base_division,
+                base_record_count,
+                block_frames,
+                momentary_window,
+                short_term_window,
+                &sample,
+            )?;
+            for (record_index, peak) in records.into_iter().enumerate() {
+                base_records[record_index * channels + channel] = peak;
             }
         }
+    } else {
+        let channels_per_worker = channels.div_ceil(workers);
+        let channel_results = std::thread::scope(|scope| -> Result<Vec<_>> {
+            let mut handles = Vec::with_capacity(workers);
+            for first_channel in (0..channels).step_by(channels_per_worker) {
+                let last_channel = (first_channel + channels_per_worker).min(channels);
+                let sample = &sample;
+                handles.push(scope.spawn(move || -> Result<Vec<_>> {
+                    let mut completed = Vec::with_capacity(last_channel - first_channel);
+                    for channel in first_channel..last_channel {
+                        completed.push((
+                            channel,
+                            analyze_loudness_channel(
+                                frames,
+                                channels,
+                                channel,
+                                sample_rate,
+                                base_division,
+                                base_record_count,
+                                block_frames,
+                                momentary_window,
+                                short_term_window,
+                                sample,
+                            )?,
+                        ));
+                    }
+                    Ok(completed)
+                }));
+            }
 
-        if record_index != base_record_count {
-            return Err(ReaPeaksError::InvalidArgument(
-                "loudness record count mismatch",
-            ));
+            let mut completed = Vec::with_capacity(channels);
+            for handle in handles {
+                match handle.join() {
+                    Ok(result) => completed.extend(result?),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+            Ok(completed)
+        })?;
+
+        for (channel, records) in channel_results {
+            for (record_index, peak) in records.into_iter().enumerate() {
+                base_records[record_index * channels + channel] = peak;
+            }
         }
     }
 

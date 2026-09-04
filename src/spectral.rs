@@ -22,7 +22,9 @@ struct C32 {
 #[derive(Debug, Clone, Copy)]
 enum ExpectedCount {
     SourceDomain,
+    #[cfg(feature = "strict-wdl")]
     Exact(usize),
+    #[cfg(feature = "strict-wdl")]
     AnalysisDomain,
 }
 
@@ -37,6 +39,7 @@ fn wrap_phase(mut x: f64) -> f64 {
     x
 }
 
+#[cfg(feature = "strict-wdl")]
 #[inline]
 fn analysis_domain_fine_count(analysis_frames: usize, source_rate: u32, division: u32) -> usize {
     if analysis_frames == 0 || division == 0 || source_rate == 0 {
@@ -384,7 +387,9 @@ fn build_fine_spectral_f64_impl(
             }
             Some((frames - 1024) / division as usize)
         }
+        #[cfg(feature = "strict-wdl")]
         ExpectedCount::Exact(expected) => Some(expected),
+        #[cfg(feature = "strict-wdl")]
         ExpectedCount::AnalysisDomain => None,
     };
     if expected_before_resample == Some(0) {
@@ -394,10 +399,15 @@ fn build_fine_spectral_f64_impl(
     let resampled = resample_to_analysis(source, frames, channels, source_rate);
     let out_frames = resampled.len() / channels;
     let expected = match expected_mode {
+        #[cfg(feature = "strict-wdl")]
         ExpectedCount::AnalysisDomain => {
             analysis_domain_fine_count(out_frames, source_rate, division)
         }
-        ExpectedCount::SourceDomain | ExpectedCount::Exact(_) => {
+        ExpectedCount::SourceDomain => {
+            expected_before_resample.expect("expected count resolved before resampling")
+        }
+        #[cfg(feature = "strict-wdl")]
+        ExpectedCount::Exact(_) => {
             expected_before_resample.expect("expected count resolved before resampling")
         }
     };
