@@ -122,15 +122,20 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+fn real_fft_1024_into(input: &mut [f64; FFT_N], out: &mut [C64; HALF_BINS + 1]) {
     unsafe extern "C" {
         fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-    let mut out = [C64::default(); HALF_BINS + 1];
     let rc = unsafe {
         rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
     };
     assert_eq!(rc, 0, "WDL FFT bridge failed");
+}
+
+#[cfg(feature = "strict-wdl")]
+fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+    let mut out = [C64::default(); HALF_BINS + 1];
+    real_fft_1024_into(input, &mut out);
     out
 }
 
@@ -365,6 +370,9 @@ struct StreamingSpectralAnalyzer {
     previous: Vec<[C32; HALF_BINS + 1]>,
     out: Vec<SpectralPeak>,
     expected: Option<usize>,
+    fft_in: Box<[f64; FFT_N]>,
+    spectrum: Box<[C64; HALF_BINS + 1]>,
+    magnitudes: Box<[f32; HALF_BINS + 1]>,
 }
 
 #[cfg(feature = "strict-wdl")]
@@ -410,34 +418,39 @@ impl StreamingSpectralAnalyzer {
             previous: vec![[C32::default(); HALF_BINS + 1]; channels],
             out: Vec::with_capacity(output_capacity),
             expected,
+            fft_in: Box::new([0.0f64; FFT_N]),
+            spectrum: Box::new([C64::default(); HALF_BINS + 1]),
+            magnitudes: Box::new([0.0f32; HALF_BINS + 1]),
         }
     }
 
     fn push_interleaved(&mut self, samples: &[f64]) -> bool {
         debug_assert_eq!(samples.len() % self.channels, 0);
+        let nwin = self.window.len();
         for frame in samples.chunks_exact(self.channels) {
             for (channel, &sample) in frame.iter().enumerate() {
-                self.ring[self.write_pos * self.channels + channel] = sample as f32;
+                self.ring[channel * nwin + self.write_pos] = sample as f32;
             }
             self.write_pos += 1;
-            if self.write_pos == self.window.len() {
+            if self.write_pos == nwin {
                 self.write_pos = 0;
             }
             self.phase += 1.0;
             self.elapsed += 1;
             while self.phase >= self.hop {
                 for channel in 0..self.channels {
-                    let (peak, next) = analyze_channel(
+                    let peak = analyze_channel_with_scratch(
                         &self.ring,
                         self.write_pos,
-                        self.channels,
                         channel,
                         &self.window,
-                        &self.previous[channel],
+                        &mut self.previous[channel],
                         self.elapsed,
+                        self.fft_in.as_mut(),
+                        self.spectrum.as_mut(),
+                        self.magnitudes.as_mut(),
                     );
                     self.out.push(peak);
-                    self.previous[channel] = next;
                 }
                 self.elapsed = 0;
                 self.phase -= self.hop;
@@ -606,26 +619,25 @@ fn resample_to_analysis(
 }
 
 #[inline]
-fn fill_fft_input(
+fn fill_fft_input_into(
     ring: &[f32],
     write_pos: usize,
-    channels: usize,
     channel: usize,
     window: &[f32],
-) -> [f64; FFT_N] {
+    fft_in: &mut [f64; FFT_N],
+) {
     let nwin = window.len();
-    let mut fft_in = [0.0f64; FFT_N];
+    let lane_start = channel * nwin;
+    let lane = &ring[lane_start..lane_start + nwin];
+    fft_in.fill(0.0);
     if nwin == FFT_N {
         let mut i = 0usize;
-        for rf in write_pos..FFT_N {
-            let sample = ring[rf * channels + channel];
-            // Preserve REAPER's scalar f32 multiply before promotion.
+        for &sample in &lane[write_pos..] {
             let product = sample * window[i];
             fft_in[i] += product as f64;
             i += 1;
         }
-        for rf in 0..write_pos {
-            let sample = ring[rf * channels + channel];
+        for &sample in &lane[..write_pos] {
             let product = sample * window[i];
             fft_in[i] += product as f64;
             i += 1;
@@ -633,25 +645,37 @@ fn fill_fft_input(
     } else {
         for i in 0..nwin {
             let rf = (write_pos + i) % nwin;
-            let sample = ring[rf * channels + channel];
-            let product = sample * window[i];
+            let product = lane[rf] * window[i];
             fft_in[i & (FFT_N - 1)] += product as f64;
         }
     }
+}
+
+#[inline]
+fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]) -> [f64; FFT_N] {
+    let mut fft_in = [0.0f64; FFT_N];
+    fill_fft_input_into(ring, write_pos, channel, window, &mut fft_in);
     fft_in
 }
 
 #[inline]
-fn summarize_spectrum_magnitudes(
+fn summarize_spectrum_magnitudes_into(
     spec: &[C64; HALF_BINS + 1],
-) -> (f64, [f32; HALF_BINS + 1], usize) {
+    previous: &mut [C32; HALF_BINS + 1],
+    mags_f32: &mut [f32; HALF_BINS + 1],
+) -> (f64, usize, C32) {
     let mut total = 0.0f64;
-    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
     let mut interior_kmax = 1usize;
     let mut interior_mmax = f64::NEG_INFINITY;
+    let mut interior_previous = C32::default();
     let mut nyquist_magnitude = 0.0f64;
 
     for (k, bin) in spec.iter().enumerate() {
+        let old_previous = previous[k];
+        previous[k] = C32 {
+            re: bin.re as f32,
+            im: bin.im as f32,
+        };
         let m = if k == 0 || k == HALF_BINS {
             bin.re.abs()
         } else {
@@ -664,61 +688,45 @@ fn summarize_spectrum_magnitudes(
         } else if k != 0 && m > interior_mmax {
             interior_mmax = m;
             interior_kmax = k;
+            interior_previous = old_previous;
         }
     }
 
-    let kmax = if interior_mmax > nyquist_magnitude {
-        interior_kmax
+    if interior_mmax > nyquist_magnitude {
+        (total, interior_kmax, interior_previous)
     } else {
-        HALF_BINS
-    };
-    (total, mags_f32, kmax)
+        (total, HALF_BINS, C32::default())
+    }
 }
 
-fn analyze_channel(
-    ring: &[f32],
-    write_pos: usize,
-    channels: usize,
-    channel: usize,
-    window: &[f32],
-    previous: &[C32; HALF_BINS + 1],
+#[inline]
+fn summarize_spectrum_magnitudes(
+    spec: &[C64; HALF_BINS + 1],
+    previous: &mut [C32; HALF_BINS + 1],
+) -> (f64, [f32; HALF_BINS + 1], usize, C32) {
+    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+    let (total, kmax, previous_at_kmax) =
+        summarize_spectrum_magnitudes_into(spec, previous, &mut mags_f32);
+    (total, mags_f32, kmax, previous_at_kmax)
+}
+
+fn finish_spectral_peak(
+    spec: &[C64; HALF_BINS + 1],
+    total: f64,
+    mags_f32: &[f32; HALF_BINS + 1],
+    kmax: usize,
+    previous_at_kmax: C32,
     elapsed: usize,
-) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
-    #[cfg(feature = "strict-wdl")]
-    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
-    #[cfg(not(feature = "strict-wdl"))]
-    let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
-    #[cfg(feature = "strict-wdl")]
-    let spec = real_fft_1024(&mut fft_in);
-    #[cfg(not(feature = "strict-wdl"))]
-    let spec = real_fft_1024(&fft_in);
-
-    // REAPER stores the current complex spectrum to its f32 phase-history
-    // buffer before checking whether the magnitude sum is zero. Preserve that
-    // ordering so a zero frame still resets the next frame's phase reference.
-    let mut next = [C32::default(); HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        next[k] = C32 {
-            re: spec[k].re as f32,
-            im: spec[k].im as f32,
-        };
-    }
-
-    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
-    // REAPER's ordered floating-point branch proceeds only when total > 0.
-    // This rejects NaN as well as zero/negative totals.  With very large but
-    // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
-    // emits a zero spectral peak for those frames instead of a Nyquist/zero-
-    // density placeholder.
+) -> SpectralPeak {
     if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-        return (SpectralPeak::default(), next);
+        return SpectralPeak::default();
     }
 
     let best_bin = if kmax == HALF_BINS || elapsed == 0 {
         HALF_BINS as f64
     } else {
         let cur = spec[kmax];
-        let prev = previous[kmax];
+        let prev = previous_at_kmax;
         let phase_cur = cur.im.atan2(cur.re);
         let phase_prev = (prev.im as f64).atan2(prev.re as f64);
         let residual = wrap_phase(
@@ -731,25 +739,76 @@ fn analyze_channel(
         .trunc()
         .clamp(0.0, 32767.0) as u16;
 
-    // Exact formula recovered from REAPER 7.79 x86_64 disassembly. The total
-    // magnitude remains f64, while each magnitude in the second moment is
-    // explicitly rounded to f32 first.
     let mut spread = 0.0f64;
-    for k in 0..=HALF_BINS {
+    for (k, &magnitude) in mags_f32.iter().enumerate() {
         let d = k as f64 - best_bin;
-        spread += mags_f32[k] as f64 * d * d;
+        spread += magnitude as f64 * d * d;
     }
     let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
         .trunc()
         .clamp(0.0, 16383.0) as u16;
 
-    (
-        SpectralPeak {
-            frequency_hz,
-            density,
-        },
-        next,
-    )
+    SpectralPeak {
+        frequency_hz,
+        density,
+    }
+}
+
+fn analyze_spectrum(
+    spec: &[C64; HALF_BINS + 1],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+) -> SpectralPeak {
+    let (total, mags_f32, kmax, previous_at_kmax) = summarize_spectrum_magnitudes(spec, previous);
+    finish_spectral_peak(spec, total, &mags_f32, kmax, previous_at_kmax, elapsed)
+}
+
+#[cfg(feature = "strict-wdl")]
+fn analyze_spectrum_with_magnitude_scratch(
+    spec: &[C64; HALF_BINS + 1],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+    mags_f32: &mut [f32; HALF_BINS + 1],
+) -> SpectralPeak {
+    let (total, kmax, previous_at_kmax) =
+        summarize_spectrum_magnitudes_into(spec, previous, mags_f32);
+    finish_spectral_peak(spec, total, mags_f32, kmax, previous_at_kmax, elapsed)
+}
+
+fn analyze_channel(
+    ring: &[f32],
+    write_pos: usize,
+    channel: usize,
+    window: &[f32],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+) -> SpectralPeak {
+    #[cfg(feature = "strict-wdl")]
+    let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
+    #[cfg(not(feature = "strict-wdl"))]
+    let fft_in = fill_fft_input(ring, write_pos, channel, window);
+    #[cfg(feature = "strict-wdl")]
+    let spec = real_fft_1024(&mut fft_in);
+    #[cfg(not(feature = "strict-wdl"))]
+    let spec = real_fft_1024(&fft_in);
+    analyze_spectrum(&spec, previous, elapsed)
+}
+
+#[cfg(feature = "strict-wdl")]
+fn analyze_channel_with_scratch(
+    ring: &[f32],
+    write_pos: usize,
+    channel: usize,
+    window: &[f32],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+    fft_in: &mut [f64; FFT_N],
+    spec: &mut [C64; HALF_BINS + 1],
+    mags_f32: &mut [f32; HALF_BINS + 1],
+) -> SpectralPeak {
+    fill_fft_input_into(ring, write_pos, channel, window, fft_in);
+    real_fft_1024_into(fft_in, spec);
+    analyze_spectrum_with_magnitude_scratch(spec, previous, elapsed, mags_f32)
 }
 
 fn analyze_resampled_spectral(
@@ -833,7 +892,7 @@ fn analyze_resampled_spectral(
 
     'samples: for f in 0..out_frames {
         for c in 0..channels {
-            ring[write_pos * channels + c] = resampled[f * channels + c] as f32;
+            ring[c * nwin + write_pos] = resampled[f * channels + c] as f32;
         }
         write_pos += 1;
         if write_pos == nwin {
@@ -843,17 +902,8 @@ fn analyze_resampled_spectral(
         elapsed += 1;
         while phase >= hop {
             for c in 0..channels {
-                let (p, next) = analyze_channel(
-                    &ring,
-                    write_pos,
-                    channels,
-                    c,
-                    &window,
-                    &previous[c],
-                    elapsed,
-                );
+                let p = analyze_channel(&ring, write_pos, c, &window, &mut previous[c], elapsed);
                 out.push(p);
-                previous[c] = next;
             }
             elapsed = 0;
             phase -= hop;
@@ -1460,7 +1510,7 @@ mod strict_streaming_analysis_tests {
 mod spectral_fft_input_fast_path_tests {
     use super::*;
 
-    fn reference_fft_input(
+    fn reference_interleaved_fft_input(
         ring: &[f32],
         write_pos: usize,
         channels: usize,
@@ -1478,19 +1528,36 @@ mod spectral_fft_input_fast_path_tests {
         fft_in
     }
 
+    fn planarize(interleaved: &[f32], frames: usize, channels: usize) -> Vec<f32> {
+        let mut planar = vec![0.0f32; interleaved.len()];
+        for frame in 0..frames {
+            for channel in 0..channels {
+                planar[channel * frames + frame] = interleaved[frame * channels + channel];
+            }
+        }
+        planar
+    }
+
     #[test]
-    fn modulo_free_1024_gather_is_bit_identical() {
+    fn planar_modulo_free_1024_gather_is_bit_identical() {
         let channels = 6usize;
-        let ring: Vec<f32> = (0..FFT_N * channels)
+        let interleaved: Vec<f32> = (0..FFT_N * channels)
             .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
             .collect();
+        let planar = planarize(&interleaved, FFT_N, channels);
         let window: Vec<f32> = (0..FFT_N)
             .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
             .collect();
         for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
             for channel in 0..channels {
-                let fast = fill_fft_input(&ring, write_pos, channels, channel, &window);
-                let reference = reference_fft_input(&ring, write_pos, channels, channel, &window);
+                let fast = fill_fft_input(&planar, write_pos, channel, &window);
+                let reference = reference_interleaved_fft_input(
+                    &interleaved,
+                    write_pos,
+                    channels,
+                    channel,
+                    &window,
+                );
                 for (index, (&actual, &expected)) in fast.iter().zip(reference.iter()).enumerate() {
                     assert_eq!(
                         actual.to_bits(),
@@ -1532,10 +1599,34 @@ mod spectral_magnitude_summary_tests {
     }
 
     fn assert_same(spec: &[C64; HALF_BINS + 1]) {
-        let (actual_total, actual_f32, actual_kmax) = summarize_spectrum_magnitudes(spec);
+        let mut previous = [C32::default(); HALF_BINS + 1];
+        for (k, value) in previous.iter_mut().enumerate() {
+            value.re = (k as f32 + 0.25) * 0.03125;
+            value.im = -(k as f32 + 0.5) * 0.015625;
+        }
+        let previous_before = previous;
+        let (actual_total, actual_f32, actual_kmax, actual_previous) =
+            summarize_spectrum_magnitudes(spec, &mut previous);
         let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);
         assert_eq!(actual_total.to_bits(), expected_total.to_bits());
         assert_eq!(actual_kmax, expected_kmax);
+        for (k, current) in previous.iter().enumerate() {
+            assert_eq!(current.re.to_bits(), (spec[k].re as f32).to_bits());
+            assert_eq!(current.im.to_bits(), (spec[k].im as f32).to_bits());
+        }
+        if actual_kmax == HALF_BINS {
+            assert_eq!(actual_previous.re.to_bits(), C32::default().re.to_bits());
+            assert_eq!(actual_previous.im.to_bits(), C32::default().im.to_bits());
+        } else {
+            assert_eq!(
+                actual_previous.re.to_bits(),
+                previous_before[actual_kmax].re.to_bits()
+            );
+            assert_eq!(
+                actual_previous.im.to_bits(),
+                previous_before[actual_kmax].im.to_bits()
+            );
+        }
         for (index, (&actual, &expected)) in actual_f32.iter().zip(expected_f32.iter()).enumerate()
         {
             assert_eq!(
