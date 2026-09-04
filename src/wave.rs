@@ -1,5 +1,6 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, Version};
+use crate::sample_source::F32SampleSource;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -266,13 +267,23 @@ pub fn build_wave_layers_f32(
     divisions: &[u32],
     encoding: WaveEncoding,
 ) -> Result<Vec<GeneratedLayer>> {
+    build_wave_layers_f32_source(pcm, frames, channels, divisions, encoding)
+}
+
+pub(crate) fn build_wave_layers_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+    encoding: WaveEncoding,
+) -> Result<Vec<GeneratedLayer>> {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidArgument("channels=0"));
     }
     let required = frames
         .checked_mul(channels)
         .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
-    if pcm.len() < required {
+    if pcm.sample_len() < required {
         return Err(ReaPeaksError::InvalidArgument(
             "PCM buffer shorter than frames*channels",
         ));
@@ -306,7 +317,7 @@ pub fn build_wave_layers_f32(
                     WaveEncoding::Rpkn | WaveEncoding::Rpkl => (-1.0f32, 1.0f32),
                 };
                 for f in s0..s1 {
-                    let v = pcm[f * channels + c];
+                    let v = pcm.sample_f32(f * channels + c);
                     if v.is_nan() {
                         continue;
                     }
