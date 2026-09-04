@@ -1,9 +1,16 @@
 use std::path::Path;
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/rpkx_file_linux.c");
     println!("cargo:rerun-if-changed=src/strict_wdl.cpp");
     println!("cargo:rerun-if-changed=third_party/WDL/WDL/fft.c");
     println!("cargo:rerun-if-changed=third_party/WDL/WDL/resample.cpp");
+
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        cc::Build::new()
+            .file("src/rpkx_file_linux.c")
+            .compile("reapeaks_rpkx_file_linux");
+    }
 
     if std::env::var_os("CARGO_FEATURE_STRICT_WDL").is_none() {
         return;
