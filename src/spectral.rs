@@ -353,6 +353,226 @@ fn resample_f32_source_to_analysis<S: F32SampleSource + ?Sized>(
     })
 }
 
+#[cfg(feature = "strict-wdl")]
+struct StreamingSpectralAnalyzer {
+    channels: usize,
+    hop: f64,
+    phase: f64,
+    window: Vec<f32>,
+    ring: Vec<f32>,
+    write_pos: usize,
+    elapsed: usize,
+    previous: Vec<[C32; HALF_BINS + 1]>,
+    out: Vec<SpectralPeak>,
+    expected: Option<usize>,
+}
+
+#[cfg(feature = "strict-wdl")]
+impl StreamingSpectralAnalyzer {
+    fn new(channels: usize, source_rate: u32, division: u32, expected: Option<usize>) -> Self {
+        let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
+        let rounded = (hop + 0.5).floor() as i32;
+        let nwin = rounded.max(1024) as usize;
+        let phase = if rounded <= 1023 {
+            (rounded - 1024) as f64 * 0.5
+        } else {
+            0.0
+        };
+        let window: Vec<f32> = if nwin <= 1 {
+            vec![1.0]
+        } else {
+            let half = nwin / 2;
+            let step = 2.0 * PI / (nwin - 1) as f64;
+            let mut table = Vec::with_capacity(half + 1);
+            let mut angle = 0.0f64;
+            for _ in 0..=half {
+                table.push((0.5 - 0.5 * angle.cos()) as f32);
+                angle += step;
+            }
+            (0..nwin)
+                .map(|i| {
+                    let j = if i <= half { i } else { nwin - i };
+                    table[j]
+                })
+                .collect()
+        };
+        let output_capacity = expected
+            .and_then(|count| count.checked_mul(channels))
+            .unwrap_or(0);
+        Self {
+            channels,
+            hop,
+            phase,
+            window,
+            ring: vec![0.0f32; nwin * channels],
+            write_pos: 0,
+            elapsed: 0,
+            previous: vec![[C32::default(); HALF_BINS + 1]; channels],
+            out: Vec::with_capacity(output_capacity),
+            expected,
+        }
+    }
+
+    fn push_interleaved(&mut self, samples: &[f64]) -> bool {
+        debug_assert_eq!(samples.len() % self.channels, 0);
+        for frame in samples.chunks_exact(self.channels) {
+            for (channel, &sample) in frame.iter().enumerate() {
+                self.ring[self.write_pos * self.channels + channel] = sample as f32;
+            }
+            self.write_pos += 1;
+            if self.write_pos == self.window.len() {
+                self.write_pos = 0;
+            }
+            self.phase += 1.0;
+            self.elapsed += 1;
+            while self.phase >= self.hop {
+                for channel in 0..self.channels {
+                    let (peak, next) = analyze_channel(
+                        &self.ring,
+                        self.write_pos,
+                        self.channels,
+                        channel,
+                        &self.window,
+                        &self.previous[channel],
+                        self.elapsed,
+                    );
+                    self.out.push(peak);
+                    self.previous[channel] = next;
+                }
+                self.elapsed = 0;
+                self.phase -= self.hop;
+                if self
+                    .expected
+                    .is_some_and(|expected| self.out.len() / self.channels >= expected)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn into_output(mut self) -> Vec<SpectralPeak> {
+        if let Some(expected) = self.expected {
+            self.out.truncate(expected.saturating_mul(self.channels));
+        }
+        self.out
+    }
+}
+
+#[cfg(feature = "strict-wdl")]
+fn analyze_streaming_samples<F>(
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+    expected_mode: ExpectedCount,
+    mut sample: F,
+) -> Result<Vec<SpectralPeak>>
+where
+    F: FnMut(usize) -> f64,
+{
+    unsafe extern "C" {
+        fn rpk_wdl_resampler_create(
+            channels: i32,
+            input_rate: f64,
+            output_rate: f64,
+        ) -> *mut c_void;
+        fn rpk_wdl_resampler_destroy(state: *mut c_void);
+        fn rpk_wdl_resampler_prepare(
+            state: *mut c_void,
+            request_frames: i32,
+            input_buffer: *mut *mut f64,
+        ) -> i32;
+        fn rpk_wdl_resampler_out(
+            state: *mut c_void,
+            output: *mut f64,
+            input_frames: i32,
+            output_capacity_frames: i32,
+        ) -> i32;
+    }
+
+    struct ResamplerGuard(*mut c_void);
+    impl Drop for ResamplerGuard {
+        fn drop(&mut self) {
+            unsafe { rpk_wdl_resampler_destroy(self.0) };
+        }
+    }
+
+    let expected = match expected_mode {
+        ExpectedCount::SourceDomain => {
+            if frames <= 1024 {
+                return Ok(Vec::new());
+            }
+            Some((frames - 1024) / division as usize)
+        }
+        ExpectedCount::Exact(expected) => Some(expected),
+        ExpectedCount::AnalysisDomain => None,
+    };
+    if expected == Some(0) || frames == 0 || channels == 0 {
+        return Ok(Vec::new());
+    }
+
+    let state =
+        unsafe { rpk_wdl_resampler_create(channels as i32, source_rate as f64, ANALYSIS_RATE) };
+    if state.is_null() {
+        return Ok(Vec::new());
+    }
+    let _guard = ResamplerGuard(state);
+
+    let cap_frames =
+        ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize).saturating_add(4096);
+    let block_frames = (2048 / channels).max(1);
+    let mut scratch = vec![0.0f64; block_frames.saturating_mul(channels)];
+    let mut analyzer = StreamingSpectralAnalyzer::new(channels, source_rate, division, expected);
+    let mut in_pos = 0usize;
+    let mut out_pos = 0usize;
+
+    while in_pos < frames && out_pos < cap_frames {
+        let request_frames = block_frames.min(frames - in_pos);
+        let mut inbuf = std::ptr::null_mut();
+        let wanted = unsafe { rpk_wdl_resampler_prepare(state, request_frames as i32, &mut inbuf) };
+        if wanted <= 0 || inbuf.is_null() {
+            return Ok(Vec::new());
+        }
+        let avail = (wanted as usize).min(frames - in_pos);
+        if avail == 0 {
+            return Ok(Vec::new());
+        }
+
+        let first_sample = in_pos.saturating_mul(channels);
+        let sample_count = avail.saturating_mul(channels);
+        for offset in 0..sample_count {
+            unsafe {
+                *inbuf.add(offset) = sample(first_sample + offset);
+            }
+        }
+
+        let out_cap = block_frames.min(cap_frames - out_pos);
+        if out_cap == 0 {
+            return Ok(Vec::new());
+        }
+        let got = unsafe {
+            rpk_wdl_resampler_out(state, scratch.as_mut_ptr(), avail as i32, out_cap as i32)
+        };
+        if got < 0 || got as usize > out_cap {
+            return Ok(Vec::new());
+        }
+
+        let got = got as usize;
+        if analyzer.push_interleaved(&scratch[..got.saturating_mul(channels)]) {
+            break;
+        }
+        in_pos += avail;
+        out_pos += got;
+        if avail < wanted as usize {
+            break;
+        }
+    }
+
+    Ok(analyzer.into_output())
+}
+
 #[cfg(not(feature = "strict-wdl"))]
 fn resample_to_analysis(
     input: &[f64],
@@ -385,6 +605,76 @@ fn resample_to_analysis(
     out
 }
 
+#[inline]
+fn fill_fft_input(
+    ring: &[f32],
+    write_pos: usize,
+    channels: usize,
+    channel: usize,
+    window: &[f32],
+) -> [f64; FFT_N] {
+    let nwin = window.len();
+    let mut fft_in = [0.0f64; FFT_N];
+    if nwin == FFT_N {
+        let mut i = 0usize;
+        for rf in write_pos..FFT_N {
+            let sample = ring[rf * channels + channel];
+            // Preserve REAPER's scalar f32 multiply before promotion.
+            let product = sample * window[i];
+            fft_in[i] += product as f64;
+            i += 1;
+        }
+        for rf in 0..write_pos {
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i] += product as f64;
+            i += 1;
+        }
+    } else {
+        for i in 0..nwin {
+            let rf = (write_pos + i) % nwin;
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i & (FFT_N - 1)] += product as f64;
+        }
+    }
+    fft_in
+}
+
+#[inline]
+fn summarize_spectrum_magnitudes(
+    spec: &[C64; HALF_BINS + 1],
+) -> (f64, [f32; HALF_BINS + 1], usize) {
+    let mut total = 0.0f64;
+    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+    let mut interior_kmax = 1usize;
+    let mut interior_mmax = f64::NEG_INFINITY;
+    let mut nyquist_magnitude = 0.0f64;
+
+    for (k, bin) in spec.iter().enumerate() {
+        let m = if k == 0 || k == HALF_BINS {
+            bin.re.abs()
+        } else {
+            (bin.re * bin.re + bin.im * bin.im).sqrt()
+        };
+        total += m;
+        mags_f32[k] = m as f32;
+        if k == HALF_BINS {
+            nyquist_magnitude = m;
+        } else if k != 0 && m > interior_mmax {
+            interior_mmax = m;
+            interior_kmax = k;
+        }
+    }
+
+    let kmax = if interior_mmax > nyquist_magnitude {
+        interior_kmax
+    } else {
+        HALF_BINS
+    };
+    (total, mags_f32, kmax)
+}
+
 fn analyze_channel(
     ring: &[f32],
     write_pos: usize,
@@ -394,16 +684,10 @@ fn analyze_channel(
     previous: &[C32; HALF_BINS + 1],
     elapsed: usize,
 ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
-    let nwin = window.len();
-    let mut fft_in = [0.0f64; FFT_N];
-    for i in 0..nwin {
-        let rf = (write_pos + i) % nwin;
-        let sample = ring[rf * channels + channel];
-        // REAPER 7.79 disassembly uses a scalar f32 multiply here, then
-        // promotes the result to double before accumulating the FFT input.
-        let product = sample * window[i];
-        fft_in[i & (FFT_N - 1)] += product as f64;
-    }
+    #[cfg(feature = "strict-wdl")]
+    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+    #[cfg(not(feature = "strict-wdl"))]
+    let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
     #[cfg(feature = "strict-wdl")]
     let spec = real_fft_1024(&mut fft_in);
     #[cfg(not(feature = "strict-wdl"))]
@@ -420,19 +704,7 @@ fn analyze_channel(
         };
     }
 
-    let mut mags = [0.0f64; HALF_BINS + 1];
-    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        let m = if k == 0 || k == HALF_BINS {
-            spec[k].re.abs()
-        } else {
-            (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
-        };
-        mags[k] = m;
-        mags_f32[k] = m as f32;
-    }
-
-    let total: f64 = mags.iter().sum();
+    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
     // REAPER's ordered floating-point branch proceeds only when total > 0.
     // This rejects NaN as well as zero/negative totals.  With very large but
     // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
@@ -440,17 +712,6 @@ fn analyze_channel(
     // density placeholder.
     if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return (SpectralPeak::default(), next);
-    }
-
-    // REAPER initializes the candidate to Nyquist and scans bins 1..511.
-    // DC participates in density but not dominant-frequency selection.
-    let mut kmax = HALF_BINS;
-    let mut mmax = mags[HALF_BINS];
-    for k in 1..HALF_BINS {
-        if mags[k] > mmax {
-            mmax = mags[k];
-            kmax = k;
-        }
     }
 
     let best_bin = if kmax == HALF_BINS || elapsed == 0 {
@@ -750,14 +1011,13 @@ pub(crate) fn build_fine_spectral_analysis_counted(
             "PCM buffer shorter than frames*channels",
         ));
     }
-    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::AnalysisDomain,
+        |index| pcm[index] as f64 / 32768.0,
     )
 }
 
@@ -780,14 +1040,13 @@ pub(crate) fn build_fine_spectral_f32_analysis_counted(
             "PCM buffer shorter than frames*channels",
         ));
     }
-    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::AnalysisDomain,
+        |index| f64::from(pcm[index]),
     )
 }
 
@@ -813,14 +1072,13 @@ pub(crate) fn build_fine_spectral_f32_source_analysis_counted<S: F32SampleSource
             "PCM buffer shorter than frames*channels",
         ));
     }
-    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::AnalysisDomain,
+        |index| f64::from(pcm.sample_f32(index)),
     )
 }
 
@@ -847,14 +1105,13 @@ pub(crate) fn build_fine_spectral_with_expected(
     if division == 0 || source_rate == 0 {
         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
     }
-    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::Exact(expected),
+        |index| pcm[index] as f64 / 32768.0,
     )
 }
 
@@ -881,14 +1138,13 @@ pub(crate) fn build_fine_spectral_f32_with_expected(
     if division == 0 || source_rate == 0 {
         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
     }
-    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::Exact(expected),
+        |index| f64::from(pcm[index]),
     )
 }
 
@@ -918,14 +1174,13 @@ pub(crate) fn build_fine_spectral_f32_source_with_expected<S: F32SampleSource + 
     if division == 0 || source_rate == 0 {
         return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
     }
-    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
-    analyze_resampled_spectral(
-        &resampled,
+    analyze_streaming_samples(
         frames,
         channels,
         source_rate,
         division,
         ExpectedCount::Exact(expected),
+        |index| f64::from(pcm.sample_f32(index)),
     )
 }
 
@@ -970,6 +1225,68 @@ pub fn aggregate_spectral_from_fine(
     out
 }
 
+pub(crate) fn encode_spectral_layer_from_fine(
+    fine: &[SpectralPeak],
+    channels: usize,
+    ratio: usize,
+    output_count: usize,
+) -> GeneratedLayer {
+    if channels == 0 || ratio == 0 {
+        return GeneratedLayer {
+            header: LayerHeader {
+                division: TOKEN_SPECTRAL,
+                peak_count: 0,
+            },
+            bytes: Vec::new(),
+        };
+    }
+    let fine_count = fine.len() / channels;
+    let count = output_count.min(fine_count / ratio);
+    let mut bytes = Vec::with_capacity(
+        count
+            .saturating_mul(channels)
+            .saturating_mul(std::mem::size_of::<u32>()),
+    );
+
+    if ratio == 1 {
+        for peak in &fine[..count * channels] {
+            bytes.extend_from_slice(&peak.code().to_le_bytes());
+        }
+    } else {
+        for output_index in 0..count {
+            let first = output_index * ratio;
+            let last = first + ratio;
+            for channel in 0..channels {
+                let mut sum_density = 0u64;
+                let mut best = SpectralPeak::default();
+                let mut best_score = 0u64;
+                for fine_index in first..last {
+                    let peak = fine[fine_index * channels + channel];
+                    sum_density += u64::from(peak.density);
+                    let score = u64::from(peak.density) * (32768u64 - u64::from(peak.frequency_hz));
+                    if score > best_score {
+                        best_score = score;
+                        best = peak;
+                    }
+                }
+                let peak = SpectralPeak {
+                    frequency_hz: best.frequency_hz,
+                    density: (sum_density / ratio as u64).min(16383) as u16,
+                };
+                bytes.extend_from_slice(&peak.code().to_le_bytes());
+            }
+        }
+    }
+
+    GeneratedLayer {
+        header: LayerHeader {
+            division: TOKEN_SPECTRAL,
+            peak_count: count as u32,
+        },
+        bytes,
+    }
+}
+
 fn assemble_spectral_layers(
     fine: &[SpectralPeak],
     frames: usize,
@@ -980,36 +1297,19 @@ fn assemble_spectral_layers(
         return Ok(Vec::new());
     }
     let fine_div = divisions[0];
-    let fine_count = if channels == 0 {
-        0
-    } else {
-        fine.len() / channels
-    };
     let mut out = Vec::with_capacity(divisions.len());
 
-    for (li, &div) in divisions.iter().enumerate() {
+    for &div in divisions {
         if div == 0 || div % fine_div != 0 {
             return Err(ReaPeaksError::Unsupported(
                 "spectral divisions must be nonzero multiples of fine division",
             ));
         }
+        let ratio = (div / fine_div) as usize;
         let expected = frames.saturating_sub(1024) / div as usize;
-        let peaks = if li == 0 {
-            fine[..expected.min(fine_count) * channels].to_vec()
-        } else {
-            aggregate_spectral_from_fine(fine, channels, (div / fine_div) as usize, expected)
-        };
-        let mut bytes = Vec::with_capacity(peaks.len() * 4);
-        for p in &peaks {
-            bytes.extend_from_slice(&p.code().to_le_bytes());
-        }
-        out.push(GeneratedLayer {
-            header: LayerHeader {
-                division: TOKEN_SPECTRAL,
-                peak_count: (peaks.len() / channels) as u32,
-            },
-            bytes,
-        });
+        out.push(encode_spectral_layer_from_fine(
+            fine, channels, ratio, expected,
+        ));
     }
     Ok(out)
 }
@@ -1092,6 +1392,227 @@ mod strict_streaming_resample_tests {
             let staged = resample_to_analysis(&staged_source, frames, channels, rate);
             let direct = resample_f32_source_to_analysis(&pcm[..], frames, channels, rate);
             assert_same_f64_stream(&staged, &direct);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "strict-wdl"))]
+mod strict_streaming_analysis_tests {
+    use super::*;
+
+    #[test]
+    fn streaming_analysis_matches_staged_analysis() {
+        for &(rate, channels, frames) in &[
+            (44_100u32, 1usize, 9_731usize),
+            (48_000, 2, 12_345),
+            (96_000, 6, 8_123),
+        ] {
+            let division = (rate / 300).max(1);
+            let pcm: Vec<i16> = (0..frames * channels)
+                .map(|i| ((i as i32 * 7_919 + 12_347) as i16).wrapping_sub(8_123))
+                .collect();
+            let staged_resampled = resample_i16_to_analysis(&pcm, frames, channels, rate);
+            let staged = analyze_resampled_spectral(
+                &staged_resampled,
+                frames,
+                channels,
+                rate,
+                division,
+                ExpectedCount::AnalysisDomain,
+            )
+            .unwrap();
+            let streamed = analyze_streaming_samples(
+                frames,
+                channels,
+                rate,
+                division,
+                ExpectedCount::AnalysisDomain,
+                |index| pcm[index] as f64 / 32768.0,
+            )
+            .unwrap();
+            assert_eq!(streamed, staged, "rate={rate} channels={channels}");
+
+            let exact = (staged.len() / channels).saturating_sub(1);
+            let staged_exact = analyze_resampled_spectral(
+                &staged_resampled,
+                frames,
+                channels,
+                rate,
+                division,
+                ExpectedCount::Exact(exact),
+            )
+            .unwrap();
+            let streamed_exact = analyze_streaming_samples(
+                frames,
+                channels,
+                rate,
+                division,
+                ExpectedCount::Exact(exact),
+                |index| pcm[index] as f64 / 32768.0,
+            )
+            .unwrap();
+            assert_eq!(streamed_exact, staged_exact);
+        }
+    }
+}
+
+#[cfg(test)]
+mod spectral_fft_input_fast_path_tests {
+    use super::*;
+
+    fn reference_fft_input(
+        ring: &[f32],
+        write_pos: usize,
+        channels: usize,
+        channel: usize,
+        window: &[f32],
+    ) -> [f64; FFT_N] {
+        let nwin = window.len();
+        let mut fft_in = [0.0f64; FFT_N];
+        for i in 0..nwin {
+            let rf = (write_pos + i) % nwin;
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i & (FFT_N - 1)] += product as f64;
+        }
+        fft_in
+    }
+
+    #[test]
+    fn modulo_free_1024_gather_is_bit_identical() {
+        let channels = 6usize;
+        let ring: Vec<f32> = (0..FFT_N * channels)
+            .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
+            .collect();
+        let window: Vec<f32> = (0..FFT_N)
+            .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
+            .collect();
+        for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
+            for channel in 0..channels {
+                let fast = fill_fft_input(&ring, write_pos, channels, channel, &window);
+                let reference = reference_fft_input(&ring, write_pos, channels, channel, &window);
+                for (index, (&actual, &expected)) in fast.iter().zip(reference.iter()).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "write_pos={write_pos} channel={channel} bin={index}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod spectral_magnitude_summary_tests {
+    use super::*;
+
+    fn reference_summary(spec: &[C64; HALF_BINS + 1]) -> (f64, [f32; HALF_BINS + 1], usize) {
+        let mut mags = [0.0f64; HALF_BINS + 1];
+        let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+        for k in 0..=HALF_BINS {
+            let m = if k == 0 || k == HALF_BINS {
+                spec[k].re.abs()
+            } else {
+                (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+            };
+            mags[k] = m;
+            mags_f32[k] = m as f32;
+        }
+        let total: f64 = mags.iter().sum();
+        let mut kmax = HALF_BINS;
+        let mut mmax = mags[HALF_BINS];
+        for k in 1..HALF_BINS {
+            if mags[k] > mmax {
+                mmax = mags[k];
+                kmax = k;
+            }
+        }
+        (total, mags_f32, kmax)
+    }
+
+    fn assert_same(spec: &[C64; HALF_BINS + 1]) {
+        let (actual_total, actual_f32, actual_kmax) = summarize_spectrum_magnitudes(spec);
+        let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);
+        assert_eq!(actual_total.to_bits(), expected_total.to_bits());
+        assert_eq!(actual_kmax, expected_kmax);
+        for (index, (&actual, &expected)) in actual_f32.iter().zip(expected_f32.iter()).enumerate()
+        {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "magnitude bin={index}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_summary_matches_reference_bits() {
+        let mut spec = [C64::default(); HALF_BINS + 1];
+        for (k, value) in spec.iter_mut().enumerate() {
+            value.re = ((k * 37 + 11) as f64).sin() * (1.0 + k as f64 / 17.0);
+            value.im = ((k * 53 + 7) as f64).cos() * (0.5 + k as f64 / 31.0);
+        }
+        assert_same(&spec);
+
+        spec.fill(C64::default());
+        spec[1].re = 3.0;
+        spec[2].re = 3.0;
+        spec[HALF_BINS].re = 2.0;
+        assert_same(&spec);
+
+        spec[17].re = f64::NAN;
+        spec[31].im = f64::INFINITY;
+        assert_same(&spec);
+    }
+}
+
+#[cfg(test)]
+mod spectral_direct_encode_tests {
+    use super::*;
+
+    fn reference_layer(
+        fine: &[SpectralPeak],
+        channels: usize,
+        ratio: usize,
+        output_count: usize,
+    ) -> GeneratedLayer {
+        let fine_count = fine.len() / channels;
+        let count = output_count.min(fine_count / ratio);
+        let peaks = if ratio == 1 {
+            fine[..count * channels].to_vec()
+        } else {
+            aggregate_spectral_from_fine(fine, channels, ratio, count)
+        };
+        let mut bytes = Vec::with_capacity(peaks.len() * 4);
+        for peak in &peaks {
+            bytes.extend_from_slice(&peak.code().to_le_bytes());
+        }
+        GeneratedLayer {
+            header: LayerHeader {
+                division: TOKEN_SPECTRAL,
+                peak_count: (peaks.len() / channels) as u32,
+            },
+            bytes,
+        }
+    }
+
+    #[test]
+    fn direct_encode_matches_aggregate_then_encode() {
+        let channels = 2usize;
+        let frames = 60usize;
+        let fine: Vec<SpectralPeak> = (0..frames * channels)
+            .map(|index| SpectralPeak {
+                frequency_hz: ((index * 977 + 31) % 20_000) as u16,
+                density: ((index * 613 + 17) % 16_384) as u16,
+            })
+            .collect();
+        for &(ratio, output_count) in &[(1usize, 57usize), (3, 19), (5, 11), (15, 4)] {
+            let actual = encode_spectral_layer_from_fine(&fine, channels, ratio, output_count);
+            let expected = reference_layer(&fine, channels, ratio, output_count);
+            assert_eq!(actual.header.division, expected.header.division);
+            assert_eq!(actual.header.peak_count, expected.header.peak_count);
+            assert_eq!(actual.bytes, expected.bytes, "ratio={ratio}");
         }
     }
 }

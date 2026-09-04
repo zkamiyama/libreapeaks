@@ -185,24 +185,6 @@ fn validate_divisions(divisions: &[u32]) -> Result<u32> {
     Ok(fine_div)
 }
 
-fn encode_layer(peaks: &[SpectralPeak], channels: usize) -> GeneratedLayer {
-    let mut bytes = Vec::with_capacity(peaks.len() * 4);
-    for p in peaks {
-        bytes.extend_from_slice(&p.code().to_le_bytes());
-    }
-    GeneratedLayer {
-        header: LayerHeader {
-            division: TOKEN_SPECTRAL,
-            peak_count: if channels == 0 {
-                0
-            } else {
-                (peaks.len() / channels) as u32
-            },
-        },
-        bytes,
-    }
-}
-
 fn assemble_high_rate_layers(
     fine: &[SpectralPeak],
     channels: usize,
@@ -212,18 +194,15 @@ fn assemble_high_rate_layers(
     let fine_count = fine.len() / channels;
     let mut out = Vec::with_capacity(divisions.len());
 
-    for (li, &div) in divisions.iter().enumerate() {
+    for &div in divisions {
         let ratio = (div / fine_div) as usize;
-        let peaks = if li == 0 {
-            fine.to_vec()
-        } else {
-            // REAPER's mipmaps are assembled directly from the fine spectral
-            // stream. Counts are therefore floor(fine_count / ratio), not a
-            // second source-domain scheduler calculation.
-            let count = fine_count / ratio;
-            crate::spectral_base::aggregate_spectral_from_fine(fine, channels, ratio, count)
-        };
-        out.push(encode_layer(&peaks, channels));
+        // REAPER's mipmaps are assembled directly from the fine spectral
+        // stream. Counts are therefore floor(fine_count / ratio), not a
+        // second source-domain scheduler calculation.
+        let count = fine_count / ratio;
+        out.push(crate::spectral_base::encode_spectral_layer_from_fine(
+            fine, channels, ratio, count,
+        ));
     }
     Ok(out)
 }
