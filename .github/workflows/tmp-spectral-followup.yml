@@ -25,7 +25,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Apply step 1 - stream strict spectral resampling into analyzer
+      - name: Apply step 2 - remove modulo from the 1024-sample FFT gather
         shell: bash
         run: |
           python3 - <<'PY'
@@ -33,450 +33,145 @@ jobs:
 
           path = Path("src/spectral.rs")
           text = path.read_text()
-          marker = '''#[cfg(not(feature = "strict-wdl"))]
-          fn resample_to_analysis(
-          '''.replace('          ', '')
-          if marker not in text:
-              raise SystemExit("step1 insertion marker not found")
-
-          helper = r'''#[cfg(feature = "strict-wdl")]
-          struct StreamingSpectralAnalyzer {
-              channels: usize,
-              hop: f64,
-              phase: f64,
-              window: Vec<f32>,
-              ring: Vec<f32>,
+          old = r'''fn analyze_channel(
+              ring: &[f32],
               write_pos: usize,
-              elapsed: usize,
-              previous: Vec<[C32; HALF_BINS + 1]>,
-              out: Vec<SpectralPeak>,
-              expected: Option<usize>,
-          }
-
-          #[cfg(feature = "strict-wdl")]
-          impl StreamingSpectralAnalyzer {
-              fn new(
-                  channels: usize,
-                  source_rate: u32,
-                  division: u32,
-                  expected: Option<usize>,
-              ) -> Self {
-                  let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
-                  let rounded = (hop + 0.5).floor() as i32;
-                  let nwin = rounded.max(1024) as usize;
-                  let phase = if rounded <= 1023 {
-                      (rounded - 1024) as f64 * 0.5
-                  } else {
-                      0.0
-                  };
-                  let window: Vec<f32> = if nwin <= 1 {
-                      vec![1.0]
-                  } else {
-                      let half = nwin / 2;
-                      let step = 2.0 * PI / (nwin - 1) as f64;
-                      let mut table = Vec::with_capacity(half + 1);
-                      let mut angle = 0.0f64;
-                      for _ in 0..=half {
-                          table.push((0.5 - 0.5 * angle.cos()) as f32);
-                          angle += step;
-                      }
-                      (0..nwin)
-                          .map(|i| {
-                              let j = if i <= half { i } else { nwin - i };
-                              table[j]
-                          })
-                          .collect()
-                  };
-                  let output_capacity = expected
-                      .and_then(|count| count.checked_mul(channels))
-                      .unwrap_or(0);
-                  Self {
-                      channels,
-                      hop,
-                      phase,
-                      window,
-                      ring: vec![0.0f32; nwin * channels],
-                      write_pos: 0,
-                      elapsed: 0,
-                      previous: vec![[C32::default(); HALF_BINS + 1]; channels],
-                      out: Vec::with_capacity(output_capacity),
-                      expected,
-                  }
-              }
-
-              fn push_interleaved(&mut self, samples: &[f64]) -> bool {
-                  debug_assert_eq!(samples.len() % self.channels, 0);
-                  for frame in samples.chunks_exact(self.channels) {
-                      for (channel, &sample) in frame.iter().enumerate() {
-                          self.ring[self.write_pos * self.channels + channel] = sample as f32;
-                      }
-                      self.write_pos += 1;
-                      if self.write_pos == self.window.len() {
-                          self.write_pos = 0;
-                      }
-                      self.phase += 1.0;
-                      self.elapsed += 1;
-                      while self.phase >= self.hop {
-                          for channel in 0..self.channels {
-                              let (peak, next) = analyze_channel(
-                                  &self.ring,
-                                  self.write_pos,
-                                  self.channels,
-                                  channel,
-                                  &self.window,
-                                  &self.previous[channel],
-                                  self.elapsed,
-                              );
-                              self.out.push(peak);
-                              self.previous[channel] = next;
-                          }
-                          self.elapsed = 0;
-                          self.phase -= self.hop;
-                          if self.expected.is_some_and(|expected| {
-                              self.out.len() / self.channels >= expected
-                          }) {
-                              return true;
-                          }
-                      }
-                  }
-                  false
-              }
-
-              fn into_output(mut self) -> Vec<SpectralPeak> {
-                  if let Some(expected) = self.expected {
-                      self.out.truncate(expected.saturating_mul(self.channels));
-                  }
-                  self.out
-              }
-          }
-
-          #[cfg(feature = "strict-wdl")]
-          fn analyze_streaming_samples<F>(
-              frames: usize,
               channels: usize,
-              source_rate: u32,
-              division: u32,
-              expected_mode: ExpectedCount,
-              mut sample: F,
-          ) -> Result<Vec<SpectralPeak>>
-          where
-              F: FnMut(usize) -> f64,
-          {
-              unsafe extern "C" {
-                  fn rpk_wdl_resampler_create(
-                      channels: i32,
-                      input_rate: f64,
-                      output_rate: f64,
-                  ) -> *mut c_void;
-                  fn rpk_wdl_resampler_destroy(state: *mut c_void);
-                  fn rpk_wdl_resampler_prepare(
-                      state: *mut c_void,
-                      request_frames: i32,
-                      input_buffer: *mut *mut f64,
-                  ) -> i32;
-                  fn rpk_wdl_resampler_out(
-                      state: *mut c_void,
-                      output: *mut f64,
-                      input_frames: i32,
-                      output_capacity_frames: i32,
-                  ) -> i32;
+              channel: usize,
+              window: &[f32],
+              previous: &[C32; HALF_BINS + 1],
+              elapsed: usize,
+          ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
+              let nwin = window.len();
+              let mut fft_in = [0.0f64; FFT_N];
+              for i in 0..nwin {
+                  let rf = (write_pos + i) % nwin;
+                  let sample = ring[rf * channels + channel];
+                  // REAPER 7.79 disassembly uses a scalar f32 multiply here, then
+                  // promotes the result to double before accumulating the FFT input.
+                  let product = sample * window[i];
+                  fft_in[i & (FFT_N - 1)] += product as f64;
               }
-
-              struct ResamplerGuard(*mut c_void);
-              impl Drop for ResamplerGuard {
-                  fn drop(&mut self) {
-                      unsafe { rpk_wdl_resampler_destroy(self.0) };
+          '''.replace('          ', '')
+          new = r'''#[inline]
+          fn fill_fft_input(
+              ring: &[f32],
+              write_pos: usize,
+              channels: usize,
+              channel: usize,
+              window: &[f32],
+          ) -> [f64; FFT_N] {
+              let nwin = window.len();
+              let mut fft_in = [0.0f64; FFT_N];
+              if nwin == FFT_N {
+                  let mut i = 0usize;
+                  for rf in write_pos..FFT_N {
+                      let sample = ring[rf * channels + channel];
+                      // Preserve REAPER's scalar f32 multiply before promotion.
+                      let product = sample * window[i];
+                      fft_in[i] += product as f64;
+                      i += 1;
                   }
-              }
-
-              let expected = match expected_mode {
-                  ExpectedCount::SourceDomain => {
-                      if frames <= 1024 {
-                          return Ok(Vec::new());
-                      }
-                      Some((frames - 1024) / division as usize)
+                  for rf in 0..write_pos {
+                      let sample = ring[rf * channels + channel];
+                      let product = sample * window[i];
+                      fft_in[i] += product as f64;
+                      i += 1;
                   }
-                  ExpectedCount::Exact(expected) => Some(expected),
-                  ExpectedCount::AnalysisDomain => None,
-              };
-              if expected == Some(0) || frames == 0 || channels == 0 {
-                  return Ok(Vec::new());
-              }
-
-              let state = unsafe {
-                  rpk_wdl_resampler_create(channels as i32, source_rate as f64, ANALYSIS_RATE)
-              };
-              if state.is_null() {
-                  return Ok(Vec::new());
-              }
-              let _guard = ResamplerGuard(state);
-
-              let cap_frames = ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize)
-                  .saturating_add(4096);
-              let block_frames = (2048 / channels).max(1);
-              let mut scratch = vec![0.0f64; block_frames.saturating_mul(channels)];
-              let mut analyzer =
-                  StreamingSpectralAnalyzer::new(channels, source_rate, division, expected);
-              let mut in_pos = 0usize;
-              let mut out_pos = 0usize;
-
-              while in_pos < frames && out_pos < cap_frames {
-                  let request_frames = block_frames.min(frames - in_pos);
-                  let mut inbuf = std::ptr::null_mut();
-                  let wanted = unsafe {
-                      rpk_wdl_resampler_prepare(state, request_frames as i32, &mut inbuf)
-                  };
-                  if wanted <= 0 || inbuf.is_null() {
-                      return Ok(Vec::new());
-                  }
-                  let avail = (wanted as usize).min(frames - in_pos);
-                  if avail == 0 {
-                      return Ok(Vec::new());
-                  }
-
-                  let first_sample = in_pos.saturating_mul(channels);
-                  let sample_count = avail.saturating_mul(channels);
-                  for offset in 0..sample_count {
-                      unsafe {
-                          *inbuf.add(offset) = sample(first_sample + offset);
-                      }
-                  }
-
-                  let out_cap = block_frames.min(cap_frames - out_pos);
-                  if out_cap == 0 {
-                      return Ok(Vec::new());
-                  }
-                  let got = unsafe {
-                      rpk_wdl_resampler_out(
-                          state,
-                          scratch.as_mut_ptr(),
-                          avail as i32,
-                          out_cap as i32,
-                      )
-                  };
-                  if got < 0 || got as usize > out_cap {
-                      return Ok(Vec::new());
-                  }
-
-                  let got = got as usize;
-                  if analyzer.push_interleaved(&scratch[..got.saturating_mul(channels)]) {
-                      break;
-                  }
-                  in_pos += avail;
-                  out_pos += got;
-                  if avail < wanted as usize {
-                      break;
+              } else {
+                  for i in 0..nwin {
+                      let rf = (write_pos + i) % nwin;
+                      let sample = ring[rf * channels + channel];
+                      let product = sample * window[i];
+                      fft_in[i & (FFT_N - 1)] += product as f64;
                   }
               }
-
-              Ok(analyzer.into_output())
+              fft_in
           }
 
+          fn analyze_channel(
+              ring: &[f32],
+              write_pos: usize,
+              channels: usize,
+              channel: usize,
+              window: &[f32],
+              previous: &[C32; HALF_BINS + 1],
+              elapsed: usize,
+          ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
+              let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
           '''.replace('          ', '')
-          text = text.replace(marker, helper + marker, 1)
-
-          replacements = [
-              (
-          '''    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-                  |index| pcm[index] as f64 / 32768.0,
-              )
-          '''.replace('          ', '')
-              ),
-              (
-          '''    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-                  |index| f64::from(pcm[index]),
-              )
-          '''.replace('          ', '')
-              ),
-              (
-          '''    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::AnalysisDomain,
-                  |index| f64::from(pcm.sample_f32(index)),
-              )
-          '''.replace('          ', '')
-              ),
-              (
-          '''    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-                  |index| pcm[index] as f64 / 32768.0,
-              )
-          '''.replace('          ', '')
-              ),
-              (
-          '''    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-                  |index| f64::from(pcm[index]),
-              )
-          '''.replace('          ', '')
-              ),
-              (
-          '''    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
-              analyze_resampled_spectral(
-                  &resampled,
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-              )
-          '''.replace('          ', ''),
-          '''    analyze_streaming_samples(
-                  frames,
-                  channels,
-                  source_rate,
-                  division,
-                  ExpectedCount::Exact(expected),
-                  |index| f64::from(pcm.sample_f32(index)),
-              )
-          '''.replace('          ', '')
-              ),
-          ]
-          for old, new in replacements:
-              if old not in text:
-                  raise SystemExit("step1 replacement target not found")
-              text = text.replace(old, new, 1)
+          if old not in text:
+              raise SystemExit("step2 production target not found")
+          text = text.replace(old, new, 1)
 
           tests = r'''
 
-          #[cfg(all(test, feature = "strict-wdl"))]
-          mod strict_streaming_analysis_tests {
+          #[cfg(test)]
+          mod spectral_fft_input_fast_path_tests {
               use super::*;
 
-              #[test]
-              fn streaming_analysis_matches_staged_analysis() {
-                  for &(rate, channels, frames) in &[
-                      (44_100u32, 1usize, 9_731usize),
-                      (48_000, 2, 12_345),
-                      (96_000, 6, 8_123),
-                  ] {
-                      let division = (rate / 300).max(1);
-                      let pcm: Vec<i16> = (0..frames * channels)
-                          .map(|i| ((i as i32 * 7_919 + 12_347) as i16).wrapping_sub(8_123))
-                          .collect();
-                      let staged_resampled =
-                          resample_i16_to_analysis(&pcm, frames, channels, rate);
-                      let staged = analyze_resampled_spectral(
-                          &staged_resampled,
-                          frames,
-                          channels,
-                          rate,
-                          division,
-                          ExpectedCount::AnalysisDomain,
-                      )
-                      .unwrap();
-                      let streamed = analyze_streaming_samples(
-                          frames,
-                          channels,
-                          rate,
-                          division,
-                          ExpectedCount::AnalysisDomain,
-                          |index| pcm[index] as f64 / 32768.0,
-                      )
-                      .unwrap();
-                      assert_eq!(streamed, staged, "rate={rate} channels={channels}");
+              fn reference_fft_input(
+                  ring: &[f32],
+                  write_pos: usize,
+                  channels: usize,
+                  channel: usize,
+                  window: &[f32],
+              ) -> [f64; FFT_N] {
+                  let nwin = window.len();
+                  let mut fft_in = [0.0f64; FFT_N];
+                  for i in 0..nwin {
+                      let rf = (write_pos + i) % nwin;
+                      let sample = ring[rf * channels + channel];
+                      let product = sample * window[i];
+                      fft_in[i & (FFT_N - 1)] += product as f64;
+                  }
+                  fft_in
+              }
 
-                      let exact = (staged.len() / channels).saturating_sub(1);
-                      let staged_exact = analyze_resampled_spectral(
-                          &staged_resampled,
-                          frames,
-                          channels,
-                          rate,
-                          division,
-                          ExpectedCount::Exact(exact),
-                      )
-                      .unwrap();
-                      let streamed_exact = analyze_streaming_samples(
-                          frames,
-                          channels,
-                          rate,
-                          division,
-                          ExpectedCount::Exact(exact),
-                          |index| pcm[index] as f64 / 32768.0,
-                      )
-                      .unwrap();
-                      assert_eq!(streamed_exact, staged_exact);
+              #[test]
+              fn modulo_free_1024_gather_is_bit_identical() {
+                  let channels = 6usize;
+                  let ring: Vec<f32> = (0..FFT_N * channels)
+                      .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
+                      .collect();
+                  let window: Vec<f32> = (0..FFT_N)
+                      .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
+                      .collect();
+                  for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
+                      for channel in 0..channels {
+                          let fast = fill_fft_input(
+                              &ring,
+                              write_pos,
+                              channels,
+                              channel,
+                              &window,
+                          );
+                          let reference = reference_fft_input(
+                              &ring,
+                              write_pos,
+                              channels,
+                              channel,
+                              &window,
+                          );
+                          for (index, (&actual, &expected)) in
+                              fast.iter().zip(reference.iter()).enumerate()
+                          {
+                              assert_eq!(
+                                  actual.to_bits(),
+                                  expected.to_bits(),
+                                  "write_pos={write_pos} channel={channel} bin={index}"
+                              );
+                          }
+                      }
                   }
               }
           }
           '''.replace('          ', '')
-          if 'mod strict_streaming_analysis_tests' in text:
-              raise SystemExit("step1 tests already present")
+          if 'mod spectral_fft_input_fast_path_tests' in text:
+              raise SystemExit("step2 tests already present")
           path.write_text(text + tests)
           PY
-
-          cargo fmt --all -- --check || cargo fmt --all
+          cargo fmt --all
 
       - name: Test default feature set
         run: cargo test --locked --all-targets
@@ -487,11 +182,11 @@ jobs:
       - name: Clippy strict WDL
         run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
 
-      - name: Commit step 1
+      - name: Commit step 2
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/spectral.rs
-          git commit -m "Stream strict spectral resampling into analyzer"
+          git commit -m "Avoid modulo in 1024-sample spectral FFT gather"
           git push origin HEAD:optimize/spectral-followup
