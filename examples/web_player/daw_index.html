@@ -15,6 +15,7 @@
     </div>
     <div class="headerActions">
       <div id="mediaInfo" class="pill">loading…</div>
+      <button id="cacheSettingsButton" type="button">Cache settings…</button>
       <button id="openAudioButton" type="button">Open audio…</button>
       <input id="audioFileInput" type="file" hidden>
     </div>
@@ -24,9 +25,47 @@
     <div id="launchDrop" class="launchDrop">
       <strong>Drop an audio file here</strong>
       <span>A complete waveform + spectral + spectrogram + loudness cache will be prepared.</span>
+      <span>Default placement is beside the source; REAPER-compatible placement is optional.</span>
     </div>
     <progress id="launchProgress" max="100" value="0"></progress>
     <div id="launchStatus">Ready</div>
+    <div class="launchActions"><button id="launchSettingsButton" type="button">Cache settings…</button></div>
+  </section>
+
+  <section id="configPanel" class="configPanel hidden" aria-modal="true" role="dialog" aria-labelledby="configTitle">
+    <div class="configCard">
+      <h2 id="configTitle">Cache settings</h2>
+      <p class="configIntro">These settings are shared with the PySide demo. REAPER central filenames are derived locally; an installed REAPER is only needed for optional verification or unsupported path-policy cases.</p>
+      <label>Cache placement
+        <select id="cachePolicy">
+          <option value="sidecar">Beside source (default)</option>
+          <option value="subdir">peaks/ subdirectory</option>
+          <option value="reaper-central">REAPER central cache</option>
+          <option value="reaper-config">Follow REAPER.ini</option>
+        </select>
+      </label>
+      <label id="centralDirectoryRow">Central cache directory
+        <input id="centralDirectory" type="text" placeholder="/path/to/REAPER peak cache">
+      </label>
+      <label id="reaperIniRow">REAPER.ini
+        <input id="reaperIni" type="text" placeholder="/path/to/reaper.ini">
+      </label>
+      <label id="autoReaperIniRow"><input id="autoReaperIni" type="checkbox"> Auto-detect REAPER.ini</label>
+      <label>Fine peaks / second
+        <input id="configPeakRate" type="number" min="0" max="1000000" step="1" value="0">
+        <small>0 = REAPER.ini value when following it, otherwise 300</small>
+      </label>
+      <label id="verifyReaperRow"><input id="verifyReaper" type="checkbox"> Verify derived path with installed REAPER</label>
+      <label id="reaperExecutableRow">REAPER executable
+        <input id="reaperExecutable" type="text" placeholder="Optional REAPER executable">
+      </label>
+      <div id="configPath" class="configPath"></div>
+      <div id="configStatus" class="configStatus" aria-live="polite"></div>
+      <div class="configActions">
+        <button id="configCancelButton" type="button">Cancel</button>
+        <button id="configSaveButton" type="button">Save</button>
+      </div>
+    </div>
   </section>
 
   <main>
