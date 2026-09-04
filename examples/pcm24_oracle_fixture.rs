@@ -16,13 +16,13 @@ fn parse_mode(value: &str) -> Result<ReaperPeakMode, Box<dyn std::error::Error>>
 }
 
 fn decode_pcm24le(raw: &[u8]) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let mut chunks = raw.chunks_exact(3);
+    let (chunks, remainder) = raw.as_chunks::<3>();
     let mut out = Vec::with_capacity(raw.len() / 3);
-    for chunk in &mut chunks {
+    for chunk in chunks {
         let sign = if chunk[2] & 0x80 != 0 { 0xff } else { 0x00 };
         out.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], sign]));
     }
-    if !chunks.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err("PCM24LE fixture byte length is not divisible by three".into());
     }
     Ok(out)
