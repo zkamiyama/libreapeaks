@@ -1,6 +1,9 @@
 use crate::ffi::RpkBuffer;
 use crate::generate::GenerateOptions;
-use crate::reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
+use crate::reaper_generate::{
+    generate_f32_reaper, generate_pcm16_reaper, generate_pcm24_i32_reaper, generate_pcm24_reaper,
+    ReaperPeakMode,
+};
 
 fn empty_buffer() -> RpkBuffer {
     RpkBuffer {
@@ -89,6 +92,106 @@ pub unsafe extern "C" fn rpk_generate_pcm16_reaper(
     };
     let pcm = std::slice::from_raw_parts(pcm, sample_len);
     match generate_pcm16_reaper(pcm, &options, mode) {
+        Ok(bytes) => {
+            *out = into_buffer(bytes);
+            0
+        }
+        Err(_) => -2,
+    }
+}
+
+/// Generate a REAPER-style RPKN cache directly from packed signed PCM24LE.
+///
+/// `pcm24le` contains exactly `frames * channels * 3` interleaved bytes. The
+/// generator reads and normalizes samples on demand, so callers do not need to
+/// allocate a whole-file float32 intermediate.
+#[no_mangle]
+pub unsafe extern "C" fn rpk_generate_pcm24_reaper(
+    pcm24le: *const u8,
+    frames: usize,
+    channels: usize,
+    sample_rate: u32,
+    divisions: *const u32,
+    division_count: usize,
+    source_mtime_low32: u32,
+    source_size_low32: u32,
+    mode: u8,
+    out: *mut RpkBuffer,
+) -> i32 {
+    let Some(out) = out.as_mut() else { return -1 };
+    *out = empty_buffer();
+    if pcm24le.is_null() {
+        return -1;
+    }
+    let Ok(mode) = ReaperPeakMode::try_from(mode) else {
+        return -1;
+    };
+    let Some(options) = common_options(
+        channels,
+        sample_rate,
+        divisions,
+        division_count,
+        source_mtime_low32,
+        source_size_low32,
+    ) else {
+        return -1;
+    };
+    let Some(sample_len) = frames.checked_mul(channels) else {
+        return -1;
+    };
+    let Some(byte_len) = sample_len.checked_mul(3) else {
+        return -1;
+    };
+    let pcm24le = std::slice::from_raw_parts(pcm24le, byte_len);
+    match generate_pcm24_reaper(pcm24le, &options, mode) {
+        Ok(bytes) => {
+            *out = into_buffer(bytes);
+            0
+        }
+        Err(_) => -2,
+    }
+}
+
+/// Generate a REAPER-style RPKN cache from PCM24 values held in int32 slots.
+///
+/// Every sample must be right-justified/sign-extended in
+/// `-8388608..=8388607`. Left-aligned S24-in-S32 data is not accepted directly.
+#[no_mangle]
+pub unsafe extern "C" fn rpk_generate_pcm24_i32_reaper(
+    pcm: *const i32,
+    frames: usize,
+    channels: usize,
+    sample_rate: u32,
+    divisions: *const u32,
+    division_count: usize,
+    source_mtime_low32: u32,
+    source_size_low32: u32,
+    mode: u8,
+    out: *mut RpkBuffer,
+) -> i32 {
+    let Some(out) = out.as_mut() else { return -1 };
+    *out = empty_buffer();
+    if pcm.is_null() {
+        return -1;
+    }
+    let Ok(mode) = ReaperPeakMode::try_from(mode) else {
+        return -1;
+    };
+    let Some(options) = common_options(
+        channels,
+        sample_rate,
+        divisions,
+        division_count,
+        source_mtime_low32,
+        source_size_low32,
+    ) else {
+        return -1;
+    };
+    let Some(sample_len) = frames.checked_mul(channels) else {
+        return -1;
+    };
+    let pcm = std::slice::from_raw_parts(pcm, sample_len);
+    match generate_pcm24_i32_reaper(pcm, &options, mode) {
         Ok(bytes) => {
             *out = into_buffer(bytes);
             0
