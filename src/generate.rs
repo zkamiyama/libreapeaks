@@ -134,7 +134,7 @@ fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -
     let frames = validate(options, pcm.len(), loudness)?;
     let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
+    let layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
         let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope
                 .spawn(|| build_wave_layers(pcm, frames, options.channels, &options.divisions));
@@ -217,7 +217,7 @@ pub fn generate_pcm16_mode3_with_spectrogram(
     let frames = validate(options, pcm.len(), true)?;
     validate_spectrogram_layer_count(options)?;
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
+    let layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
         let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope
                 .spawn(|| build_wave_layers(pcm, frames, options.channels, &options.divisions));
@@ -300,7 +300,7 @@ fn generate_f32_impl(
     };
     let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
+    let layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
         let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
                 build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)
@@ -408,7 +408,7 @@ pub fn generate_f32_mode3_with_spectrogram(
         Version::Rpkn
     };
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
+    let layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
         let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
                 build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)
@@ -509,7 +509,7 @@ fn generate_f32_source_impl<S: F32SampleSource + ?Sized>(
     };
     let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.sample_len(), task_count) {
+    let layers = if parallel_analysis_worthwhile(pcm.sample_len(), task_count) {
         let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
                 build_wave_layers_f32_source(
@@ -606,7 +606,7 @@ pub(crate) fn generate_f32_source_mode3_with_spectrogram<S: F32SampleSource + ?S
         Version::Rpkn
     };
 
-    let mut layers = if parallel_analysis_worthwhile(pcm.sample_len(), 4) {
+    let layers = if parallel_analysis_worthwhile(pcm.sample_len(), 4) {
         let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
             let wave = scope.spawn(|| {
                 build_wave_layers_f32_source(

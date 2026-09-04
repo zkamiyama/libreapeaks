@@ -442,7 +442,12 @@ pub(crate) fn build_spectrogram_layers_f32_source<S: F32SampleSource + ?Sized>(
         .ok_or(ReaPeaksError::InvalidArgument(
             "spectrogram frame capacity overflow",
         ))?;
-    let mut current_frames = vec![SpectrogramFrame::default(); capacity];
+    let mut current_frames = vec![
+        SpectrogramFrame {
+            bins: [0u16; SPECTROGRAM_BINS]
+        };
+        capacity
+    ];
     let first_ratio = ratios[0];
     fill_first_frames(
         &mut current_frames,
