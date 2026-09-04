@@ -14,7 +14,6 @@ use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
 use crate::sample_source::F32SampleSource;
 
 const REAPER_ZERO_SPECTRAL_MAX_RATE: u32 = 22_050;
-const REAPER_ANALYSIS_RATE: f64 = 22_050.0;
 const REAPER_SPECTRAL_HALF_WINDOW: usize = 512;
 
 #[inline]
@@ -43,37 +42,7 @@ fn legacy_high_rate_fine_count(frames: usize, source_rate: u32, division: u32) -
     ((source_span - margin + denominator / 2) / denominator) as usize
 }
 
-fn wdl_analysis_frames(frames: usize, channels: usize, source_rate: u32) -> Result<usize> {
-    unsafe extern "C" {
-        fn rpk_wdl_resample_count(
-            input_frames: i64,
-            channels: i32,
-            input_rate: f64,
-            output_rate: f64,
-        ) -> i64;
-    }
-
-    let input_frames = i64::try_from(frames)
-        .map_err(|_| ReaPeaksError::InvalidArgument("frame count exceeds strict WDL range"))?;
-    let channels_i32 = i32::try_from(channels)
-        .map_err(|_| ReaPeaksError::InvalidArgument("channel count exceeds strict WDL range"))?;
-    let got = unsafe {
-        rpk_wdl_resample_count(
-            input_frames,
-            channels_i32,
-            source_rate as f64,
-            REAPER_ANALYSIS_RATE,
-        )
-    };
-    if got < 0 {
-        return Err(ReaPeaksError::Unsupported(
-            "strict WDL resampler frame-count probe failed",
-        ));
-    }
-    usize::try_from(got)
-        .map_err(|_| ReaPeaksError::InvalidArgument("strict WDL output count overflow"))
-}
-
+#[cfg(test)]
 #[inline]
 fn fine_count_from_analysis_frames(
     analysis_frames: usize,
@@ -83,7 +52,7 @@ fn fine_count_from_analysis_frames(
     if analysis_frames == 0 || division == 0 || source_rate == 0 {
         return 0;
     }
-    let hop = division as f64 * REAPER_ANALYSIS_RATE / source_rate as f64;
+    let hop = division as f64 * 22_050.0 / source_rate as f64;
     let rounded = (hop + 0.5).floor() as i32;
     let mut phase = if rounded <= 1023 {
         (rounded - 1024) as f64 * 0.5
@@ -99,20 +68,6 @@ fn fine_count_from_analysis_frames(
         }
     }
     count
-}
-
-fn high_rate_wdl_fine_count(
-    frames: usize,
-    channels: usize,
-    source_rate: u32,
-    division: u32,
-) -> Result<usize> {
-    let analysis_frames = wdl_analysis_frames(frames, channels, source_rate)?;
-    Ok(fine_count_from_analysis_frames(
-        analysis_frames,
-        source_rate,
-        division,
-    ))
 }
 
 fn validate_source_len<T>(
@@ -169,14 +124,12 @@ fn build_high_rate_i16(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
-    crate::spectral_base::build_fine_spectral_with_expected(
+    crate::spectral_base::build_fine_spectral_analysis_counted(
         pcm,
         frames,
         channels,
         source_rate,
         division,
-        target,
     )
 }
 
@@ -188,14 +141,12 @@ fn build_high_rate_f32(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
-    crate::spectral_base::build_fine_spectral_f32_with_expected(
+    crate::spectral_base::build_fine_spectral_f32_analysis_counted(
         pcm,
         frames,
         channels,
         source_rate,
         division,
-        target,
     )
 }
 
@@ -207,14 +158,12 @@ fn build_high_rate_f32_source<S: F32SampleSource + ?Sized>(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     validate_f32_source_len(pcm, frames, channels, source_rate, division)?;
-    let target = high_rate_wdl_fine_count(frames, channels, source_rate, division)?;
-    crate::spectral_base::build_fine_spectral_f32_source_with_expected(
+    crate::spectral_base::build_fine_spectral_f32_source_analysis_counted(
         pcm,
         frames,
         channels,
         source_rate,
         division,
-        target,
     )
 }
 
