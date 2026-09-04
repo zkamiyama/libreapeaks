@@ -605,6 +605,42 @@ fn resample_to_analysis(
     out
 }
 
+#[inline]
+fn fill_fft_input(
+    ring: &[f32],
+    write_pos: usize,
+    channels: usize,
+    channel: usize,
+    window: &[f32],
+) -> [f64; FFT_N] {
+    let nwin = window.len();
+    let mut fft_in = [0.0f64; FFT_N];
+    if nwin == FFT_N {
+        let mut i = 0usize;
+        for rf in write_pos..FFT_N {
+            let sample = ring[rf * channels + channel];
+            // Preserve REAPER's scalar f32 multiply before promotion.
+            let product = sample * window[i];
+            fft_in[i] += product as f64;
+            i += 1;
+        }
+        for rf in 0..write_pos {
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i] += product as f64;
+            i += 1;
+        }
+    } else {
+        for i in 0..nwin {
+            let rf = (write_pos + i) % nwin;
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i & (FFT_N - 1)] += product as f64;
+        }
+    }
+    fft_in
+}
+
 fn analyze_channel(
     ring: &[f32],
     write_pos: usize,
@@ -614,16 +650,7 @@ fn analyze_channel(
     previous: &[C32; HALF_BINS + 1],
     elapsed: usize,
 ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
-    let nwin = window.len();
-    let mut fft_in = [0.0f64; FFT_N];
-    for i in 0..nwin {
-        let rf = (write_pos + i) % nwin;
-        let sample = ring[rf * channels + channel];
-        // REAPER 7.79 disassembly uses a scalar f32 multiply here, then
-        // promotes the result to double before accumulating the FFT input.
-        let product = sample * window[i];
-        fft_in[i & (FFT_N - 1)] += product as f64;
-    }
+    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
     #[cfg(feature = "strict-wdl")]
     let spec = real_fft_1024(&mut fft_in);
     #[cfg(not(feature = "strict-wdl"))]
@@ -1366,6 +1393,53 @@ mod strict_streaming_analysis_tests {
             )
             .unwrap();
             assert_eq!(streamed_exact, staged_exact);
+        }
+    }
+}
+
+#[cfg(test)]
+mod spectral_fft_input_fast_path_tests {
+    use super::*;
+
+    fn reference_fft_input(
+        ring: &[f32],
+        write_pos: usize,
+        channels: usize,
+        channel: usize,
+        window: &[f32],
+    ) -> [f64; FFT_N] {
+        let nwin = window.len();
+        let mut fft_in = [0.0f64; FFT_N];
+        for i in 0..nwin {
+            let rf = (write_pos + i) % nwin;
+            let sample = ring[rf * channels + channel];
+            let product = sample * window[i];
+            fft_in[i & (FFT_N - 1)] += product as f64;
+        }
+        fft_in
+    }
+
+    #[test]
+    fn modulo_free_1024_gather_is_bit_identical() {
+        let channels = 6usize;
+        let ring: Vec<f32> = (0..FFT_N * channels)
+            .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
+            .collect();
+        let window: Vec<f32> = (0..FFT_N)
+            .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
+            .collect();
+        for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
+            for channel in 0..channels {
+                let fast = fill_fft_input(&ring, write_pos, channels, channel, &window);
+                let reference = reference_fft_input(&ring, write_pos, channels, channel, &window);
+                for (index, (&actual, &expected)) in fast.iter().zip(reference.iter()).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "write_pos={write_pos} channel={channel} bin={index}"
+                    );
+                }
+            }
         }
     }
 }
