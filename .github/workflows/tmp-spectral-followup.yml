@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up benchmark
+name: Temporary spectral follow-up Clippy fix
 
 on:
   push:
@@ -8,114 +8,62 @@ on:
       - ".github/workflows/tmp-spectral-followup.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  benchmark:
+  fix-and-test:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    env:
-      BASELINE_SHA: 6d3a5006e66b52846b2007a795a163e257d33afa
     steps:
-      - name: Checkout optimized branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          path: optimized
+          ref: optimize/spectral-followup
           submodules: recursive
-          fetch-depth: 1
-
-      - name: Checkout PR 28 merged baseline
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BASELINE_SHA }}
-          path: baseline
-          submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Use identical benchmark harness
-        run: |
-          mkdir -p baseline/examples
-          cp optimized/examples/optimization_benchmark.rs baseline/examples/optimization_benchmark.rs
-
-      - name: Build release strict-wdl binaries
-        run: |
-          cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
-          cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
-
-      - name: Benchmark and verify byte identity
+      - name: Fix needless range loop without changing operation order
         shell: bash
         run: |
           python3 - <<'PY'
-          import json
-          import math
-          import statistics
-          import subprocess
           from pathlib import Path
 
-          cases = [
-              "pcm16-wave-48k-stereo-60s",
-              "pcm16-spectral-48k-stereo-30s",
-              "pcm16-spectrogram-48k-stereo-20s",
-              "pcm16-spectrogram-96k-6ch-8s",
-              "pcm24-spectral-96k-stereo-15s",
-              "f32-spectrogram-48k-stereo-15s",
-          ]
-          binaries = {
-              "baseline": Path("baseline/target/release/examples/optimization_benchmark"),
-              "optimized": Path("optimized/target/release/examples/optimization_benchmark"),
-          }
-          samples = {case: {"baseline": [], "optimized": []} for case in cases}
-          metadata = {case: {} for case in cases}
-
-          for order in (("baseline", "optimized"), ("optimized", "baseline")):
-              for case in cases:
-                  for label in order:
-                      raw = subprocess.check_output([str(binaries[label]), case, "3"], text=True).strip()
-                      result = json.loads(raw)
-                      samples[case][label].extend(result["samples_ns"])
-                      metadata[case][label] = {"bytes": result["bytes"], "hash": result["hash"]}
-
-          rows = []
-          speedups = []
-          for case in cases:
-              if metadata[case]["baseline"] != metadata[case]["optimized"]:
-                  raise SystemExit(
-                      f"byte identity failed in {case}: baseline={metadata[case]['baseline']} "
-                      f"optimized={metadata[case]['optimized']}"
-                  )
-              baseline_ns = statistics.median(samples[case]["baseline"])
-              optimized_ns = statistics.median(samples[case]["optimized"])
-              speedup = baseline_ns / optimized_ns
-              speedups.append(speedup)
-              rows.append({
-                  "case": case,
-                  "baseline_median_ns": baseline_ns,
-                  "optimized_median_ns": optimized_ns,
-                  "speedup": speedup,
-                  "bytes": metadata[case]["baseline"]["bytes"],
-                  "hash": metadata[case]["baseline"]["hash"],
-                  "baseline_samples_ns": samples[case]["baseline"],
-                  "optimized_samples_ns": samples[case]["optimized"],
-              })
-
-          payload = {
-              "baseline": "6d3a5006e66b52846b2007a795a163e257d33afa",
-              "optimized": subprocess.check_output(
-                  ["git", "-C", "optimized", "rev-parse", "HEAD"], text=True
-              ).strip(),
-              "geomean_speedup": math.exp(sum(math.log(x) for x in speedups) / len(speedups)),
-              "cases": rows,
-          }
-          Path("spectral-followup-benchmark.json").write_text(json.dumps(payload, indent=2) + "\n")
-          print(json.dumps(payload, indent=2))
+          path = Path("src/spectral.rs")
+          text = path.read_text()
+          start = text.index("fn summarize_spectrum_magnitudes(")
+          end = text.index("\nfn analyze_channel(", start)
+          section = text[start:end]
+          old = "for k in 0..=HALF_BINS {"
+          if section.count(old) != 1:
+              raise SystemExit(f"expected one range loop in summary helper, found {section.count(old)}")
+          section = section.replace(old, "for (k, bin) in spec.iter().enumerate() {", 1)
+          section = section.replace("spec[k].re", "bin.re")
+          section = section.replace("spec[k].im", "bin.im")
+          text = text[:start] + section + text[end:]
+          path.write_text(text)
           PY
+          cargo fmt --all
 
-      - name: Upload benchmark evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: spectral-followup-benchmark
-          path: spectral-followup-benchmark.json
-          retention-days: 7
+      - name: Test default feature set
+        run: cargo test --locked --all-targets
+
+      - name: Test strict WDL feature set
+        run: cargo test --locked --all-targets --features strict-wdl
+
+      - name: Clippy default feature set
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy strict WDL
+        run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
+
+      - name: Commit source fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/spectral.rs
+          git commit -m "Satisfy spectral Clippy without changing order"
+          git push origin HEAD:optimize/spectral-followup
