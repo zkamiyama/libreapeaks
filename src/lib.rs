@@ -36,13 +36,6 @@ pub mod source;
 #[path = "spectral_strict.rs"]
 pub mod spectral;
 
-// Keep the strict fine-source entrypoint live to preserve the same crate-private
-// surface as the normal spectral module without weakening dead-code linting for
-// the rest of the strict implementation.
-#[cfg(feature = "strict-wdl")]
-const _: fn(&[f32], usize, usize, u32, u32) -> error::Result<Vec<format::SpectralPeak>> =
-    spectral::build_fine_spectral_f32_source::<[f32]>;
-
 #[cfg(not(feature = "strict-wdl"))]
 pub mod spectral;
 #[cfg(feature = "strict-wdl")]
