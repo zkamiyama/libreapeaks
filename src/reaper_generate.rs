@@ -1,7 +1,8 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::generate::{
-    generate_f32_source, generate_f32_source_mode3, generate_f32_source_mode3_with_spectrogram,
-    generate_pcm16, generate_pcm16_mode3, generate_pcm16_mode3_with_spectrogram, GenerateOptions,
+    generate_f32, generate_f32_mode3, generate_f32_mode3_with_spectrogram, generate_f32_source,
+    generate_f32_source_mode3, generate_f32_source_mode3_with_spectrogram, generate_pcm16,
+    generate_pcm16_mode3, generate_pcm16_mode3_with_spectrogram, GenerateOptions,
 };
 use crate::sample_source::{F32SampleSource, Pcm24I32Source, Pcm24LeSource};
 
@@ -95,7 +96,15 @@ pub fn generate_f32_reaper(
     large_range: bool,
     mode: ReaperPeakMode,
 ) -> Result<Vec<u8>> {
-    generate_f32_source_reaper(pcm, options, large_range, mode)
+    match mode {
+        ReaperPeakMode::Waveform => generate_f32(pcm, &with_spectral(options, false), large_range),
+        ReaperPeakMode::Spectral => {
+            generate_f32_mode3(pcm, &with_spectral(options, true), large_range)
+        }
+        ReaperPeakMode::Spectrogram => {
+            generate_f32_mode3_with_spectrogram(pcm, &with_spectral(options, true), large_range)
+        }
+    }
 }
 
 /// Generate a REAPER-style RPKN cache directly from packed signed PCM24LE.
