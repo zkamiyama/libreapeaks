@@ -49,9 +49,9 @@ This lets an application create a REAPER-compatible central cache without a
 REAPER executable. `GetPeakFileNameEx` is therefore an oracle/verification path,
 not a prerequisite for the common central-cache case.
 
-The recovered algorithm is continuously treated as a versioned compatibility
-claim rather than a promise about every future REAPER release. The oracle tools
-remain useful for checking new versions and unusual path-policy combinations.
+The recovered algorithm is treated as a versioned compatibility claim rather
+than a promise about every future REAPER release. The oracle tools remain useful
+for checking new versions and unusual path-policy combinations.
 
 ## Following `reaper.ini`
 
@@ -74,22 +74,23 @@ explicit CLI rate
   > 300
 ```
 
-For cache placement, the offline resolver handles the common REAPER choices:
+For cache placement, the offline resolver reproduces the common, validated
+choices without REAPER:
 
-- normal sidecar placement;
-- global alternate/central placement;
-- source-tree selection through `altpeaksopathlist`;
+- normal sidecar placement when no alternate path policy is enabled;
+- global alternate/central placement using `altpeakspath`;
 - central filename derivation using the recovered SHA-1 rule.
 
-If `reaper.ini` contains a non-default flag combination whose matching semantics
-have not been recovered safely, libreapeaks does not guess. In that case it asks
-for either a REAPER executable or a saved cache map and resolves the exact path
-through the oracle.
+Selective `altpeaksopathlist` matching and unfamiliar `altpeaks` flag
+combinations are deliberately **not** guessed from the INI. Those cases fall
+back to `GetPeakFileNameEx` (or a previously saved cache map). This preserves the
+standalone benefit for the common cases while keeping opaque REAPER policy
+semantics fail-safe.
 
 ## Optional `GetPeakFileNameEx` verification
 
-When `Verify derived paths with installed REAPER` is enabled, the demo may launch
-a short-lived REAPER process and query:
+When `Verify derived paths with installed REAPER` is enabled, the demo launches
+a short-lived REAPER process (or uses a saved map) and queries:
 
 ```text
 GetPeakFileNameEx(source, ..., forWrite)
@@ -103,8 +104,9 @@ wins and the path origin is reported as an oracle override. This makes live
 REAPER useful as a compatibility verifier without making it a normal runtime
 dependency.
 
-The legacy CLI spelling `--cache-mode reaper` remains the force-exact path: it
-requires a REAPER executable or `--reaper-cache-map`.
+The legacy CLI spelling `--cache-mode reaper` remains the force-exact path. It
+uses a saved map when supplied or resolves REAPER from the configured executable,
+`REAPER_EXE`, or the normal executable search path.
 
 ## Persistent settings shared by the demos
 
