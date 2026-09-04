@@ -83,16 +83,10 @@ fn pcm24_inputs_reject_malformed_or_out_of_range_data() {
 
     assert!(generate_pcm24_reaper(&[0, 0], &options, ReaperPeakMode::Waveform).is_err());
     assert!(generate_pcm24_reaper(&[0, 0, 0], &options, ReaperPeakMode::Waveform).is_err());
-    assert!(generate_pcm24_i32_reaper(
-        &[8_388_608, 0],
-        &options,
-        ReaperPeakMode::Waveform,
-    )
-    .is_err());
-    assert!(generate_pcm24_i32_reaper(
-        &[-8_388_609, 0],
-        &options,
-        ReaperPeakMode::Waveform,
-    )
-    .is_err());
+    assert!(
+        generate_pcm24_i32_reaper(&[8_388_608, 0], &options, ReaperPeakMode::Waveform,).is_err()
+    );
+    assert!(
+        generate_pcm24_i32_reaper(&[-8_388_609, 0], &options, ReaperPeakMode::Waveform,).is_err()
+    );
 }
