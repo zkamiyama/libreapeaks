@@ -1,8 +1,8 @@
 use reapeaks::format::{encode, GeneratedLayer, LayerHeader, Version};
 use reapeaks::{
     append_rpkx_chunk, append_rpkx_chunk_file, read_rpkx, remove_rpkx_chunks,
-    remove_rpkx_chunks_file, rpkx_file_lock_path, set_rpkx_chunk, set_rpkx_chunk_file,
-    strip_rpkx, strip_rpkx_file, RpkxChunk, RpkxKey,
+    remove_rpkx_chunks_file, rpkx_file_lock_path, set_rpkx_chunk, set_rpkx_chunk_file, strip_rpkx,
+    strip_rpkx_file, RpkxChunk, RpkxKey,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,20 +104,24 @@ fn file_set_replaces_duplicate_keys_exactly_like_owning_api() {
     let actual = fs::read(&path).unwrap();
 
     assert_eq!(actual, expected);
-    assert_eq!(read_rpkx(&actual).unwrap().unwrap().chunks_for(key).count(), 1);
+    assert_eq!(
+        read_rpkx(&actual)
+            .unwrap()
+            .unwrap()
+            .chunks_for(key)
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn unchanged_large_payload_is_streamed_or_cloned_not_materialized_as_new_payload() {
+fn unchanged_large_payload_is_streamed_without_materializing_it() {
     let dir = TestDir::new("large");
     let path = dir.cache();
     let base = base_cache();
     let big = vec![0x5a; 8 * 1024 * 1024];
-    let initial = set_rpkx_chunk(
-        &base,
-        RpkxChunk::new(NS_A, *b"BIG_", 1, 0, big),
-    )
-    .unwrap();
+    let initial =
+        set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"BIG_", 1, 0, big)).unwrap();
     write(&path, &initial);
 
     let small = RpkxChunk::new(NS_B, *b"SMOL", 1, 0, b"ok".to_vec());
@@ -130,7 +134,7 @@ fn unchanged_large_payload_is_streamed_or_cloned_not_materialized_as_new_payload
 }
 
 #[test]
-fn same_size_set_remains_byte_identical_to_owning_api() {
+fn same_size_set_uses_whole_file_std_copy_then_patches() {
     let dir = TestDir::new("same-size");
     let path = dir.cache();
     let base = base_cache();
@@ -147,7 +151,9 @@ fn same_size_set_remains_byte_identical_to_owning_api() {
 
     assert_eq!(fs::read(&path).unwrap(), expected);
     assert_eq!(report.old_file_len, report.new_file_len);
+    assert_eq!(report.source_bytes_copied, initial.len() as u64);
     assert_eq!(report.payload_bytes_written, 8);
+    assert_eq!(report.metadata_bytes_written, 8);
 }
 
 #[test]
@@ -205,11 +211,9 @@ fn file_updater_refuses_foreign_bytes_before_rpkx() {
     bytes.extend_from_slice(b"OTHER");
     write(&path, &bytes);
 
-    let error = set_rpkx_chunk_file(
-        &path,
-        RpkxChunk::new(NS_A, *b"DATA", 1, 0, Vec::new()),
-    )
-    .unwrap_err();
+    let error =
+        set_rpkx_chunk_file(&path, RpkxChunk::new(NS_A, *b"DATA", 1, 0, Vec::new()))
+            .unwrap_err();
     assert!(error.to_string().contains("non-RPKX trailing bytes"));
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
