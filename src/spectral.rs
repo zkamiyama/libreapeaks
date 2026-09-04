@@ -372,6 +372,7 @@ struct StreamingSpectralAnalyzer {
     expected: Option<usize>,
     fft_in: Box<[f64; FFT_N]>,
     spectrum: Box<[C64; HALF_BINS + 1]>,
+    magnitudes: Box<[f32; HALF_BINS + 1]>,
 }
 
 #[cfg(feature = "strict-wdl")]
@@ -419,6 +420,7 @@ impl StreamingSpectralAnalyzer {
             expected,
             fft_in: Box::new([0.0f64; FFT_N]),
             spectrum: Box::new([C64::default(); HALF_BINS + 1]),
+            magnitudes: Box::new([0.0f32; HALF_BINS + 1]),
         }
     }
 
@@ -446,6 +448,7 @@ impl StreamingSpectralAnalyzer {
                         self.elapsed,
                         self.fft_in.as_mut(),
                         self.spectrum.as_mut(),
+                        self.magnitudes.as_mut(),
                     );
                     self.out.push(peak);
                 }
@@ -656,12 +659,12 @@ fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]
 }
 
 #[inline]
-fn summarize_spectrum_magnitudes(
+fn summarize_spectrum_magnitudes_into(
     spec: &[C64; HALF_BINS + 1],
     previous: &mut [C32; HALF_BINS + 1],
-) -> (f64, [f32; HALF_BINS + 1], usize, C32) {
+    mags_f32: &mut [f32; HALF_BINS + 1],
+) -> (f64, usize, C32) {
     let mut total = 0.0f64;
-    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
     let mut interior_kmax = 1usize;
     let mut interior_mmax = f64::NEG_INFINITY;
     let mut interior_previous = C32::default();
@@ -690,18 +693,31 @@ fn summarize_spectrum_magnitudes(
     }
 
     if interior_mmax > nyquist_magnitude {
-        (total, mags_f32, interior_kmax, interior_previous)
+        (total, interior_kmax, interior_previous)
     } else {
-        (total, mags_f32, HALF_BINS, C32::default())
+        (total, HALF_BINS, C32::default())
     }
 }
 
-fn analyze_spectrum(
+#[inline]
+fn summarize_spectrum_magnitudes(
     spec: &[C64; HALF_BINS + 1],
     previous: &mut [C32; HALF_BINS + 1],
+) -> (f64, [f32; HALF_BINS + 1], usize, C32) {
+    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+    let (total, kmax, previous_at_kmax) =
+        summarize_spectrum_magnitudes_into(spec, previous, &mut mags_f32);
+    (total, mags_f32, kmax, previous_at_kmax)
+}
+
+fn finish_spectral_peak(
+    spec: &[C64; HALF_BINS + 1],
+    total: f64,
+    mags_f32: &[f32; HALF_BINS + 1],
+    kmax: usize,
+    previous_at_kmax: C32,
     elapsed: usize,
 ) -> SpectralPeak {
-    let (total, mags_f32, kmax, previous_at_kmax) = summarize_spectrum_magnitudes(spec, previous);
     if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return SpectralPeak::default();
     }
@@ -738,6 +754,27 @@ fn analyze_spectrum(
     }
 }
 
+fn analyze_spectrum(
+    spec: &[C64; HALF_BINS + 1],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+) -> SpectralPeak {
+    let (total, mags_f32, kmax, previous_at_kmax) = summarize_spectrum_magnitudes(spec, previous);
+    finish_spectral_peak(spec, total, &mags_f32, kmax, previous_at_kmax, elapsed)
+}
+
+#[cfg(feature = "strict-wdl")]
+fn analyze_spectrum_with_magnitude_scratch(
+    spec: &[C64; HALF_BINS + 1],
+    previous: &mut [C32; HALF_BINS + 1],
+    elapsed: usize,
+    mags_f32: &mut [f32; HALF_BINS + 1],
+) -> SpectralPeak {
+    let (total, kmax, previous_at_kmax) =
+        summarize_spectrum_magnitudes_into(spec, previous, mags_f32);
+    finish_spectral_peak(spec, total, mags_f32, kmax, previous_at_kmax, elapsed)
+}
+
 fn analyze_channel(
     ring: &[f32],
     write_pos: usize,
@@ -767,10 +804,11 @@ fn analyze_channel_with_scratch(
     elapsed: usize,
     fft_in: &mut [f64; FFT_N],
     spec: &mut [C64; HALF_BINS + 1],
+    mags_f32: &mut [f32; HALF_BINS + 1],
 ) -> SpectralPeak {
     fill_fft_input_into(ring, write_pos, channel, window, fft_in);
     real_fft_1024_into(fft_in, spec);
-    analyze_spectrum(spec, previous, elapsed)
+    analyze_spectrum_with_magnitude_scratch(spec, previous, elapsed, mags_f32)
 }
 
 fn analyze_resampled_spectral(
