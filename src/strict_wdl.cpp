@@ -146,6 +146,58 @@ int rpk_wdl_resampler_out(
     }
 }
 
+int rpk_wdl_real_fft_1024_inplace(
+    double *buffer,
+    double *output) noexcept {
+    try {
+        if (!buffer || !output) return kInvalidArgument;
+        rpk_wdl_fft_init_once();
+        WDL_real_fft(buffer, 1024, 0);
+
+        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buffer);
+        output[0] = c[0].re;
+        output[1] = 0.0;
+        output[1024] = c[0].im;
+        output[1025] = 0.0;
+        int *perm = WDL_fft_permute_tab(512);
+        if (!perm) return kProcessingFailure;
+        for (int k = 1; k < 512; ++k) {
+            const int j = perm[k];
+            output[2 * k] = c[j].re;
+            output[2 * k + 1] = c[j].im;
+        }
+        return 0;
+    } catch (...) {
+        return kCppException;
+    }
+}
+
+int rpk_wdl_real_fft_256_inplace(
+    double *buffer,
+    double *output) noexcept {
+    try {
+        if (!buffer || !output) return kInvalidArgument;
+        rpk_wdl_fft_init_once();
+        WDL_real_fft(buffer, 256, 0);
+
+        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buffer);
+        output[0] = c[0].re;
+        output[1] = 0.0;
+        output[256] = c[0].im;
+        output[257] = 0.0;
+        int *perm = WDL_fft_permute_tab(128);
+        if (!perm) return kProcessingFailure;
+        for (int k = 1; k < 128; ++k) {
+            const int j = perm[k];
+            output[2 * k] = c[j].re;
+            output[2 * k + 1] = c[j].im;
+        }
+        return 0;
+    } catch (...) {
+        return kCppException;
+    }
+}
+
 int rpk_wdl_real_fft_1024(
     const double *input,
     double *out_re,

@@ -9,6 +9,7 @@ const ANALYSIS_RATE: f64 = 22_050.0;
 const FFT_N: usize = 1024;
 const HALF_BINS: usize = 512;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct C64 {
     re: f64,
@@ -121,21 +122,15 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
     unsafe extern "C" {
-        fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+        fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-    let mut re = [0.0f64; HALF_BINS + 1];
-    let mut im = [0.0f64; HALF_BINS + 1];
-    let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
-    assert_eq!(rc, 0, "WDL FFT bridge failed");
     let mut out = [C64::default(); HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        out[k] = C64 {
-            re: re[k],
-            im: im[k],
-        };
-    }
+    let rc = unsafe {
+        rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
+    };
+    assert_eq!(rc, 0, "WDL FFT bridge failed");
     out
 }
 
@@ -409,7 +404,7 @@ fn analyze_channel(
         let product = sample * window[i];
         fft_in[i & (FFT_N - 1)] += product as f64;
     }
-    let spec = real_fft_1024(&fft_in);
+    let spec = real_fft_1024(&mut fft_in);
 
     // REAPER stores the current complex spectrum to its f32 phase-history
     // buffer before checking whether the magnitude sum is zero. Preserve that

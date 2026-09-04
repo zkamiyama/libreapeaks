@@ -19,6 +19,7 @@ const POWER_LOG_SCALE: f64 = 88.92179516969081;
 const CODE_BIAS: f64 = 4095.5;
 const CODE_MAX: u16 = 4095;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct C64 {
     re: f64,
@@ -89,23 +90,15 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
+fn real_fft_256(input: &mut [f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     unsafe extern "C" {
-        fn rpk_wdl_real_fft_256(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+        fn rpk_wdl_real_fft_256_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-
-    let mut re = [0.0f64; FFT_BINS];
-    let mut im = [0.0f64; FFT_BINS];
-    let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
-    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
 
     let mut out = [C64::default(); FFT_BINS];
-    for bin in 0..FFT_BINS {
-        out[bin] = C64 {
-            re: re[bin],
-            im: im[bin],
-        };
-    }
+    let rc =
+        unsafe { rpk_wdl_real_fft_256_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>()) };
+    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
     out
 }
 
@@ -241,7 +234,7 @@ fn analyze_base_frame<S: F32SampleSource + ?Sized>(
         }
     }
 
-    let spectrum = real_fft_256(&input);
+    let spectrum = real_fft_256(&mut input);
     let mut bins = [0u16; SPECTROGRAM_BINS];
     for stored_bin in 0..SPECTROGRAM_BINS {
         let value = spectrum[stored_bin + 1];
