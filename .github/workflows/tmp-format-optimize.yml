@@ -19,16 +19,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Apply optimization patch
+        run: |
+          if [[ -f .github/optimize.patch ]]; then
+            git apply .github/optimize.patch
+            rm .github/optimize.patch
+          fi
       - name: Format Rust sources
         run: cargo fmt --all
-      - name: Commit formatting
+      - name: Commit patch and formatting
         run: |
-          if git diff --quiet; then
-            echo "No formatting changes"
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Format optimization changes"
+          git commit -m "Stream strict WDL input without whole-file staging"
           git push origin HEAD:optimize/byte-identical-analysis
