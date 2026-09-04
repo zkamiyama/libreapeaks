@@ -58,9 +58,93 @@ void configure_reaper_spectral_resampler(
     rs.SetRates(input_rate, output_rate);
 }
 
+struct RpkWdlResamplerState {
+    WDL_Resampler rs;
+    int channels;
+
+    RpkWdlResamplerState(int channel_count, double input_rate, double output_rate)
+        : channels(channel_count) {
+        configure_reaper_spectral_resampler(rs, input_rate, output_rate);
+    }
+};
+
 } // namespace
 
 extern "C" {
+
+void *rpk_wdl_resampler_create(
+    int channels,
+    double input_rate,
+    double output_rate) noexcept {
+    try {
+        if (channels <= 0 || channels > kMaxReaPeaksChannels ||
+            !std::isfinite(input_rate) || !std::isfinite(output_rate) ||
+            input_rate <= 0.0 || output_rate <= 0.0) {
+            return nullptr;
+        }
+        return new RpkWdlResamplerState(channels, input_rate, output_rate);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void rpk_wdl_resampler_destroy(void *opaque) noexcept {
+    try {
+        delete static_cast<RpkWdlResamplerState *>(opaque);
+    } catch (...) {
+        // Destruction must never unwind across the C ABI.
+    }
+}
+
+int rpk_wdl_resampler_prepare(
+    void *opaque,
+    int request_frames,
+    double **input_buffer) noexcept {
+    try {
+        if (!opaque || !input_buffer || request_frames <= 0) {
+            return kInvalidArgument;
+        }
+        auto *state = static_cast<RpkWdlResamplerState *>(opaque);
+        WDL_ResampleSample *inbuf = nullptr;
+        const int wanted = state->rs.ResamplePrepare(
+            request_frames, state->channels, &inbuf);
+        if (wanted <= 0 || !inbuf) {
+            *input_buffer = nullptr;
+            return kProcessingFailure;
+        }
+        *input_buffer = inbuf;
+        return wanted;
+    } catch (...) {
+        if (input_buffer) *input_buffer = nullptr;
+        return kCppException;
+    }
+}
+
+int rpk_wdl_resampler_out(
+    void *opaque,
+    double *output,
+    int input_frames,
+    int output_capacity_frames) noexcept {
+    try {
+        if (!opaque || !output || input_frames <= 0 ||
+            output_capacity_frames <= 0) {
+            return kInvalidArgument;
+        }
+        auto *state = static_cast<RpkWdlResamplerState *>(opaque);
+        if (!valid_interleaved_span(input_frames, state->channels) ||
+            !valid_interleaved_span(output_capacity_frames, state->channels)) {
+            return kInvalidArgument;
+        }
+        const int got = state->rs.ResampleOut(
+            output, input_frames, output_capacity_frames, state->channels);
+        if (got < 0 || got > output_capacity_frames) {
+            return kProcessingFailure;
+        }
+        return got;
+    } catch (...) {
+        return kCppException;
+    }
+}
 
 int rpk_wdl_real_fft_1024(
     const double *input,
