@@ -269,7 +269,10 @@ fn analyze_base_frame(
         }
     }
 
+    #[cfg(feature = "strict-wdl")]
     let spectrum = real_fft_256(&mut input);
+    #[cfg(not(feature = "strict-wdl"))]
+    let spectrum = real_fft_256(&input);
     let mut bins = [0u16; SPECTROGRAM_BINS];
     for stored_bin in 0..SPECTROGRAM_BINS {
         let value = spectrum[stored_bin + 1];
