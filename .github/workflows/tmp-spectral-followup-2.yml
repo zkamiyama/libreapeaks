@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up 2 FFT scratch gate
+name: Temporary spectral follow-up 2 FFT scratch benchmark
 
 on:
   push:
@@ -8,263 +8,64 @@ on:
       - ".github/workflows/tmp-spectral-followup-2.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  optimize-and-test:
+  benchmark:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
+    env:
+      BASELINE_SHA: 02d34428b4de1a3dfca3aec0bef057fccc62346e
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout optimized branch
+        uses: actions/checkout@v4
         with:
-          ref: optimize/spectral-followup-2
+          ref: ${{ github.sha }}
+          path: optimized
           submodules: recursive
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+          fetch-depth: 1
+      - name: Checkout planar baseline
+        uses: actions/checkout@v4
         with:
-          components: rustfmt, clippy
-
-      - name: Reuse strict spectral FFT scratch
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          submodules: recursive
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use identical benchmark harness
+        run: |
+          mkdir -p baseline/examples
+          cp optimized/examples/optimization_benchmark.rs baseline/examples/optimization_benchmark.rs
+      - name: Build release strict-wdl binaries
+        run: |
+          cargo build --manifest-path baseline/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+          cargo build --manifest-path optimized/Cargo.toml --locked --release --features strict-wdl --example optimization_benchmark
+      - name: Benchmark spectral cases and verify byte identity
         run: |
           python3 - <<'PY'
+          import json, math, os, statistics, subprocess
           from pathlib import Path
-          path=Path("src/spectral.rs")
-          text=path.read_text()
-
-          # Add an into variant for the WDL bridge while keeping the existing
-          # returning wrapper for staged/reference paths.
-          start=text.index('#[cfg(feature = "strict-wdl")]\nfn real_fft_1024(')
-          end=text.index('\n#[cfg(not(feature = "strict-wdl"))]\nfn real_fft_1024', start)
-          strict_fft=r'''#[cfg(feature = "strict-wdl")]
-          fn real_fft_1024_into(
-              input: &mut [f64; FFT_N],
-              out: &mut [C64; HALF_BINS + 1],
-          ) {
-              unsafe extern "C" {
-                  fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
-              }
-              let rc = unsafe {
-                  rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
-              };
-              assert_eq!(rc, 0, "WDL FFT bridge failed");
-          }
-
-          #[cfg(feature = "strict-wdl")]
-          fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
-              let mut out = [C64::default(); HALF_BINS + 1];
-              real_fft_1024_into(input, &mut out);
-              out
-          }
-          '''
-          text=text[:start]+strict_fft+text[end:]
-
-          # Split the planar gather into an in-place filler plus the old wrapper.
-          start=text.index('#[inline]\nfn fill_fft_input(')
-          end=text.index('\n#[inline]\nfn summarize_spectrum_magnitudes', start)
-          fill=r'''#[inline]
-          fn fill_fft_input_into(
-              ring: &[f32],
-              write_pos: usize,
-              channel: usize,
-              window: &[f32],
-              fft_in: &mut [f64; FFT_N],
-          ) {
-              let nwin = window.len();
-              let lane_start = channel * nwin;
-              let lane = &ring[lane_start..lane_start + nwin];
-              fft_in.fill(0.0);
-              if nwin == FFT_N {
-                  let mut i = 0usize;
-                  for &sample in &lane[write_pos..] {
-                      let product = sample * window[i];
-                      fft_in[i] += product as f64;
-                      i += 1;
-                  }
-                  for &sample in &lane[..write_pos] {
-                      let product = sample * window[i];
-                      fft_in[i] += product as f64;
-                      i += 1;
-                  }
-              } else {
-                  for i in 0..nwin {
-                      let rf = (write_pos + i) % nwin;
-                      let product = lane[rf] * window[i];
-                      fft_in[i & (FFT_N - 1)] += product as f64;
-                  }
-              }
-          }
-
-          #[inline]
-          fn fill_fft_input(
-              ring: &[f32],
-              write_pos: usize,
-              channel: usize,
-              window: &[f32],
-          ) -> [f64; FFT_N] {
-              let mut fft_in = [0.0f64; FFT_N];
-              fill_fft_input_into(ring, write_pos, channel, window, &mut fft_in);
-              fft_in
-          }
-          '''
-          text=text[:start]+fill+text[end:]
-
-          # Share the post-FFT math, then add a strict scratch-reusing entry point.
-          start=text.index('fn analyze_channel(')
-          end=text.index('\nfn analyze_resampled_spectral(', start)
-          analyze=r'''fn analyze_spectrum(
-              spec: &[C64; HALF_BINS + 1],
-              previous: &mut [C32; HALF_BINS + 1],
-              elapsed: usize,
-          ) -> SpectralPeak {
-              let (total, mags_f32, kmax, previous_at_kmax) =
-                  summarize_spectrum_magnitudes(spec, previous);
-              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-                  return SpectralPeak::default();
-              }
-
-              let best_bin = if kmax == HALF_BINS || elapsed == 0 {
-                  HALF_BINS as f64
-              } else {
-                  let cur = spec[kmax];
-                  let prev = previous_at_kmax;
-                  let phase_cur = cur.im.atan2(cur.re);
-                  let phase_prev = (prev.im as f64).atan2(prev.re as f64);
-                  let residual = wrap_phase(
-                      (phase_cur - phase_prev) / PI
-                          - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
-                  );
-                  kmax as f64 + HALF_BINS as f64 / elapsed as f64 * residual
-              };
-
-              let frequency_hz = (0.5 + best_bin * ANALYSIS_RATE / FFT_N as f64)
-                  .trunc()
-                  .clamp(0.0, 32767.0) as u16;
-
-              let mut spread = 0.0f64;
-              for (k, &magnitude) in mags_f32.iter().enumerate() {
-                  let d = k as f64 - best_bin;
-                  spread += magnitude as f64 * d * d;
-              }
-              let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
-                  .trunc()
-                  .clamp(0.0, 16383.0) as u16;
-
-              SpectralPeak {
-                  frequency_hz,
-                  density,
-              }
-          }
-
-          fn analyze_channel(
-              ring: &[f32],
-              write_pos: usize,
-              channel: usize,
-              window: &[f32],
-              previous: &mut [C32; HALF_BINS + 1],
-              elapsed: usize,
-          ) -> SpectralPeak {
-              #[cfg(feature = "strict-wdl")]
-              let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
-              #[cfg(not(feature = "strict-wdl"))]
-              let fft_in = fill_fft_input(ring, write_pos, channel, window);
-              #[cfg(feature = "strict-wdl")]
-              let spec = real_fft_1024(&mut fft_in);
-              #[cfg(not(feature = "strict-wdl"))]
-              let spec = real_fft_1024(&fft_in);
-              analyze_spectrum(&spec, previous, elapsed)
-          }
-
-          #[cfg(feature = "strict-wdl")]
-          fn analyze_channel_with_scratch(
-              ring: &[f32],
-              write_pos: usize,
-              channel: usize,
-              window: &[f32],
-              previous: &mut [C32; HALF_BINS + 1],
-              elapsed: usize,
-              fft_in: &mut [f64; FFT_N],
-              spec: &mut [C64; HALF_BINS + 1],
-          ) -> SpectralPeak {
-              fill_fft_input_into(ring, write_pos, channel, window, fft_in);
-              real_fft_1024_into(fft_in, spec);
-              analyze_spectrum(spec, previous, elapsed)
-          }
-          '''
-          text=text[:start]+analyze+text[end:]
-
-          # Allocate one pair of scratch buffers for the lifetime of each strict
-          # streaming analyzer instead of one pair per channel per analysis hop.
-          old='''    out: Vec<SpectralPeak>,\n    expected: Option<usize>,\n}'''
-          new='''    out: Vec<SpectralPeak>,\n    expected: Option<usize>,\n    fft_in: Box<[f64; FFT_N]>,\n    spectrum: Box<[C64; HALF_BINS + 1]>,\n}'''
-          if text.count(old)!=1: raise SystemExit(f"struct tail count={text.count(old)}")
-          text=text.replace(old,new,1)
-          old='''            out: Vec::with_capacity(output_capacity),\n            expected,\n        }'''
-          new='''            out: Vec::with_capacity(output_capacity),\n            expected,\n            fft_in: Box::new([0.0f64; FFT_N]),\n            spectrum: Box::new([C64::default(); HALF_BINS + 1]),\n        }'''
-          if text.count(old)!=1: raise SystemExit(f"initializer tail count={text.count(old)}")
-          text=text.replace(old,new,1)
-
-          # Replace only the streaming method; the staged path intentionally keeps
-          # the returning wrappers as a cross-check against the scratch path.
-          start=text.index('    fn push_interleaved(&mut self, samples: &[f64]) -> bool {')
-          end=text.index('\n    fn into_output', start)
-          method=r'''    fn push_interleaved(&mut self, samples: &[f64]) -> bool {
-              debug_assert_eq!(samples.len() % self.channels, 0);
-              let nwin = self.window.len();
-              for frame in samples.chunks_exact(self.channels) {
-                  for (channel, &sample) in frame.iter().enumerate() {
-                      self.ring[channel * nwin + self.write_pos] = sample as f32;
-                  }
-                  self.write_pos += 1;
-                  if self.write_pos == nwin {
-                      self.write_pos = 0;
-                  }
-                  self.phase += 1.0;
-                  self.elapsed += 1;
-                  while self.phase >= self.hop {
-                      for channel in 0..self.channels {
-                          let peak = analyze_channel_with_scratch(
-                              &self.ring,
-                              self.write_pos,
-                              channel,
-                              &self.window,
-                              &mut self.previous[channel],
-                              self.elapsed,
-                              self.fft_in.as_mut(),
-                              self.spectrum.as_mut(),
-                          );
-                          self.out.push(peak);
-                      }
-                      self.elapsed = 0;
-                      self.phase -= self.hop;
-                      if self
-                          .expected
-                          .is_some_and(|expected| self.out.len() / self.channels >= expected)
-                      {
-                          return true;
-                      }
-                  }
-              }
-              false
-          }
-          '''
-          text=text[:start]+method+text[end:]
-          path.write_text(text)
+          cases=["pcm16-spectral-48k-stereo-30s","pcm16-spectrogram-48k-stereo-20s","pcm16-spectrogram-96k-6ch-8s","pcm24-spectral-96k-stereo-15s","f32-spectrogram-48k-stereo-15s"]
+          bins={"baseline":Path("baseline/target/release/examples/optimization_benchmark"),"optimized":Path("optimized/target/release/examples/optimization_benchmark")}
+          samples={c:{k:[] for k in bins} for c in cases}; meta={c:{} for c in cases}
+          orders=(("baseline","optimized"),("optimized","baseline"),("baseline","optimized"),("optimized","baseline"))
+          for order in orders:
+              for case in cases:
+                  for label in order:
+                      r=json.loads(subprocess.check_output([str(bins[label]),case,"3"],text=True).strip())
+                      samples[case][label].extend(r["samples_ns"]); m={"bytes":r["bytes"],"hash":r["hash"]}
+                      if label in meta[case] and meta[case][label]!=m: raise SystemExit(f"nondeterministic {case}/{label}")
+                      meta[case][label]=m
+          rows=[]; speedups=[]
+          for case in cases:
+              if meta[case]["baseline"]!=meta[case]["optimized"]: raise SystemExit(f"byte identity failed {case}: {meta[case]}")
+              b=statistics.median(samples[case]["baseline"]); o=statistics.median(samples[case]["optimized"]); s=b/o; speedups.append(s)
+              rows.append({"case":case,"baseline_median_ns":b,"optimized_median_ns":o,"speedup":s,"bytes":meta[case]["baseline"]["bytes"],"hash":meta[case]["baseline"]["hash"],"baseline_samples_ns":samples[case]["baseline"],"optimized_samples_ns":samples[case]["optimized"]})
+          payload={"baseline":os.environ["BASELINE_SHA"],"optimized":subprocess.check_output(["git","-C","optimized","rev-parse","HEAD"],text=True).strip(),"samples_per_side_per_case":12,"geomean_speedup":math.exp(sum(math.log(x) for x in speedups)/len(speedups)),"cases":rows}
+          Path("fft-scratch-benchmark.json").write_text(json.dumps(payload,indent=2)+"\n"); print(json.dumps(payload,indent=2))
           PY
-          cargo fmt --all
-
-      - name: Test default feature set
-        run: cargo test --locked --all-targets
-      - name: Test strict WDL feature set
-        run: cargo test --locked --all-targets --features strict-wdl
-      - name: Clippy default feature set
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Clippy strict WDL
-        run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
-      - name: Commit source optimization
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/spectral.rs
-          git diff --cached --quiet && exit 1
-          git commit -m "Reuse strict spectral FFT scratch buffers"
-          git push origin HEAD:optimize/spectral-followup-2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fft-scratch-benchmark
+          path: fft-scratch-benchmark.json
+          retention-days: 7
