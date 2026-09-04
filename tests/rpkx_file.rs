@@ -88,11 +88,7 @@ fn file_set_replaces_duplicate_keys_exactly_like_owning_api() {
     let base = base_cache();
     let key = RpkxKey::new(NS_A, *b"MARK");
     let bytes = append_rpkx_chunk(
-        &append_rpkx_chunk(
-            &base,
-            RpkxChunk::new(NS_A, *b"MARK", 1, 0, b"one".to_vec()),
-        )
-        .unwrap(),
+        &append_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"MARK", 1, 0, b"one".to_vec())).unwrap(),
         RpkxChunk::new(NS_A, *b"MARK", 2, 0, b"two".to_vec()),
     )
     .unwrap();
@@ -104,14 +100,7 @@ fn file_set_replaces_duplicate_keys_exactly_like_owning_api() {
     let actual = fs::read(&path).unwrap();
 
     assert_eq!(actual, expected);
-    assert_eq!(
-        read_rpkx(&actual)
-            .unwrap()
-            .unwrap()
-            .chunks_for(key)
-            .count(),
-        1
-    );
+    assert_eq!(read_rpkx(&actual).unwrap().unwrap().chunks_for(key).count(), 1);
 }
 
 #[test]
@@ -120,8 +109,7 @@ fn unchanged_large_payload_is_streamed_without_materializing_it() {
     let path = dir.cache();
     let base = base_cache();
     let big = vec![0x5a; 8 * 1024 * 1024];
-    let initial =
-        set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"BIG_", 1, 0, big)).unwrap();
+    let initial = set_rpkx_chunk(&base, RpkxChunk::new(NS_A, *b"BIG_", 1, 0, big)).unwrap();
     write(&path, &initial);
 
     let small = RpkxChunk::new(NS_B, *b"SMOL", 1, 0, b"ok".to_vec());
@@ -212,8 +200,7 @@ fn file_updater_refuses_foreign_bytes_before_rpkx() {
     write(&path, &bytes);
 
     let error =
-        set_rpkx_chunk_file(&path, RpkxChunk::new(NS_A, *b"DATA", 1, 0, Vec::new()))
-            .unwrap_err();
+        set_rpkx_chunk_file(&path, RpkxChunk::new(NS_A, *b"DATA", 1, 0, Vec::new())).unwrap_err();
     assert!(error.to_string().contains("non-RPKX trailing bytes"));
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
