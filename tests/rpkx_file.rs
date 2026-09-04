@@ -180,9 +180,11 @@ fn remove_missing_key_is_a_noop_without_replacing_file() {
     let path = dir.cache();
     let base = base_cache();
     write(&path, &base);
+    #[cfg(unix)]
     let before = fs::metadata(&path).unwrap();
 
     let report = remove_rpkx_chunks_file(&path, RpkxKey::new(NS_A, *b"NONE")).unwrap();
+    #[cfg(unix)]
     let after = fs::metadata(&path).unwrap();
 
     assert!(!report.changed);
