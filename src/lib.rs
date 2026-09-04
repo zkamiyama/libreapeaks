@@ -25,6 +25,7 @@ pub mod pyramid;
 pub mod reaper_generate;
 pub mod rpkx;
 pub mod rpkx_file;
+mod sample_source;
 pub mod source;
 
 // Strict mode reuses low-level DSP/aggregation helpers from spectral.rs, but
@@ -66,7 +67,10 @@ pub use generate::{
 };
 pub use gpu_cache::{GpuCacheView, GpuLayerKind, GpuLayerMeta, GpuRawTile};
 pub use pyramid::{WaveLevelMeta, WavePyramid, WaveTile, WaveTileKey, WaveViewPlan};
-pub use reaper_generate::{generate_f32_reaper, generate_pcm16_reaper, ReaperPeakMode};
+pub use reaper_generate::{
+    generate_f32_reaper, generate_pcm16_reaper, generate_pcm24_i32_reaper, generate_pcm24_reaper,
+    ReaperPeakMode,
+};
 pub use rpkx::{
     append_rpkx_chunk, attach_rpkx, copy_rpkx_payload, read_rpkx, read_rpkx_index,
     read_rpkx_payload, reapeaks_source_stamp, remove_rpkx_chunks, scan_rpkx, set_rpkx_chunk,
