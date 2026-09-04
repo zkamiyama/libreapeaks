@@ -404,7 +404,10 @@ fn analyze_channel(
         let product = sample * window[i];
         fft_in[i & (FFT_N - 1)] += product as f64;
     }
+    #[cfg(feature = "strict-wdl")]
     let spec = real_fft_1024(&mut fft_in);
+    #[cfg(not(feature = "strict-wdl"))]
+    let spec = real_fft_1024(&fft_in);
 
     // REAPER stores the current complex spectrum to its f32 phase-history
     // buffer before checking whether the magnitude sum is zero. Preserve that
