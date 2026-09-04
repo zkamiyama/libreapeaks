@@ -1,0 +1,27 @@
+name: Temporary export optimize workspace
+
+on:
+  push:
+    branches:
+      - optimize/byte-identical-analysis
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: optimize/byte-identical-analysis
+          fetch-depth: 0
+      - name: Pack working tree
+        run: tar --exclude=.git -czf /tmp/libreapeaks-optimize.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libreapeaks-optimize-worktree
+          path: /tmp/libreapeaks-optimize.tgz
+          if-no-files-found: error
+          retention-days: 1
