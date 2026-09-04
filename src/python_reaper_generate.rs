@@ -70,9 +70,7 @@ fn py_generate_pcm24_reaper<'py>(
     source_size_low32: u32,
 ) -> PyResult<Bound<'py, PyBytes>> {
     if pcm24le.len() % 3 != 0 {
-        return Err(py_err(
-            "PCM24LE byte length must be a multiple of three",
-        ));
+        return Err(py_err("PCM24LE byte length must be a multiple of three"));
     }
     // Detaching requires owned input. Keep the packed 3-byte representation;
     // unlike the old workaround, this does not materialize a whole-file f32
