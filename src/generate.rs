@@ -1,11 +1,19 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{encode, GeneratedLayer, Version};
-use crate::loudness::{build_loudness_layers_f32_source, build_loudness_layers_pcm16};
+use crate::loudness::{
+    build_loudness_layers_f32, build_loudness_layers_f32_source, build_loudness_layers_pcm16,
+};
 use crate::sample_source::F32SampleSource;
-use crate::spectral::{build_spectral_layers, build_spectral_layers_f32_source};
+use crate::spectral::{
+    build_spectral_layers, build_spectral_layers_f32, build_spectral_layers_f32_source,
+};
 use crate::spectrogram_generate::build_spectrogram_layers_pcm16;
-use crate::spectrogram_generate_f32::build_spectrogram_layers_f32_source;
-use crate::wave::{build_wave_layers, build_wave_layers_f32_source, WaveEncoding};
+use crate::spectrogram_generate_f32::{
+    build_spectrogram_layers_f32, build_spectrogram_layers_f32_source,
+};
+use crate::wave::{
+    build_wave_layers, build_wave_layers_f32, build_wave_layers_f32_source, WaveEncoding,
+};
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -170,6 +178,111 @@ pub fn generate_pcm16_mode3_with_spectrogram(
     encode_generated(Version::Rpkn, options, &layers)
 }
 
+fn generate_f32_impl(
+    pcm: &[f32],
+    options: &GenerateOptions,
+    large_range: bool,
+    loudness: bool,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.len(), loudness)?;
+    let encoding = if large_range {
+        WaveEncoding::Rpkl
+    } else {
+        WaveEncoding::Rpkn
+    };
+    let version = if large_range {
+        Version::Rpkl
+    } else {
+        Version::Rpkn
+    };
+    let mut layers =
+        build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
+    if options.spectral {
+        layers.extend(build_spectral_layers_f32(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+    }
+    if loudness {
+        layers.extend(build_loudness_layers_f32(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+    }
+    encode_generated(version, options, &layers)
+}
+
+pub fn generate_f32(pcm: &[f32], options: &GenerateOptions, large_range: bool) -> Result<Vec<u8>> {
+    generate_f32_impl(pcm, options, large_range, false)
+}
+
+pub fn generate_f32_mode3(
+    pcm: &[f32],
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    generate_f32_impl(pcm, options, large_range, true)
+}
+
+/// Generate float32 REAPER-shaped mode-3 output including `-'g'` spectrogram layers.
+///
+/// The waveform encoding is RPKL when `large_range=true` and RPKN otherwise.
+/// Against the pinned REAPER 7.79 Linux x86_64 oracle, the float32/RPKL `-'g'`
+/// layer path is byte-exact for the permanent 128-case adversarial matrix:
+/// decoded 128-bin frames and packed payload bytes both match exactly. This is
+/// a `-'g'` compatibility claim, not a claim about every RPKL waveform rounding
+/// edge or arbitrary NaN/Inf/subnormal behavior. Non-finite source samples are
+/// sanitized to zero for spectrogram analysis so hostile float media cannot
+/// poison FFT output or panic generation.
+pub fn generate_f32_mode3_with_spectrogram(
+    pcm: &[f32],
+    options: &GenerateOptions,
+    large_range: bool,
+) -> Result<Vec<u8>> {
+    let frames = validate(options, pcm.len(), true)?;
+    validate_spectrogram_layer_count(options)?;
+    let encoding = if large_range {
+        WaveEncoding::Rpkl
+    } else {
+        WaveEncoding::Rpkn
+    };
+    let version = if large_range {
+        Version::Rpkl
+    } else {
+        Version::Rpkn
+    };
+
+    let mut layers =
+        build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
+    layers.extend(build_spectral_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    layers.extend(build_spectrogram_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        &options.divisions,
+    )?);
+    layers.extend(build_loudness_layers_f32(
+        pcm,
+        frames,
+        options.channels,
+        options.sample_rate,
+        &options.divisions,
+    )?);
+    encode_generated(version, options, &layers)
+}
+
 pub(crate) fn generate_f32_source<S: F32SampleSource + ?Sized>(
     pcm: &S,
     options: &GenerateOptions,
@@ -224,36 +337,6 @@ fn generate_f32_source_impl<S: F32SampleSource + ?Sized>(
         )?);
     }
     encode_generated(version, options, &layers)
-}
-
-pub fn generate_f32(pcm: &[f32], options: &GenerateOptions, large_range: bool) -> Result<Vec<u8>> {
-    generate_f32_source(pcm, options, large_range)
-}
-
-pub fn generate_f32_mode3(
-    pcm: &[f32],
-    options: &GenerateOptions,
-    large_range: bool,
-) -> Result<Vec<u8>> {
-    generate_f32_source_mode3(pcm, options, large_range)
-}
-
-/// Generate float32 REAPER-shaped mode-3 output including `-'g'` spectrogram layers.
-///
-/// The waveform encoding is RPKL when `large_range=true` and RPKN otherwise.
-/// Against the pinned REAPER 7.79 Linux x86_64 oracle, the float32/RPKL `-'g'`
-/// layer path is byte-exact for the permanent 128-case adversarial matrix:
-/// decoded 128-bin frames and packed payload bytes both match exactly. This is
-/// a `-'g'` compatibility claim, not a claim about every RPKL waveform rounding
-/// edge or arbitrary NaN/Inf/subnormal behavior. Non-finite source samples are
-/// sanitized to zero for spectrogram analysis so hostile float media cannot
-/// poison FFT output or panic generation.
-pub fn generate_f32_mode3_with_spectrogram(
-    pcm: &[f32],
-    options: &GenerateOptions,
-    large_range: bool,
-) -> Result<Vec<u8>> {
-    generate_f32_source_mode3_with_spectrogram(pcm, options, large_range)
 }
 
 pub(crate) fn generate_f32_source_mode3_with_spectrogram<S: F32SampleSource + ?Sized>(
