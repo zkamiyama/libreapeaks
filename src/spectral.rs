@@ -1,5 +1,6 @@
 use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
+use crate::sample_source::F32SampleSource;
 use std::f64::consts::PI;
 
 const ANALYSIS_RATE: f64 = 22_050.0;
@@ -443,13 +444,24 @@ fn source_from_i16(pcm: &[i16], frames: usize, channels: usize) -> Result<Vec<f6
 }
 
 fn source_from_f32(pcm: &[f32], frames: usize, channels: usize) -> Result<Vec<f64>> {
-    Ok(pcm
-        .get(..frames.saturating_mul(channels))
-        .ok_or(ReaPeaksError::InvalidArgument(
+    source_from_f32_source(pcm, frames, channels)
+}
+
+fn source_from_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+) -> Result<Vec<f64>> {
+    let required = frames
+        .checked_mul(channels)
+        .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+    if pcm.sample_len() < required {
+        return Err(ReaPeaksError::InvalidArgument(
             "PCM buffer shorter than frames*channels",
-        ))?
-        .iter()
-        .map(|&v| v as f64)
+        ));
+    }
+    Ok((0..required)
+        .map(|index| f64::from(pcm.sample_f32(index)))
         .collect())
 }
 
@@ -471,7 +483,17 @@ pub fn build_fine_spectral_f32(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f32_source(pcm, frames, channels, source_rate, division)
+}
+
+pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_f32_source(pcm, frames, channels)?;
     build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
 }
 
@@ -504,7 +526,26 @@ pub(crate) fn build_fine_spectral_f32_with_expected(
     division: u32,
     expected: usize,
 ) -> Result<Vec<SpectralPeak>> {
-    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f32_source_with_expected(
+        pcm,
+        frames,
+        channels,
+        source_rate,
+        division,
+        expected,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_source_with_expected<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+    expected: usize,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_f32_source(pcm, frames, channels)?;
     build_fine_spectral_f64_impl(
         &source,
         frames,
@@ -621,9 +662,19 @@ pub fn build_spectral_layers_f32(
     source_rate: u32,
     divisions: &[u32],
 ) -> Result<Vec<GeneratedLayer>> {
+    build_spectral_layers_f32_source(pcm, frames, channels, source_rate, divisions)
+}
+
+pub(crate) fn build_spectral_layers_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
     if divisions.is_empty() {
         return Ok(Vec::new());
     }
-    let fine = build_fine_spectral_f32(pcm, frames, channels, source_rate, divisions[0])?;
+    let fine = build_fine_spectral_f32_source(pcm, frames, channels, source_rate, divisions[0])?;
     assemble_spectral_layers(&fine, frames, channels, divisions)
 }
