@@ -1,58 +1,61 @@
-# REAPER cache paths and `reaper.ini`
+# REAPER cache paths, `reaper.ini`, and demo settings
 
-Generating correct `.reapeaks` bytes and placing them at the path REAPER expects
-are two different compatibility problems. This document describes the current
-application-layer helpers **and** the current state of the runnable demo CLIs.
+Generating compatible `.reapeaks` bytes and choosing where to publish them are
+separate concerns. libreapeaks does not require REAPER to generate the cache
+contents, and the normal demo default does not require REAPER path policy either.
 
-## The rule that matters
+## Default: sidecar beside the source
 
-**Do not invent a REAPER central-cache filename from `altpeakspath`.**
-
-For a given media source, the canonical read/write path is selected by REAPER's
-own path policy. libreapeaks delegates that decision to the public REAPER API:
+With no saved configuration or explicit CLI override, the reference demos write:
 
 ```text
-GetPeakFileNameEx(source, ..., forWrite)
-```
-
-A short-lived REAPER process can answer that question without calling
-`PCM_Source_BuildPeaks`. Once the exact path is known, another application can
-decode the media and generate/publish the `.reapeaks` bytes itself.
-
-## Three separate concepts
-
-### 1. Sidecar or application-chosen paths
-
-These are paths an application can construct without REAPER, for example:
-
-```text
+song.wav
 song.wav.reapeaks
-peaks/song.wav.reapeaks
 ```
 
-They are useful application caches, but they are only REAPER-interoperable when
-REAPER itself would choose the same location.
+This is intentionally the least surprising standalone behavior. Installing
+REAPER must not silently change where the demos write files.
 
-### 2. REAPER canonical path
+## REAPER-compatible choices are opt-in
 
-This is the exact read/write path returned by `GetPeakFileNameEx` under the
-active REAPER configuration. It may be a sidecar, subdirectory, or central path.
+The shared demo settings expose four user-facing placement policies:
 
-This is the path to use when the goal is actual REAPER cache sharing.
+| Policy | Meaning |
+|---|---|
+| `sidecar` | Write beside the source. This is the default. |
+| `subdir` | Write under the source directory's `peaks/` subdirectory. |
+| `reaper-central` | Use REAPER's recovered central-cache filename algorithm in an explicitly selected cache directory. REAPER is not required. |
+| `reaper-config` | Read `reaper.ini`, including `peakcachegenrs` and peak-path preferences, and follow the locally reproducible REAPER policy. |
 
-### 3. libreapeaks private central namespace
+The old libreapeaks SHA-256 namespace remains available internally as
+`private-central`, but it is an advanced compatibility mode and is intentionally
+not presented as REAPER central storage in the GUI.
 
-`examples/player_common.py::central_peak_path()` constructs a collision-resistant
-SHA-256-based filename inside an application-supplied directory. It is useful
-for a private shared cache, but **it is not claimed to reproduce REAPER's
-central filename algorithm**.
+## Recovered REAPER central filename
 
-The higher-level policy module calls this mode `private-central`.
+The central-cache probe in `tools/reaper_oracle/probe_central_cache.py` validates
+the REAPER 7.79 central naming shape as:
 
-## Reading `reaper.ini`
+```text
+source = absolute source path
+hash   = SHA1(lowercase(source) encoded as UTF-8)
+path   = ALTPEAKSPATH / hash[0:2] / (hash + ".reapeaks")
+```
 
-`examples/reaper_config.py` is the current reusable configuration/path helper.
-It reads the following `[REAPER]` values when present:
+The demo-layer implementation is
+`examples/demo_cache_config.py::reaper_central_peak_path()`.
+
+This lets an application create a REAPER-compatible central cache without a
+REAPER executable. `GetPeakFileNameEx` is therefore an oracle/verification path,
+not a prerequisite for the common central-cache case.
+
+The recovered algorithm is continuously treated as a versioned compatibility
+claim rather than a promise about every future REAPER release. The oracle tools
+remain useful for checking new versions and unusual path-policy combinations.
+
+## Following `reaper.ini`
+
+`examples/reaper_config.py` reads these `[REAPER]` values when present:
 
 ```ini
 peakcachegenrs=300
@@ -62,44 +65,103 @@ altpeakspath=...
 altpeaksopathlist=...
 ```
 
-The peak-rate precedence implemented by the higher-level policy is:
+The demo resolver uses the following peak-rate precedence:
 
 ```text
-explicit peak rate
-  > peakcachegenrs from explicit/auto-discovered reaper.ini
+explicit CLI rate
+  > saved demo-config peak rate
+  > peakcachegenrs from REAPER.ini
   > 300
 ```
 
-`peakcachegenrs` is not fixed at 300. For example:
+For cache placement, the offline resolver handles the common REAPER choices:
+
+- normal sidecar placement;
+- global alternate/central placement;
+- source-tree selection through `altpeaksopathlist`;
+- central filename derivation using the recovered SHA-1 rule.
+
+If `reaper.ini` contains a non-default flag combination whose matching semantics
+have not been recovered safely, libreapeaks does not guess. In that case it asks
+for either a REAPER executable or a saved cache map and resolves the exact path
+through the oracle.
+
+## Optional `GetPeakFileNameEx` verification
+
+When `Verify derived paths with installed REAPER` is enabled, the demo may launch
+a short-lived REAPER process and query:
 
 ```text
-48,000 Hz / 300 -> [160, 2400, 48000]
-48,000 Hz / 500 -> [96, 2400, 48000]
+GetPeakFileNameEx(source, ..., forWrite)
 ```
 
-Unknown `altpeaks` matching semantics are not reimplemented. Path selection is
-delegated to REAPER.
+The query does not call `PCM_Source_BuildPeaks`. libreapeaks still decodes the
+media and generates the `.reapeaks` bytes itself.
 
-## Live canonical path query
+If the oracle disagrees with the locally derived target, the exact REAPER answer
+wins and the path origin is reported as an oracle override. This makes live
+REAPER useful as a compatibility verifier without making it a normal runtime
+dependency.
 
-`query_reaper_peak_paths()`:
+The legacy CLI spelling `--cache-mode reaper` remains the force-exact path: it
+requires a REAPER executable or `--reaper-cache-map`.
 
-1. resolves the media and REAPER executable;
-2. optionally launches REAPER with an explicit `reaper.ini`;
-3. creates a `PCM_source` from the media;
-4. calls `GetPeakFileNameEx` for read and write paths;
-5. records the media source type;
-6. destroys the source and exits.
+## Persistent settings shared by the demos
 
-It does **not** call `PCM_Source_BuildPeaks`.
+Desktop and Web DAW demos use the same JSON configuration. The default locations
+are platform user-config directories, for example:
 
-Malformed results fail closed. The current implementation rejects non-object
-JSON, non-string paths/source types, missing write paths, query failures, and
-timeouts instead of leaking an `AttributeError` or coercing unexpected values.
+```text
+Linux:   ~/.config/libreapeaks/demo-config.json
+macOS:   ~/Library/Application Support/libreapeaks/demo-config.json
+Windows: %APPDATA%\libreapeaks\demo-config.json
+```
 
-## Persisting canonical answers in a cache map
+`LIBREAPEAKS_DEMO_CONFIG` can override the file location for tests or custom
+launchers.
 
-Use the helper tool to query REAPER once and save the answers:
+Conceptually the file is:
+
+```json
+{
+  "version": 1,
+  "cache": {
+    "policy": "sidecar",
+    "cache_directory": "",
+    "reaper_ini": "",
+    "auto_reaper_ini": false,
+    "verify_with_reaper": false,
+    "reaper_executable": "",
+    "peak_rate": null
+  }
+}
+```
+
+The PySide cache-preparation dialog has a **Cache settings…** editor. The Web DAW
+page exposes the same settings through `/api/config` and persists them to the
+same file. Saved settings apply to later cache preparations; explicit CLI cache
+placement still takes precedence.
+
+## Browser-upload limitation
+
+A browser `File` upload intentionally does not reveal the source's original
+absolute filesystem path. That path is part of REAPER's central-cache key and is
+also needed to interpret path-specific `reaper.ini` rules.
+
+Therefore the Web DAW demo refuses `reaper-central` / `reaper-config` placement
+for temporary browser uploads instead of hashing the server's temporary upload
+path. To demonstrate exact REAPER placement in the Web app, start the server with
+a real server-side source path, for example:
+
+```bash
+python examples/web_player/daw_server.py /media/library/song.flac
+```
+
+Browser uploads continue to work with the default sidecar or `peaks/` policies.
+
+## Persisted exact cache maps
+
+REAPER answers can still be saved for offline reuse:
 
 ```bash
 python tools/reaper_oracle/make_cache_map.py \
@@ -109,170 +171,33 @@ python tools/reaper_oracle/make_cache_map.py \
   --recursive /media/library
 ```
 
-The current JSON format is version 2 and contains path-policy data, not peak
-files. Conceptually:
+The current map format is version 2. It stores path-policy answers, not peak
+files. Maps are particularly useful for CI, compatibility research, and cases
+where REAPER path-policy behavior is intentionally treated as opaque.
 
-```json
-{
-  "version": 2,
-  "source": "REAPER GetPeakFileNameEx",
-  "reaper_ini": "/path/to/reaper.ini",
-  "entries": {
-    "/absolute/media/song.flac": {
-      "media": "/absolute/media/song.flac",
-      "read": "/path/chosen/by/REAPER",
-      "write": "/path/chosen/by/REAPER",
-      "source_type": "VIDEO",
-      "origin": "GetPeakFileNameEx"
-    }
-  }
-}
-```
+## Low-level private central namespace
 
-Legacy v1/single-record forms remain readable. An explicitly declared unknown
-or malformed version is rejected rather than interpreted as the current format.
+`examples/player_common.py::central_peak_path()` is deliberately different from
+REAPER central naming. It constructs a collision-resistant libreapeaks-private
+SHA-256 filename inside an application-supplied directory.
 
-A cache map is safe to use offline only as long as it still represents the
-REAPER configuration/path policy you intend to follow.
+Do not use that function when the goal is for REAPER to discover the same cache.
+The user-facing REAPER central resolver lives in `demo_cache_config.py`.
 
-# Higher-level policy helper
+## Cache generation and publication
 
-`examples/player_reaper_integration.py` contains the application-level policy
-that was designed for full REAPER integration. Its modes are:
-
-| Mode | Higher-level meaning |
-|---|---|
-| `sidecar` | Application sidecar path |
-| `subdir` | Application `peaks/` subdirectory |
-| `central` | Exact REAPER central path; requires a canonical resolver and validation against `reaper.ini` or `--cache-dir` |
-| `reaper` | Exact path returned by REAPER, regardless of whether it is central or sidecar |
-| `private-central` | libreapeaks SHA-256 namespace; not claimed to match REAPER |
-| `auto` | Reuse an existing cache; if REAPER configuration requests a non-default path, fail closed unless an exact resolver is available |
-
-This module can combine:
-
-- explicit peak paths;
-- explicit peak rate;
-- `reaper.ini` discovery/loading;
-- live `GetPeakFileNameEx` queries;
-- persisted cache maps;
-- strict central-directory validation.
-
-# Important: current runnable demo CLI wiring
-
-The current `examples/pyside6_player.py` and
-`examples/web_player/server.py` do **not yet call**
-`resolve_player_peak_policy()`. They call the lower-level
-`player_common.ensure_reapeaks()` directly.
-
-That means their command-line mode names currently have older semantics:
-
-| Demo CLI mode | Current runnable behavior |
-|---|---|
-| `auto` | Reuse mapped/sidecar/subdir/private-directory candidates, otherwise write sidecar |
-| `sidecar` | Write beside the media |
-| `subdir` | Write under `peaks/` |
-| `central` | **Private SHA-256 cache under `--cache-dir`**; this is not canonical REAPER central naming |
-| `reaper` | Use the exact path from `--reaper-cache-map` |
-
-The demo CLIs currently expose `--reaper-cache-map`, but not
-`--reaper-executable`, `--reaper-ini`, `--auto-reaper-ini`, or the
-`private-central` name used by the higher-level policy helper.
-
-This mismatch is application wiring debt, not a property of the Rust core.
-Documentation must not describe the current demo's `--cache-mode central` as a
-REAPER-canonical mode.
-
-## Correct REAPER-path workflow with the current demos
-
-For the runnable demos today, use a persisted map and `--cache-mode reaper`:
-
-```bash
-python tools/reaper_oracle/make_cache_map.py \
-  --reaper-executable /path/to/reaper \
-  --reaper-ini /path/to/reaper.ini \
-  --output ~/.cache/libreapeaks/reaper-cache-map.json \
-  /media/library/song.flac
-```
-
-Then:
-
-```bash
-python examples/pyside6_player.py /media/library/song.flac \
-  --cache-mode reaper \
-  --reaper-cache-map ~/.cache/libreapeaks/reaper-cache-map.json \
-  --cache-decoder ffmpeg \
-  --fine-peaks-per-second 300
-```
-
-Use the actual `peakcachegenrs` value from the REAPER configuration instead of
-`300` when it differs. The current demo CLI does not automatically copy that
-value out of the cache map or `reaper.ini`.
-
-The browser server accepts the same cache-generation/path options.
-
-# Cache generation scope in the current demos
-
-The runnable Python demos call the public Python functions:
+The current desktop and Web DAW preparation paths use
+`ensure_reapeaks_native()` and the native REAPER-shaped Python writer. The full
+`spectrogram` shape is:
 
 ```text
-reapeaks.generate_pcm16
-reapeaks.generate_f32
+waveform + -'s' spectral + -'g' spectrogram + -'r' loudness
 ```
 
-Those functions currently generate waveform plus optional `-'s'` spectral
-layers. They do **not** call the Rust-only complete mode-3 writer, so the demos
-do not currently generate `-'r'` loudness layers.
+Publication remains defensive: source geometry is validated, decoded output is
+bounded, an exclusive cache lock is used, output is written to a temporary file
+in the target directory, the source stamp is checked before publication, and the
+final file is atomically replaced.
 
-The Rust core's complete mode-3 entry points are:
-
-```text
-generate_pcm16_mode3
-generate_f32_mode3
-```
-
-This distinction matters when using the live whole-file byte-identity results
-as a compatibility claim: those strongest mode-3 oracle results apply to the
-Rust mode-3 writer, not automatically to the current Python demo writer surface.
-
-# Publishing and cache safety
-
-The lower-level player helper performs defensive publication:
-
-- validates source geometry and division values;
-- limits decoded output size and decode time;
-- uses an exclusive cache lock;
-- writes a temporary file in the target directory;
-- parses and checks source size/mtime metadata before publication;
-- atomically replaces the final target;
-- avoids publishing if the source changes during decode/generation.
-
-The config/cache-map code also fails closed on malformed map versions and
-unexpected path-query result types.
-
-# C API division helper
-
-C callers may supply any valid explicit division array to the writer or derive
-REAPER-style divisions from a configured peak rate:
-
-```c
-uint32_t divisions[3];
-if (rpk_default_divisions(48000, 500, divisions) != 0) {
-  /* sample rate / peak rate was zero, or output was null */
-}
-```
-
-The result is:
-
-```text
-[96, 2400, 48000]
-```
-
-# Validation notes
-
-The repository includes real-REAPER workflows for central path research and
-integration, but the central-cache integration workflow is not currently one of
-the always-on `main`/pull-request gates. Treat the current source code and unit
-tests as authoritative for API behavior, and the permanent whole-file oracle
-workflows in `COMPATIBILITY.md` as the authoritative continuous byte-identity
-claim.
+For byte-identity claims and permanent REAPER oracle coverage, see
+`COMPATIBILITY.md`.
