@@ -1,4 +1,4 @@
-name: Temporary spectral follow-up 2 planar gate
+name: Temporary spectral follow-up 2 FFT scratch gate
 
 on:
   push:
@@ -24,76 +24,58 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Apply planar spectral ring buffer
+      - name: Reuse strict spectral FFT scratch
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          path=Path("src/spectral.rs")
+          text=path.read_text()
 
-          path = Path("src/spectral.rs")
-          text = path.read_text()
-
-          # Streaming writer: keep each channel's history contiguous so the FFT
-          # gather no longer walks memory with a channel-count stride.
-          start = text.index("    fn push_interleaved(&mut self, samples: &[f64]) -> bool {")
-          end = text.index("\n    fn into_output", start)
-          method = r'''    fn push_interleaved(&mut self, samples: &[f64]) -> bool {
-              debug_assert_eq!(samples.len() % self.channels, 0);
-              let nwin = self.window.len();
-              for frame in samples.chunks_exact(self.channels) {
-                  for (channel, &sample) in frame.iter().enumerate() {
-                      self.ring[channel * nwin + self.write_pos] = sample as f32;
-                  }
-                  self.write_pos += 1;
-                  if self.write_pos == nwin {
-                      self.write_pos = 0;
-                  }
-                  self.phase += 1.0;
-                  self.elapsed += 1;
-                  while self.phase >= self.hop {
-                      for channel in 0..self.channels {
-                          let peak = analyze_channel(
-                              &self.ring,
-                              self.write_pos,
-                              channel,
-                              &self.window,
-                              &mut self.previous[channel],
-                              self.elapsed,
-                          );
-                          self.out.push(peak);
-                      }
-                      self.elapsed = 0;
-                      self.phase -= self.hop;
-                      if self
-                          .expected
-                          .is_some_and(|expected| self.out.len() / self.channels >= expected)
-                      {
-                          return true;
-                      }
-                  }
+          # Add an into variant for the WDL bridge while keeping the existing
+          # returning wrapper for staged/reference paths.
+          start=text.index('#[cfg(feature = "strict-wdl")]\nfn real_fft_1024(')
+          end=text.index('\n#[cfg(not(feature = "strict-wdl"))]\nfn real_fft_1024', start)
+          strict_fft=r'''#[cfg(feature = "strict-wdl")]
+          fn real_fft_1024_into(
+              input: &mut [f64; FFT_N],
+              out: &mut [C64; HALF_BINS + 1],
+          ) {
+              unsafe extern "C" {
+                  fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
               }
-              false
+              let rc = unsafe {
+                  rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
+              };
+              assert_eq!(rc, 0, "WDL FFT bridge failed");
+          }
+
+          #[cfg(feature = "strict-wdl")]
+          fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+              let mut out = [C64::default(); HALF_BINS + 1];
+              real_fft_1024_into(input, &mut out);
+              out
           }
           '''
-          text = text[:start] + method + text[end:]
+          text=text[:start]+strict_fft+text[end:]
 
-          # FFT gather now consumes a contiguous per-channel lane.
-          start = text.index("#[inline]\nfn fill_fft_input(")
-          end = text.index("\n#[inline]\nfn summarize_spectrum_magnitudes", start)
-          fill = r'''#[inline]
-          fn fill_fft_input(
+          # Split the planar gather into an in-place filler plus the old wrapper.
+          start=text.index('#[inline]\nfn fill_fft_input(')
+          end=text.index('\n#[inline]\nfn summarize_spectrum_magnitudes', start)
+          fill=r'''#[inline]
+          fn fill_fft_input_into(
               ring: &[f32],
               write_pos: usize,
               channel: usize,
               window: &[f32],
-          ) -> [f64; FFT_N] {
+              fft_in: &mut [f64; FFT_N],
+          ) {
               let nwin = window.len();
               let lane_start = channel * nwin;
               let lane = &ring[lane_start..lane_start + nwin];
-              let mut fft_in = [0.0f64; FFT_N];
+              fft_in.fill(0.0);
               if nwin == FFT_N {
                   let mut i = 0usize;
                   for &sample in &lane[write_pos..] {
-                      // Preserve REAPER's scalar f32 multiply before promotion.
                       let product = sample * window[i];
                       fft_in[i] += product as f64;
                       i += 1;
@@ -110,110 +92,162 @@ jobs:
                       fft_in[i & (FFT_N - 1)] += product as f64;
                   }
               }
+          }
+
+          #[inline]
+          fn fill_fft_input(
+              ring: &[f32],
+              write_pos: usize,
+              channel: usize,
+              window: &[f32],
+          ) -> [f64; FFT_N] {
+              let mut fft_in = [0.0f64; FFT_N];
+              fill_fft_input_into(ring, write_pos, channel, window, &mut fft_in);
               fft_in
           }
           '''
-          text = text[:start] + fill + text[end:]
+          text=text[:start]+fill+text[end:]
 
-          # analyze_channel no longer needs the channel count for ring indexing.
-          start = text.index("fn analyze_channel(")
-          end = text.index("\nfn analyze_resampled_spectral(", start)
-          section = text[start:end]
-          old = "    channels: usize,\n    channel: usize,"
-          if old not in section:
-              raise SystemExit("analyze_channel signature fragment not found")
-          section = section.replace(old, "    channel: usize,", 1)
-          old = "fill_fft_input(ring, write_pos, channels, channel, window)"
-          if section.count(old) != 2:
-              raise SystemExit(f"expected two fill calls, got {section.count(old)}")
-          section = section.replace(old, "fill_fft_input(ring, write_pos, channel, window)")
-          text = text[:start] + section + text[end:]
-
-          # Staged analyzer uses the same planar layout, preserving sample order.
-          old = """        for c in 0..channels {\n            ring[write_pos * channels + c] = resampled[f * channels + c] as f32;\n        }\n"""
-          new = """        for c in 0..channels {\n            ring[c * nwin + write_pos] = resampled[f * channels + c] as f32;\n        }\n"""
-          if old not in text:
-              raise SystemExit("staged ring write not found")
-          text = text.replace(old, new, 1)
-
-          old = """                let p = analyze_channel(\n                    &ring,\n                    write_pos,\n                    channels,\n                    c,\n"""
-          new = """                let p = analyze_channel(\n                    &ring,\n                    write_pos,\n                    c,\n"""
-          if old not in text:
-              raise SystemExit("staged analyze call not found")
-          text = text.replace(old, new, 1)
-
-          # Dedicated equivalence test: planar gather must reproduce the old
-          # interleaved indexing bit-for-bit for every tested write position.
-          start = text.index("#[cfg(test)]\nmod spectral_fft_input_fast_path_tests {")
-          end = text.index("\n#[cfg(test)]\nmod spectral_magnitude_summary_tests", start)
-          tests = r'''#[cfg(test)]
-          mod spectral_fft_input_fast_path_tests {
-              use super::*;
-
-              fn reference_interleaved_fft_input(
-                  ring: &[f32],
-                  write_pos: usize,
-                  channels: usize,
-                  channel: usize,
-                  window: &[f32],
-              ) -> [f64; FFT_N] {
-                  let nwin = window.len();
-                  let mut fft_in = [0.0f64; FFT_N];
-                  for i in 0..nwin {
-                      let rf = (write_pos + i) % nwin;
-                      let sample = ring[rf * channels + channel];
-                      let product = sample * window[i];
-                      fft_in[i & (FFT_N - 1)] += product as f64;
-                  }
-                  fft_in
+          # Share the post-FFT math, then add a strict scratch-reusing entry point.
+          start=text.index('fn analyze_channel(')
+          end=text.index('\nfn analyze_resampled_spectral(', start)
+          analyze=r'''fn analyze_spectrum(
+              spec: &[C64; HALF_BINS + 1],
+              previous: &mut [C32; HALF_BINS + 1],
+              elapsed: usize,
+          ) -> SpectralPeak {
+              let (total, mags_f32, kmax, previous_at_kmax) =
+                  summarize_spectrum_magnitudes(spec, previous);
+              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                  return SpectralPeak::default();
               }
 
-              fn planarize(interleaved: &[f32], frames: usize, channels: usize) -> Vec<f32> {
-                  let mut planar = vec![0.0f32; interleaved.len()];
-                  for frame in 0..frames {
-                      for channel in 0..channels {
-                          planar[channel * frames + frame] = interleaved[frame * channels + channel];
-                      }
-                  }
-                  planar
-              }
+              let best_bin = if kmax == HALF_BINS || elapsed == 0 {
+                  HALF_BINS as f64
+              } else {
+                  let cur = spec[kmax];
+                  let prev = previous_at_kmax;
+                  let phase_cur = cur.im.atan2(cur.re);
+                  let phase_prev = (prev.im as f64).atan2(prev.re as f64);
+                  let residual = wrap_phase(
+                      (phase_cur - phase_prev) / PI
+                          - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
+                  );
+                  kmax as f64 + HALF_BINS as f64 / elapsed as f64 * residual
+              };
 
-              #[test]
-              fn planar_modulo_free_1024_gather_is_bit_identical() {
-                  let channels = 6usize;
-                  let interleaved: Vec<f32> = (0..FFT_N * channels)
-                      .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
-                      .collect();
-                  let planar = planarize(&interleaved, FFT_N, channels);
-                  let window: Vec<f32> = (0..FFT_N)
-                      .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
-                      .collect();
-                  for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
-                      for channel in 0..channels {
-                          let fast = fill_fft_input(&planar, write_pos, channel, &window);
-                          let reference = reference_interleaved_fft_input(
-                              &interleaved,
-                              write_pos,
-                              channels,
-                              channel,
-                              &window,
-                          );
-                          for (index, (&actual, &expected)) in
-                              fast.iter().zip(reference.iter()).enumerate()
-                          {
-                              assert_eq!(
-                                  actual.to_bits(),
-                                  expected.to_bits(),
-                                  "write_pos={write_pos} channel={channel} bin={index}"
-                              );
-                          }
-                      }
-                  }
+              let frequency_hz = (0.5 + best_bin * ANALYSIS_RATE / FFT_N as f64)
+                  .trunc()
+                  .clamp(0.0, 32767.0) as u16;
+
+              let mut spread = 0.0f64;
+              for (k, &magnitude) in mags_f32.iter().enumerate() {
+                  let d = k as f64 - best_bin;
+                  spread += magnitude as f64 * d * d;
+              }
+              let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
+                  .trunc()
+                  .clamp(0.0, 16383.0) as u16;
+
+              SpectralPeak {
+                  frequency_hz,
+                  density,
               }
           }
-          '''
-          text = text[:start] + tests + text[end:]
 
+          fn analyze_channel(
+              ring: &[f32],
+              write_pos: usize,
+              channel: usize,
+              window: &[f32],
+              previous: &mut [C32; HALF_BINS + 1],
+              elapsed: usize,
+          ) -> SpectralPeak {
+              #[cfg(feature = "strict-wdl")]
+              let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
+              #[cfg(not(feature = "strict-wdl"))]
+              let fft_in = fill_fft_input(ring, write_pos, channel, window);
+              #[cfg(feature = "strict-wdl")]
+              let spec = real_fft_1024(&mut fft_in);
+              #[cfg(not(feature = "strict-wdl"))]
+              let spec = real_fft_1024(&fft_in);
+              analyze_spectrum(&spec, previous, elapsed)
+          }
+
+          #[cfg(feature = "strict-wdl")]
+          fn analyze_channel_with_scratch(
+              ring: &[f32],
+              write_pos: usize,
+              channel: usize,
+              window: &[f32],
+              previous: &mut [C32; HALF_BINS + 1],
+              elapsed: usize,
+              fft_in: &mut [f64; FFT_N],
+              spec: &mut [C64; HALF_BINS + 1],
+          ) -> SpectralPeak {
+              fill_fft_input_into(ring, write_pos, channel, window, fft_in);
+              real_fft_1024_into(fft_in, spec);
+              analyze_spectrum(spec, previous, elapsed)
+          }
+          '''
+          text=text[:start]+analyze+text[end:]
+
+          # Allocate one pair of scratch buffers for the lifetime of each strict
+          # streaming analyzer instead of one pair per channel per analysis hop.
+          old='''    out: Vec<SpectralPeak>,\n    expected: Option<usize>,\n}'''
+          new='''    out: Vec<SpectralPeak>,\n    expected: Option<usize>,\n    fft_in: Box<[f64; FFT_N]>,\n    spectrum: Box<[C64; HALF_BINS + 1]>,\n}'''
+          if text.count(old)!=1: raise SystemExit(f"struct tail count={text.count(old)}")
+          text=text.replace(old,new,1)
+          old='''            out: Vec::with_capacity(output_capacity),\n            expected,\n        }'''
+          new='''            out: Vec::with_capacity(output_capacity),\n            expected,\n            fft_in: Box::new([0.0f64; FFT_N]),\n            spectrum: Box::new([C64::default(); HALF_BINS + 1]),\n        }'''
+          if text.count(old)!=1: raise SystemExit(f"initializer tail count={text.count(old)}")
+          text=text.replace(old,new,1)
+
+          # Replace only the streaming method; the staged path intentionally keeps
+          # the returning wrappers as a cross-check against the scratch path.
+          start=text.index('    fn push_interleaved(&mut self, samples: &[f64]) -> bool {')
+          end=text.index('\n    fn into_output', start)
+          method=r'''    fn push_interleaved(&mut self, samples: &[f64]) -> bool {
+              debug_assert_eq!(samples.len() % self.channels, 0);
+              let nwin = self.window.len();
+              for frame in samples.chunks_exact(self.channels) {
+                  for (channel, &sample) in frame.iter().enumerate() {
+                      self.ring[channel * nwin + self.write_pos] = sample as f32;
+                  }
+                  self.write_pos += 1;
+                  if self.write_pos == nwin {
+                      self.write_pos = 0;
+                  }
+                  self.phase += 1.0;
+                  self.elapsed += 1;
+                  while self.phase >= self.hop {
+                      for channel in 0..self.channels {
+                          let peak = analyze_channel_with_scratch(
+                              &self.ring,
+                              self.write_pos,
+                              channel,
+                              &self.window,
+                              &mut self.previous[channel],
+                              self.elapsed,
+                              self.fft_in.as_mut(),
+                              self.spectrum.as_mut(),
+                          );
+                          self.out.push(peak);
+                      }
+                      self.elapsed = 0;
+                      self.phase -= self.hop;
+                      if self
+                          .expected
+                          .is_some_and(|expected| self.out.len() / self.channels >= expected)
+                      {
+                          return true;
+                      }
+                  }
+              }
+              false
+          }
+          '''
+          text=text[:start]+method+text[end:]
           path.write_text(text)
           PY
           cargo fmt --all
@@ -232,5 +266,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/spectral.rs
           git diff --cached --quiet && exit 1
-          git commit -m "Store spectral ring buffers per channel"
+          git commit -m "Reuse strict spectral FFT scratch buffers"
           git push origin HEAD:optimize/spectral-followup-2
