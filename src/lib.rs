@@ -35,6 +35,7 @@ pub mod source;
 #[cfg(feature = "strict-wdl")]
 #[path = "spectral_strict.rs"]
 pub mod spectral;
+
 #[cfg(not(feature = "strict-wdl"))]
 pub mod spectral;
 #[cfg(feature = "strict-wdl")]
