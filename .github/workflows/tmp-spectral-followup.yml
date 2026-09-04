@@ -25,7 +25,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Apply step 2 - remove modulo from the 1024-sample FFT gather
+      - name: Apply step 3 - remove the f64 magnitude scratch array
         shell: bash
         run: |
           python3 - <<'PY'
@@ -33,142 +33,169 @@ jobs:
 
           path = Path("src/spectral.rs")
           text = path.read_text()
-          old = r'''fn analyze_channel(
-              ring: &[f32],
-              write_pos: usize,
-              channels: usize,
-              channel: usize,
-              window: &[f32],
-              previous: &[C32; HALF_BINS + 1],
-              elapsed: usize,
-          ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
-              let nwin = window.len();
-              let mut fft_in = [0.0f64; FFT_N];
-              for i in 0..nwin {
-                  let rf = (write_pos + i) % nwin;
-                  let sample = ring[rf * channels + channel];
-                  // REAPER 7.79 disassembly uses a scalar f32 multiply here, then
-                  // promotes the result to double before accumulating the FFT input.
-                  let product = sample * window[i];
-                  fft_in[i & (FFT_N - 1)] += product as f64;
+
+          marker = '''fn analyze_channel(
+          '''
+          helper = r'''#[inline]
+          fn summarize_spectrum_magnitudes(
+              spec: &[C64; HALF_BINS + 1],
+          ) -> (f64, [f32; HALF_BINS + 1], usize) {
+              let mut total = 0.0f64;
+              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+              let mut interior_kmax = 1usize;
+              let mut interior_mmax = f64::NEG_INFINITY;
+              let mut nyquist_magnitude = 0.0f64;
+
+              for k in 0..=HALF_BINS {
+                  let m = if k == 0 || k == HALF_BINS {
+                      spec[k].re.abs()
+                  } else {
+                      (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+                  };
+                  total += m;
+                  mags_f32[k] = m as f32;
+                  if k == HALF_BINS {
+                      nyquist_magnitude = m;
+                  } else if k != 0 && m > interior_mmax {
+                      interior_mmax = m;
+                      interior_kmax = k;
+                  }
               }
-          '''.replace('          ', '')
-          new = r'''#[inline]
-          fn fill_fft_input(
-              ring: &[f32],
-              write_pos: usize,
-              channels: usize,
-              channel: usize,
-              window: &[f32],
-          ) -> [f64; FFT_N] {
-              let nwin = window.len();
-              let mut fft_in = [0.0f64; FFT_N];
-              if nwin == FFT_N {
-                  let mut i = 0usize;
-                  for rf in write_pos..FFT_N {
-                      let sample = ring[rf * channels + channel];
-                      // Preserve REAPER's scalar f32 multiply before promotion.
-                      let product = sample * window[i];
-                      fft_in[i] += product as f64;
-                      i += 1;
-                  }
-                  for rf in 0..write_pos {
-                      let sample = ring[rf * channels + channel];
-                      let product = sample * window[i];
-                      fft_in[i] += product as f64;
-                      i += 1;
-                  }
+
+              let kmax = if interior_mmax > nyquist_magnitude {
+                  interior_kmax
               } else {
-                  for i in 0..nwin {
-                      let rf = (write_pos + i) % nwin;
-                      let sample = ring[rf * channels + channel];
-                      let product = sample * window[i];
-                      fft_in[i & (FFT_N - 1)] += product as f64;
-                  }
-              }
-              fft_in
+                  HALF_BINS
+              };
+              (total, mags_f32, kmax)
           }
 
-          fn analyze_channel(
-              ring: &[f32],
-              write_pos: usize,
-              channels: usize,
-              channel: usize,
-              window: &[f32],
-              previous: &[C32; HALF_BINS + 1],
-              elapsed: usize,
-          ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
-              let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+          '''.replace('          ', '')
+          if helper.strip() in text:
+              raise SystemExit("step3 helper already present")
+          if marker not in text:
+              raise SystemExit("step3 insertion marker not found")
+          text = text.replace(marker, helper + marker, 1)
+
+          old = r'''    let mut mags = [0.0f64; HALF_BINS + 1];
+              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+              for k in 0..=HALF_BINS {
+                  let m = if k == 0 || k == HALF_BINS {
+                      spec[k].re.abs()
+                  } else {
+                      (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+                  };
+                  mags[k] = m;
+                  mags_f32[k] = m as f32;
+              }
+
+              let total: f64 = mags.iter().sum();
+              // REAPER's ordered floating-point branch proceeds only when total > 0.
+              // This rejects NaN as well as zero/negative totals.  With very large but
+              // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
+              // emits a zero spectral peak for those frames instead of a Nyquist/zero-
+              // density placeholder.
+              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                  return (SpectralPeak::default(), next);
+              }
+
+              // REAPER initializes the candidate to Nyquist and scans bins 1..511.
+              // DC participates in density but not dominant-frequency selection.
+              let mut kmax = HALF_BINS;
+              let mut mmax = mags[HALF_BINS];
+              for k in 1..HALF_BINS {
+                  if mags[k] > mmax {
+                      mmax = mags[k];
+                      kmax = k;
+                  }
+              }
+          '''.replace('          ', '')
+          new = r'''    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
+              // REAPER's ordered floating-point branch proceeds only when total > 0.
+              // This rejects NaN as well as zero/negative totals.  With very large but
+              // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
+              // emits a zero spectral peak for those frames instead of a Nyquist/zero-
+              // density placeholder.
+              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                  return (SpectralPeak::default(), next);
+              }
           '''.replace('          ', '')
           if old not in text:
-              raise SystemExit("step2 production target not found")
+              raise SystemExit("step3 production target not found")
           text = text.replace(old, new, 1)
 
           tests = r'''
 
           #[cfg(test)]
-          mod spectral_fft_input_fast_path_tests {
+          mod spectral_magnitude_summary_tests {
               use super::*;
 
-              fn reference_fft_input(
-                  ring: &[f32],
-                  write_pos: usize,
-                  channels: usize,
-                  channel: usize,
-                  window: &[f32],
-              ) -> [f64; FFT_N] {
-                  let nwin = window.len();
-                  let mut fft_in = [0.0f64; FFT_N];
-                  for i in 0..nwin {
-                      let rf = (write_pos + i) % nwin;
-                      let sample = ring[rf * channels + channel];
-                      let product = sample * window[i];
-                      fft_in[i & (FFT_N - 1)] += product as f64;
+              fn reference_summary(
+                  spec: &[C64; HALF_BINS + 1],
+              ) -> (f64, [f32; HALF_BINS + 1], usize) {
+                  let mut mags = [0.0f64; HALF_BINS + 1];
+                  let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+                  for k in 0..=HALF_BINS {
+                      let m = if k == 0 || k == HALF_BINS {
+                          spec[k].re.abs()
+                      } else {
+                          (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+                      };
+                      mags[k] = m;
+                      mags_f32[k] = m as f32;
                   }
-                  fft_in
+                  let total: f64 = mags.iter().sum();
+                  let mut kmax = HALF_BINS;
+                  let mut mmax = mags[HALF_BINS];
+                  for k in 1..HALF_BINS {
+                      if mags[k] > mmax {
+                          mmax = mags[k];
+                          kmax = k;
+                      }
+                  }
+                  (total, mags_f32, kmax)
+              }
+
+              fn assert_same(spec: &[C64; HALF_BINS + 1]) {
+                  let (actual_total, actual_f32, actual_kmax) =
+                      summarize_spectrum_magnitudes(spec);
+                  let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);
+                  assert_eq!(actual_total.to_bits(), expected_total.to_bits());
+                  assert_eq!(actual_kmax, expected_kmax);
+                  for (index, (&actual, &expected)) in
+                      actual_f32.iter().zip(expected_f32.iter()).enumerate()
+                  {
+                      assert_eq!(
+                          actual.to_bits(),
+                          expected.to_bits(),
+                          "magnitude bin={index}"
+                      );
+                  }
               }
 
               #[test]
-              fn modulo_free_1024_gather_is_bit_identical() {
-                  let channels = 6usize;
-                  let ring: Vec<f32> = (0..FFT_N * channels)
-                      .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
-                      .collect();
-                  let window: Vec<f32> = (0..FFT_N)
-                      .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
-                      .collect();
-                  for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
-                      for channel in 0..channels {
-                          let fast = fill_fft_input(
-                              &ring,
-                              write_pos,
-                              channels,
-                              channel,
-                              &window,
-                          );
-                          let reference = reference_fft_input(
-                              &ring,
-                              write_pos,
-                              channels,
-                              channel,
-                              &window,
-                          );
-                          for (index, (&actual, &expected)) in
-                              fast.iter().zip(reference.iter()).enumerate()
-                          {
-                              assert_eq!(
-                                  actual.to_bits(),
-                                  expected.to_bits(),
-                                  "write_pos={write_pos} channel={channel} bin={index}"
-                              );
-                          }
-                      }
+              fn compact_summary_matches_reference_bits() {
+                  let mut spec = [C64::default(); HALF_BINS + 1];
+                  for (k, value) in spec.iter_mut().enumerate() {
+                      value.re = ((k * 37 + 11) as f64).sin() * (1.0 + k as f64 / 17.0);
+                      value.im = ((k * 53 + 7) as f64).cos() * (0.5 + k as f64 / 31.0);
                   }
+                  assert_same(&spec);
+
+                  spec.fill(C64::default());
+                  spec[1].re = 3.0;
+                  spec[2].re = 3.0;
+                  spec[HALF_BINS].re = 2.0;
+                  assert_same(&spec);
+
+                  spec[17].re = f64::NAN;
+                  spec[31].im = f64::INFINITY;
+                  assert_same(&spec);
               }
           }
           '''.replace('          ', '')
-          if 'mod spectral_fft_input_fast_path_tests' in text:
-              raise SystemExit("step2 tests already present")
+          if 'mod spectral_magnitude_summary_tests' in text:
+              raise SystemExit("step3 tests already present")
           path.write_text(text + tests)
           PY
           cargo fmt --all
@@ -182,11 +209,11 @@ jobs:
       - name: Clippy strict WDL
         run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
 
-      - name: Commit step 2
+      - name: Commit step 3
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/spectral.rs
-          git commit -m "Avoid modulo in 1024-sample spectral FFT gather"
+          git commit -m "Reduce spectral magnitude scratch storage"
           git push origin HEAD:optimize/spectral-followup
