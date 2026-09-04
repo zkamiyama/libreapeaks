@@ -34,9 +34,7 @@ jobs:
           path = Path("src/spectral.rs")
           text = path.read_text()
 
-          marker = '''fn analyze_channel(
-          '''
-          helper = r'''#[inline]
+          helper = '''#[inline]
           fn summarize_spectrum_magnitudes(
               spec: &[C64; HALF_BINS + 1],
           ) -> (f64, [f32; HALF_BINS + 1], usize) {
@@ -70,26 +68,16 @@ jobs:
               (total, mags_f32, kmax)
           }
 
-          '''.replace('          ', '')
-          if helper.strip() in text:
-              raise SystemExit("step3 helper already present")
-          if marker not in text:
-              raise SystemExit("step3 insertion marker not found")
-          text = text.replace(marker, helper + marker, 1)
+          '''
+          if 'fn summarize_spectrum_magnitudes(' in text:
+              raise SystemExit('step3 helper already present')
+          marker = 'fn analyze_channel(\n'
+          pos = text.index(marker)
+          text = text[:pos] + helper + text[pos:]
 
-          old = r'''    let mut mags = [0.0f64; HALF_BINS + 1];
-              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-              for k in 0..=HALF_BINS {
-                  let m = if k == 0 || k == HALF_BINS {
-                      spec[k].re.abs()
-                  } else {
-                      (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
-                  };
-                  mags[k] = m;
-                  mags_f32[k] = m as f32;
-              }
-
-              let total: f64 = mags.iter().sum();
+          start = text.index('    let mut mags = [0.0f64; HALF_BINS + 1];')
+          end = text.index('    let best_bin = if kmax == HALF_BINS || elapsed == 0 {', start)
+          replacement = '''    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
               // REAPER's ordered floating-point branch proceeds only when total > 0.
               // This rejects NaN as well as zero/negative totals.  With very large but
               // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
@@ -99,32 +87,10 @@ jobs:
                   return (SpectralPeak::default(), next);
               }
 
-              // REAPER initializes the candidate to Nyquist and scans bins 1..511.
-              // DC participates in density but not dominant-frequency selection.
-              let mut kmax = HALF_BINS;
-              let mut mmax = mags[HALF_BINS];
-              for k in 1..HALF_BINS {
-                  if mags[k] > mmax {
-                      mmax = mags[k];
-                      kmax = k;
-                  }
-              }
-          '''.replace('          ', '')
-          new = r'''    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
-              // REAPER's ordered floating-point branch proceeds only when total > 0.
-              // This rejects NaN as well as zero/negative totals.  With very large but
-              // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
-              // emits a zero spectral peak for those frames instead of a Nyquist/zero-
-              // density placeholder.
-              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-                  return (SpectralPeak::default(), next);
-              }
-          '''.replace('          ', '')
-          if old not in text:
-              raise SystemExit("step3 production target not found")
-          text = text.replace(old, new, 1)
+          '''
+          text = text[:start] + replacement + text[end:]
 
-          tests = r'''
+          tests = '''
 
           #[cfg(test)]
           mod spectral_magnitude_summary_tests {
@@ -193,9 +159,9 @@ jobs:
                   assert_same(&spec);
               }
           }
-          '''.replace('          ', '')
+          '''
           if 'mod spectral_magnitude_summary_tests' in text:
-              raise SystemExit("step3 tests already present")
+              raise SystemExit('step3 tests already present')
           path.write_text(text + tests)
           PY
           cargo fmt --all
