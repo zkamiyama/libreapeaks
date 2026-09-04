@@ -651,11 +651,11 @@ fn summarize_spectrum_magnitudes(
     let mut interior_mmax = f64::NEG_INFINITY;
     let mut nyquist_magnitude = 0.0f64;
 
-    for k in 0..=HALF_BINS {
+    for (k, bin) in spec.iter().enumerate() {
         let m = if k == 0 || k == HALF_BINS {
-            spec[k].re.abs()
+            bin.re.abs()
         } else {
-            (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+            (bin.re * bin.re + bin.im * bin.im).sqrt()
         };
         total += m;
         mags_f32[k] = m as f32;
@@ -684,7 +684,10 @@ fn analyze_channel(
     previous: &[C32; HALF_BINS + 1],
     elapsed: usize,
 ) -> (SpectralPeak, [C32; HALF_BINS + 1]) {
+    #[cfg(feature = "strict-wdl")]
     let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+    #[cfg(not(feature = "strict-wdl"))]
+    let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
     #[cfg(feature = "strict-wdl")]
     let spec = real_fft_1024(&mut fft_in);
     #[cfg(not(feature = "strict-wdl"))]
