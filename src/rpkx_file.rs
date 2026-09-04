@@ -424,17 +424,19 @@ fn create_temp_file(target: &Path) -> Result<(File, TempGuard)> {
 fn copy_file_to_temp(source_path: &Path, target: &Path) -> Result<(File, TempGuard, u64)> {
     for _ in 0..128 {
         let path = temp_path(target)?;
-        let mut guard = TempGuard::new(path.clone());
-        match fs::copy(source_path, &path) {
-            Ok(copied) => {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(reservation) => {
+                drop(reservation);
+                let guard = TempGuard::new(path.clone());
+                let copied = fs::copy(source_path, &path)?;
                 let file = OpenOptions::new().read(true).write(true).open(&path)?;
                 return Ok((file, guard, copied));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&path);
-                guard.commit();
-                continue;
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
     }
@@ -641,6 +643,7 @@ pub fn update_rpkx_file(
     let lock_path = rpkx_file_lock_path(path);
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;
