@@ -1,0 +1,183 @@
+name: Temporary spectral follow-up 2
+
+on:
+  push:
+    branches:
+      - optimize/spectral-followup-2
+    paths:
+      - ".github/workflows/tmp-spectral-followup-2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  optimize-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: optimize/spectral-followup-2
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply in-place phase-history update
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/spectral.rs")
+          text = path.read_text()
+
+          start = text.index("fn summarize_spectrum_magnitudes(")
+          end = text.index("\nfn analyze_channel(", start)
+          summary = r'''fn summarize_spectrum_magnitudes(
+              spec: &[C64; HALF_BINS + 1],
+              previous: &mut [C32; HALF_BINS + 1],
+          ) -> (f64, [f32; HALF_BINS + 1], usize, C32) {
+              let mut total = 0.0f64;
+              let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+              let mut interior_kmax = 1usize;
+              let mut interior_mmax = f64::NEG_INFINITY;
+              let mut interior_previous = C32::default();
+              let mut nyquist_magnitude = 0.0f64;
+
+              for (k, bin) in spec.iter().enumerate() {
+                  let old_previous = previous[k];
+                  previous[k] = C32 {
+                      re: bin.re as f32,
+                      im: bin.im as f32,
+                  };
+                  let m = if k == 0 || k == HALF_BINS {
+                      bin.re.abs()
+                  } else {
+                      (bin.re * bin.re + bin.im * bin.im).sqrt()
+                  };
+                  total += m;
+                  mags_f32[k] = m as f32;
+                  if k == HALF_BINS {
+                      nyquist_magnitude = m;
+                  } else if k != 0 && m > interior_mmax {
+                      interior_mmax = m;
+                      interior_kmax = k;
+                      interior_previous = old_previous;
+                  }
+              }
+
+              if interior_mmax > nyquist_magnitude {
+                  (total, mags_f32, interior_kmax, interior_previous)
+              } else {
+                  (total, mags_f32, HALF_BINS, C32::default())
+              }
+          }
+          '''
+          text = text[:start] + summary + text[end:]
+
+          start = text.index("fn analyze_channel(")
+          end = text.index("\nfn analyze_resampled_spectral(", start)
+          analyze = r'''fn analyze_channel(
+              ring: &[f32],
+              write_pos: usize,
+              channels: usize,
+              channel: usize,
+              window: &[f32],
+              previous: &mut [C32; HALF_BINS + 1],
+              elapsed: usize,
+          ) -> SpectralPeak {
+              #[cfg(feature = "strict-wdl")]
+              let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+              #[cfg(not(feature = "strict-wdl"))]
+              let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+              #[cfg(feature = "strict-wdl")]
+              let spec = real_fft_1024(&mut fft_in);
+              #[cfg(not(feature = "strict-wdl"))]
+              let spec = real_fft_1024(&fft_in);
+
+              // REAPER stores the current complex spectrum to its f32 phase-history
+              // buffer before checking whether the magnitude sum is zero. Capture the
+              // winning bin's old history while replacing the buffer in place, avoiding
+              // a second 513-bin array and the copy back into per-channel history.
+              let (total, mags_f32, kmax, previous_at_kmax) =
+                  summarize_spectrum_magnitudes(&spec, previous);
+              if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                  return SpectralPeak::default();
+              }
+
+              let best_bin = if kmax == HALF_BINS || elapsed == 0 {
+                  HALF_BINS as f64
+              } else {
+                  let cur = spec[kmax];
+                  let prev = previous_at_kmax;
+                  let phase_cur = cur.im.atan2(cur.re);
+                  let phase_prev = (prev.im as f64).atan2(prev.re as f64);
+                  let residual = wrap_phase(
+                      (phase_cur - phase_prev) / PI
+                          - 2.0 * (elapsed as f64 / FFT_N as f64) * kmax as f64,
+                  );
+                  kmax as f64 + HALF_BINS as f64 / elapsed as f64 * residual
+              };
+
+              let frequency_hz = (0.5 + best_bin * ANALYSIS_RATE / FFT_N as f64)
+                  .trunc()
+                  .clamp(0.0, 32767.0) as u16;
+
+              let mut spread = 0.0f64;
+              for (k, &magnitude) in mags_f32.iter().enumerate() {
+                  let d = k as f64 - best_bin;
+                  spread += magnitude as f64 * d * d;
+              }
+              let density = (0.5 + 16383.0 * (1.0 - 4.0 * spread / (total * 262144.0)))
+                  .trunc()
+                  .clamp(0.0, 16383.0) as u16;
+
+              SpectralPeak {
+                  frequency_hz,
+                  density,
+              }
+          }
+          '''
+          text = text[:start] + analyze + text[end:]
+
+          replacements = [
+              ("let (peak, next) = analyze_channel(", "let peak = analyze_channel("),
+              ("&self.previous[channel],", "&mut self.previous[channel],"),
+              ("                    self.previous[channel] = next;\n", ""),
+              ("let (p, next) = analyze_channel(", "let p = analyze_channel("),
+              ("&previous[c],", "&mut previous[c],"),
+              ("                previous[c] = next;\n", ""),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"missing expected source fragment: {old!r}")
+              text = text.replace(old, new)
+
+          old = """        let (actual_total, actual_f32, actual_kmax) = summarize_spectrum_magnitudes(spec);\n        let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);\n        assert_eq!(actual_total.to_bits(), expected_total.to_bits());\n        assert_eq!(actual_kmax, expected_kmax);\n"""
+          new = """        let mut previous = [C32::default(); HALF_BINS + 1];\n        for (k, value) in previous.iter_mut().enumerate() {\n            value.re = (k as f32 + 0.25) * 0.03125;\n            value.im = -(k as f32 + 0.5) * 0.015625;\n        }\n        let previous_before = previous;\n        let (actual_total, actual_f32, actual_kmax, actual_previous) =\n            summarize_spectrum_magnitudes(spec, &mut previous);\n        let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);\n        assert_eq!(actual_total.to_bits(), expected_total.to_bits());\n        assert_eq!(actual_kmax, expected_kmax);\n        for (k, current) in previous.iter().enumerate() {\n            assert_eq!(current.re.to_bits(), (spec[k].re as f32).to_bits());\n            assert_eq!(current.im.to_bits(), (spec[k].im as f32).to_bits());\n        }\n        if actual_kmax == HALF_BINS {\n            assert_eq!(actual_previous.re.to_bits(), C32::default().re.to_bits());\n            assert_eq!(actual_previous.im.to_bits(), C32::default().im.to_bits());\n        } else {\n            assert_eq!(actual_previous.re.to_bits(), previous_before[actual_kmax].re.to_bits());\n            assert_eq!(actual_previous.im.to_bits(), previous_before[actual_kmax].im.to_bits());\n        }\n"""
+          if old not in text:
+              raise SystemExit("summary test call site not found")
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+
+      - name: Test default feature set
+        run: cargo test --locked --all-targets
+      - name: Test strict WDL feature set
+        run: cargo test --locked --all-targets --features strict-wdl
+      - name: Clippy default feature set
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy strict WDL
+        run: cargo clippy --locked --all-targets --features strict-wdl -- -D warnings
+
+      - name: Commit source optimization
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/spectral.rs
+          git diff --cached --quiet && exit 1
+          git commit -m "Update spectral phase history in place"
+          git push origin HEAD:optimize/spectral-followup-2
