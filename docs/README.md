@@ -26,14 +26,15 @@ to be accepted without starting `PCM_Source_BuildPeaks` work.
 
 ## I want custom metadata inside the same `.reapeaks` file
 
-Read [`RPKX_EOF_EXTENSIONS.md`](RPKX_EOF_EXTENSIONS.md).
+Read [`RPKX_SPEC.md`](RPKX_SPEC.md) for the current **RPKX v1 — REAPER Peaks
+eXtension** container specification and API contract. RPKX v1 uses a packed
+`header -> directory -> payloads` layout so the full chunk inventory is readable
+without loading opaque payloads, while selected payloads remain independently
+seekable.
 
-It records the live REAPER evidence for an EOF-appended `RPKX` extension:
-REAPER 7.79 reuses and byte-preserves pure EOF tails, corrected
-`PCM_Source_GetPeaks` reads are identical to the plain cache, and a real REAPER
-rebuild discards the extension. It also documents the parser policy change that
-accepts bytes after the standard layer region while keeping standard-region
-truncation and unknown in-table tokens strict.
+Read [`RPKX_EOF_EXTENSIONS.md`](RPKX_EOF_EXTENSIONS.md) for the experimental
+basis behind that design. It records the pinned REAPER 7.79 EOF-reuse,
+corrected `PCM_Source_GetPeaks`, rebuild-discard, and large-extension evidence.
 
 ## I want the finite-f32 / RPKL proof
 
