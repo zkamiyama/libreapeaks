@@ -348,11 +348,12 @@ fn encode_prefix(
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&payload_offset.to_le_bytes());
         out.extend_from_slice(&payload_len.to_le_bytes());
-        payload_offset = payload_offset
-            .checked_add(payload_len)
-            .ok_or(ReaPeaksError::InvalidArgument(
-                "RPKX payload offset overflow",
-            ))?;
+        payload_offset =
+            payload_offset
+                .checked_add(payload_len)
+                .ok_or(ReaPeaksError::InvalidArgument(
+                    "RPKX payload offset overflow",
+                ))?;
     }
     debug_assert_eq!(out.len(), directory_len);
     Ok((out, container_len))
@@ -498,7 +499,9 @@ fn write_same_size_update(
     let chunk = plan
         .chunks
         .get(index_position)
-        .ok_or(ReaPeaksError::InvalidHeader("RPKX chunk index out of range"))?;
+        .ok_or(ReaPeaksError::InvalidHeader(
+            "RPKX chunk index out of range",
+        ))?;
     let PlannedPayload::New(payload) = &chunk.payload else {
         return Err(ReaPeaksError::InvalidHeader(
             "same-size RPKX update requires a replacement payload",
@@ -579,10 +582,11 @@ fn write_general_update(
     for chunk in &plan.chunks {
         match &chunk.payload {
             PlannedPayload::Existing(entry) => {
-                let source_payload_offset = layout
-                    .standard_end
-                    .checked_add(entry.payload_offset)
-                    .ok_or(ReaPeaksError::InvalidHeader("RPKX file offset overflow"))?;
+                let source_payload_offset =
+                    layout
+                        .standard_end
+                        .checked_add(entry.payload_offset)
+                        .ok_or(ReaPeaksError::InvalidHeader("RPKX file offset overflow"))?;
                 copy_range(
                     source,
                     destination,
