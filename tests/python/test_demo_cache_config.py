@@ -112,6 +112,20 @@ class DemoCacheConfigTests(unittest.TestCase):
                 dc.DemoCacheConfig(policy="reaper-config", reaper_ini=str(ini)),
             )
 
+    def test_browser_upload_reaper_policy_is_rejected(self) -> None:
+        upload_root = self.root / "libreapeaks-web-daw-test"
+        upload_root.mkdir()
+        upload = upload_root / "upload-deadbeef.wav"
+        upload.write_bytes(b"RIFF-upload")
+        with self.assertRaisesRegex(dc.DemoConfigError, "original absolute path"):
+            dc.resolve_demo_cache_plan(
+                upload,
+                dc.DemoCacheConfig(
+                    policy="reaper-central",
+                    cache_directory=str(self.root / "central"),
+                ),
+            )
+
     def test_saved_config_round_trip(self) -> None:
         path = self.root / "config.json"
         config = dc.DemoCacheConfig(
