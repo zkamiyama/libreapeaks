@@ -641,6 +641,40 @@ fn fill_fft_input(
     fft_in
 }
 
+#[inline]
+fn summarize_spectrum_magnitudes(
+    spec: &[C64; HALF_BINS + 1],
+) -> (f64, [f32; HALF_BINS + 1], usize) {
+    let mut total = 0.0f64;
+    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+    let mut interior_kmax = 1usize;
+    let mut interior_mmax = f64::NEG_INFINITY;
+    let mut nyquist_magnitude = 0.0f64;
+
+    for k in 0..=HALF_BINS {
+        let m = if k == 0 || k == HALF_BINS {
+            spec[k].re.abs()
+        } else {
+            (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+        };
+        total += m;
+        mags_f32[k] = m as f32;
+        if k == HALF_BINS {
+            nyquist_magnitude = m;
+        } else if k != 0 && m > interior_mmax {
+            interior_mmax = m;
+            interior_kmax = k;
+        }
+    }
+
+    let kmax = if interior_mmax > nyquist_magnitude {
+        interior_kmax
+    } else {
+        HALF_BINS
+    };
+    (total, mags_f32, kmax)
+}
+
 fn analyze_channel(
     ring: &[f32],
     write_pos: usize,
@@ -667,19 +701,7 @@ fn analyze_channel(
         };
     }
 
-    let mut mags = [0.0f64; HALF_BINS + 1];
-    let mut mags_f32 = [0.0f32; HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        let m = if k == 0 || k == HALF_BINS {
-            spec[k].re.abs()
-        } else {
-            (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
-        };
-        mags[k] = m;
-        mags_f32[k] = m as f32;
-    }
-
-    let total: f64 = mags.iter().sum();
+    let (total, mags_f32, kmax) = summarize_spectrum_magnitudes(&spec);
     // REAPER's ordered floating-point branch proceeds only when total > 0.
     // This rejects NaN as well as zero/negative totals.  With very large but
     // finite f32 media, the f32 Hann multiply can produce Inf*0 -> NaN; REAPER
@@ -687,17 +709,6 @@ fn analyze_channel(
     // density placeholder.
     if total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return (SpectralPeak::default(), next);
-    }
-
-    // REAPER initializes the candidate to Nyquist and scans bins 1..511.
-    // DC participates in density but not dominant-frequency selection.
-    let mut kmax = HALF_BINS;
-    let mut mmax = mags[HALF_BINS];
-    for k in 1..HALF_BINS {
-        if mags[k] > mmax {
-            mmax = mags[k];
-            kmax = k;
-        }
     }
 
     let best_bin = if kmax == HALF_BINS || elapsed == 0 {
@@ -1441,5 +1452,69 @@ mod spectral_fft_input_fast_path_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod spectral_magnitude_summary_tests {
+    use super::*;
+
+    fn reference_summary(spec: &[C64; HALF_BINS + 1]) -> (f64, [f32; HALF_BINS + 1], usize) {
+        let mut mags = [0.0f64; HALF_BINS + 1];
+        let mut mags_f32 = [0.0f32; HALF_BINS + 1];
+        for k in 0..=HALF_BINS {
+            let m = if k == 0 || k == HALF_BINS {
+                spec[k].re.abs()
+            } else {
+                (spec[k].re * spec[k].re + spec[k].im * spec[k].im).sqrt()
+            };
+            mags[k] = m;
+            mags_f32[k] = m as f32;
+        }
+        let total: f64 = mags.iter().sum();
+        let mut kmax = HALF_BINS;
+        let mut mmax = mags[HALF_BINS];
+        for k in 1..HALF_BINS {
+            if mags[k] > mmax {
+                mmax = mags[k];
+                kmax = k;
+            }
+        }
+        (total, mags_f32, kmax)
+    }
+
+    fn assert_same(spec: &[C64; HALF_BINS + 1]) {
+        let (actual_total, actual_f32, actual_kmax) = summarize_spectrum_magnitudes(spec);
+        let (expected_total, expected_f32, expected_kmax) = reference_summary(spec);
+        assert_eq!(actual_total.to_bits(), expected_total.to_bits());
+        assert_eq!(actual_kmax, expected_kmax);
+        for (index, (&actual, &expected)) in actual_f32.iter().zip(expected_f32.iter()).enumerate()
+        {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "magnitude bin={index}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_summary_matches_reference_bits() {
+        let mut spec = [C64::default(); HALF_BINS + 1];
+        for (k, value) in spec.iter_mut().enumerate() {
+            value.re = ((k * 37 + 11) as f64).sin() * (1.0 + k as f64 / 17.0);
+            value.im = ((k * 53 + 7) as f64).cos() * (0.5 + k as f64 / 31.0);
+        }
+        assert_same(&spec);
+
+        spec.fill(C64::default());
+        spec[1].re = 3.0;
+        spec[2].re = 3.0;
+        spec[HALF_BINS].re = 2.0;
+        assert_same(&spec);
+
+        spec[17].re = f64::NAN;
+        spec[31].im = f64::INFINITY;
+        assert_same(&spec);
     }
 }
