@@ -186,6 +186,175 @@ fn reaper_wave_bucket_count(
     }
 }
 
+fn validate_divisions(divisions: &[u32]) -> Result<()> {
+    for &div in divisions {
+        if div == 0 {
+            return Err(ReaPeaksError::InvalidArgument("division=0"));
+        }
+        if div > i32::MAX as u32 {
+            return Err(ReaPeaksError::InvalidArgument(
+                "division exceeds signed .ReaPeaks range",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn divisions_are_nested(divisions: &[u32]) -> bool {
+    let Some(&fine) = divisions.first() else {
+        return false;
+    };
+    fine != 0 && divisions.iter().all(|&division| division % fine == 0)
+}
+
+fn encode_peak_pairs(div: u32, peaks: &[PeakPair], channels: usize) -> Result<GeneratedLayer> {
+    if channels == 0 || peaks.len() % channels != 0 {
+        return Err(ReaPeaksError::InvalidArgument(
+            "invalid waveform peak/channel layout",
+        ));
+    }
+    let count = peaks.len() / channels;
+    let peak_count = u32::try_from(count)
+        .map_err(|_| ReaPeaksError::InvalidArgument("wave peak count exceeds u32"))?;
+    let capacity = peaks
+        .len()
+        .checked_mul(4)
+        .filter(|&size| size <= isize::MAX as usize)
+        .ok_or(ReaPeaksError::InvalidArgument("wave payload too large"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    for peak in peaks {
+        bytes.extend_from_slice(&peak.max.to_le_bytes());
+        bytes.extend_from_slice(&peak.min.to_le_bytes());
+    }
+    Ok(GeneratedLayer {
+        header: LayerHeader {
+            division: div as i32,
+            peak_count,
+        },
+        bytes,
+    })
+}
+
+fn aggregate_peaks_count(
+    input: &[PeakPair],
+    channels: usize,
+    factor: usize,
+    output_count: usize,
+) -> Vec<PeakPair> {
+    if channels == 0 || factor == 0 || output_count == 0 {
+        return Vec::new();
+    }
+    let n = input.len() / channels;
+    let mut out = Vec::with_capacity(output_count.saturating_mul(channels));
+    for p in 0..output_count {
+        let a = p.saturating_mul(factor);
+        let b = a.saturating_add(factor).min(n);
+        debug_assert!(a < b, "wave aggregate requested an empty source group");
+        for c in 0..channels {
+            let mut mx = i16::MIN;
+            let mut mn = i16::MAX;
+            for i in a..b {
+                let q = input[i * channels + c];
+                mx = mx.max(q.max);
+                mn = mn.min(q.min);
+            }
+            out.push(PeakPair { max: mx, min: mn });
+        }
+    }
+    out
+}
+
+fn assemble_nested_layers(
+    fine: &[PeakPair],
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
+    let fine_division = divisions[0] as usize;
+    let fine_count = reaper_wave_bucket_count(frames, fine_division, fine_division, true);
+    debug_assert_eq!(fine.len(), fine_count.saturating_mul(channels));
+
+    let mut layers = Vec::with_capacity(divisions.len());
+    layers.push(encode_peak_pairs(divisions[0], fine, channels)?);
+    for &div in divisions.iter().skip(1) {
+        let d = div as usize;
+        let count = reaper_wave_bucket_count(frames, d, fine_division, false);
+        let factor = d / fine_division;
+        let peaks = aggregate_peaks_count(fine, channels, factor, count);
+        layers.push(encode_peak_pairs(div, &peaks, channels)?);
+    }
+    Ok(layers)
+}
+
+fn build_fine_pcm16_peaks(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    division: usize,
+) -> Vec<PeakPair> {
+    let count = frames.div_ceil(division);
+    let mut out = Vec::with_capacity(count.saturating_mul(channels));
+    let mut maxima = vec![i16::MIN; channels];
+    let mut minima = vec![i16::MAX; channels];
+
+    for peak in 0..count {
+        maxima.fill(i16::MIN);
+        minima.fill(i16::MAX);
+        let s0 = peak * division;
+        let s1 = s0.saturating_add(division).min(frames);
+        for frame in pcm[s0 * channels..s1 * channels].chunks_exact(channels) {
+            for (channel, &sample) in frame.iter().enumerate() {
+                let value = quantize_pcm16_peak(sample);
+                maxima[channel] = maxima[channel].max(value);
+                minima[channel] = minima[channel].min(value);
+            }
+        }
+        for channel in 0..channels {
+            out.push(PeakPair {
+                max: maxima[channel],
+                min: minima[channel],
+            });
+        }
+    }
+    out
+}
+
+fn build_wave_layers_pcm16_direct(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+) -> Result<Vec<GeneratedLayer>> {
+    let mut layers = Vec::with_capacity(divisions.len());
+    let fine_division = divisions.first().copied().unwrap_or(1) as usize;
+    for (division_index, &div) in divisions.iter().enumerate() {
+        let d = div as usize;
+        let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
+        let mut peaks = Vec::with_capacity(count.saturating_mul(channels));
+        for peak in 0..count {
+            let s0 = peak * d;
+            let s1 = s0.saturating_add(d).min(frames);
+            for c in 0..channels {
+                let mut mx = i16::MIN;
+                let mut mn = i16::MAX;
+                for f in s0..s1 {
+                    let v = quantize_pcm16_peak(pcm[f * channels + c]);
+                    mx = mx.max(v);
+                    mn = mn.min(v);
+                }
+                if s0 == s1 {
+                    mx = 0;
+                    mn = 0;
+                }
+                peaks.push(PeakPair { max: mx, min: mn });
+            }
+        }
+        layers.push(encode_peak_pairs(div, &peaks, channels)?);
+    }
+    Ok(layers)
+}
+
 pub fn build_wave_layers(
     pcm: &[i16],
     frames: usize,
@@ -203,55 +372,18 @@ pub fn build_wave_layers(
             "PCM buffer shorter than frames*channels",
         ));
     }
-    let mut layers = Vec::with_capacity(divisions.len());
-    let fine_division = divisions.first().copied().unwrap_or(1) as usize;
-    for (division_index, &div) in divisions.iter().enumerate() {
-        if div == 0 {
-            return Err(ReaPeaksError::InvalidArgument("division=0"));
-        }
-        if div > i32::MAX as u32 {
-            return Err(ReaPeaksError::InvalidArgument(
-                "division exceeds signed .ReaPeaks range",
-            ));
-        }
-        let d = div as usize;
-        let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
-        let peak_count = u32::try_from(count)
-            .map_err(|_| ReaPeaksError::InvalidArgument("wave peak count exceeds u32"))?;
-        let capacity = count
-            .checked_mul(channels)
-            .and_then(|x| x.checked_mul(4))
-            .filter(|&x| x <= isize::MAX as usize)
-            .ok_or(ReaPeaksError::InvalidArgument("wave payload too large"))?;
-        let mut bytes = Vec::with_capacity(capacity);
-        for peak in 0..count {
-            let s0 = peak * d;
-            let s1 = s0.saturating_add(d).min(frames);
-            for c in 0..channels {
-                let mut mx = i16::MIN;
-                let mut mn = i16::MAX;
-                for f in s0..s1 {
-                    let v = quantize_pcm16_peak(pcm[f * channels + c]);
-                    mx = mx.max(v);
-                    mn = mn.min(v);
-                }
-                if s0 == s1 {
-                    mx = 0;
-                    mn = 0;
-                }
-                bytes.extend_from_slice(&mx.to_le_bytes());
-                bytes.extend_from_slice(&mn.to_le_bytes());
-            }
-        }
-        layers.push(GeneratedLayer {
-            header: LayerHeader {
-                division: div as i32,
-                peak_count,
-            },
-            bytes,
-        });
+    validate_divisions(divisions)?;
+    if divisions.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(layers)
+
+    if divisions_are_nested(divisions) {
+        let fine_division = divisions[0] as usize;
+        let fine = build_fine_pcm16_peaks(pcm, frames, channels, fine_division);
+        assemble_nested_layers(&fine, frames, channels, divisions)
+    } else {
+        build_wave_layers_pcm16_direct(pcm, frames, channels, divisions)
+    }
 }
 
 /// Build RPKN or RPKL waveform layers from decoded float32 audio.
@@ -270,52 +402,70 @@ pub fn build_wave_layers_f32(
     build_wave_layers_f32_source(pcm, frames, channels, divisions, encoding)
 }
 
-pub(crate) fn build_wave_layers_f32_source<S: F32SampleSource + ?Sized>(
+fn build_fine_f32_peaks<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    division: usize,
+    encoding: WaveEncoding,
+) -> Vec<PeakPair> {
+    let count = frames.div_ceil(division);
+    let mut out = Vec::with_capacity(count.saturating_mul(channels));
+    let mut maxima = vec![-1.0f32; channels];
+    let mut minima = vec![1.0f32; channels];
+
+    for peak in 0..count {
+        maxima.fill(-1.0);
+        minima.fill(1.0);
+        let s0 = peak * division;
+        let s1 = s0.saturating_add(division).min(frames);
+        for frame in s0..s1 {
+            let base = frame * channels;
+            for channel in 0..channels {
+                let value = pcm.sample_f32(base + channel);
+                if value.is_nan() {
+                    continue;
+                }
+                if value > maxima[channel] {
+                    maxima[channel] = value;
+                }
+                if value < minima[channel] {
+                    minima[channel] = value;
+                }
+            }
+        }
+        let enc = |value: f32| match encoding {
+            WaveEncoding::Rpkn => quantize_rpkn_f32(value),
+            WaveEncoding::Rpkl => quantize_rpkl_f32(value),
+        };
+        for channel in 0..channels {
+            out.push(PeakPair {
+                max: enc(maxima[channel]),
+                min: enc(minima[channel]),
+            });
+        }
+    }
+    out
+}
+
+fn build_wave_layers_f32_source_direct<S: F32SampleSource + ?Sized>(
     pcm: &S,
     frames: usize,
     channels: usize,
     divisions: &[u32],
     encoding: WaveEncoding,
 ) -> Result<Vec<GeneratedLayer>> {
-    if channels == 0 {
-        return Err(ReaPeaksError::InvalidArgument("channels=0"));
-    }
-    let required = frames
-        .checked_mul(channels)
-        .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
-    if pcm.sample_len() < required {
-        return Err(ReaPeaksError::InvalidArgument(
-            "PCM buffer shorter than frames*channels",
-        ));
-    }
     let mut layers = Vec::with_capacity(divisions.len());
     let fine_division = divisions.first().copied().unwrap_or(1) as usize;
     for (division_index, &div) in divisions.iter().enumerate() {
-        if div == 0 {
-            return Err(ReaPeaksError::InvalidArgument("division=0"));
-        }
-        if div > i32::MAX as u32 {
-            return Err(ReaPeaksError::InvalidArgument(
-                "division exceeds signed .ReaPeaks range",
-            ));
-        }
         let d = div as usize;
         let count = reaper_wave_bucket_count(frames, d, fine_division, division_index == 0);
-        let peak_count = u32::try_from(count)
-            .map_err(|_| ReaPeaksError::InvalidArgument("wave peak count exceeds u32"))?;
-        let capacity = count
-            .checked_mul(channels)
-            .and_then(|x| x.checked_mul(4))
-            .filter(|&x| x <= isize::MAX as usize)
-            .ok_or(ReaPeaksError::InvalidArgument("wave payload too large"))?;
-        let mut bytes = Vec::with_capacity(capacity);
+        let mut peaks = Vec::with_capacity(count.saturating_mul(channels));
         for peak in 0..count {
             let s0 = peak * d;
             let s1 = s0.saturating_add(d).min(frames);
             for c in 0..channels {
-                let (mut mx, mut mn) = match encoding {
-                    WaveEncoding::Rpkn | WaveEncoding::Rpkl => (-1.0f32, 1.0f32),
-                };
+                let (mut mx, mut mn) = (-1.0f32, 1.0f32);
                 for f in s0..s1 {
                     let v = pcm.sample_f32(f * channels + c);
                     if v.is_nan() {
@@ -336,19 +486,47 @@ pub(crate) fn build_wave_layers_f32_source<S: F32SampleSource + ?Sized>(
                     WaveEncoding::Rpkn => quantize_rpkn_f32(v),
                     WaveEncoding::Rpkl => quantize_rpkl_f32(v),
                 };
-                bytes.extend_from_slice(&enc(mx).to_le_bytes());
-                bytes.extend_from_slice(&enc(mn).to_le_bytes());
+                peaks.push(PeakPair {
+                    max: enc(mx),
+                    min: enc(mn),
+                });
             }
         }
-        layers.push(GeneratedLayer {
-            header: LayerHeader {
-                division: div as i32,
-                peak_count,
-            },
-            bytes,
-        });
+        layers.push(encode_peak_pairs(div, &peaks, channels)?);
     }
     Ok(layers)
+}
+
+pub(crate) fn build_wave_layers_f32_source<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    divisions: &[u32],
+    encoding: WaveEncoding,
+) -> Result<Vec<GeneratedLayer>> {
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    let required = frames
+        .checked_mul(channels)
+        .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+    if pcm.sample_len() < required {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    validate_divisions(divisions)?;
+    if divisions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if divisions_are_nested(divisions) {
+        let fine_division = divisions[0] as usize;
+        let fine = build_fine_f32_peaks(pcm, frames, channels, fine_division, encoding);
+        assemble_nested_layers(&fine, frames, channels, divisions)
+    } else {
+        build_wave_layers_f32_source_direct(pcm, frames, channels, divisions, encoding)
+    }
 }
 
 pub fn aggregate_peaks(input: &[PeakPair], channels: usize, factor: usize) -> Vec<PeakPair> {
@@ -357,22 +535,7 @@ pub fn aggregate_peaks(input: &[PeakPair], channels: usize, factor: usize) -> Ve
     }
     let n = input.len() / channels;
     let out_n = n.div_ceil(factor);
-    let mut out = Vec::with_capacity(out_n * channels);
-    for p in 0..out_n {
-        let a = p * factor;
-        let b = a.saturating_add(factor).min(n);
-        for c in 0..channels {
-            let mut mx = i16::MIN;
-            let mut mn = i16::MAX;
-            for i in a..b {
-                let q = input[i * channels + c];
-                mx = mx.max(q.max);
-                mn = mn.min(q.min);
-            }
-            out.push(PeakPair { max: mx, min: mn });
-        }
-    }
-    out
+    aggregate_peaks_count(input, channels, factor, out_n)
 }
 
 #[cfg(test)]
@@ -420,6 +583,71 @@ mod tests {
         assert_eq!(observed_six_channel_tie as f64 * 24576.0, 15712.5);
         assert_eq!(quantize_rpkl_f32(observed_six_channel_tie), 15713);
         assert_eq!(quantize_rpkl_f32(-observed_six_channel_tie), -15712);
+    }
+
+    #[test]
+    fn nested_pcm16_matches_direct_scan_at_eof_boundaries() {
+        let divisions = [4u32, 12, 24];
+        for frames in 0usize..=53 {
+            let channels = 2usize;
+            let pcm: Vec<i16> = (0..frames * channels)
+                .map(|index| ((index as i32 * 7_919 + 1_237) % 65_536 - 32_768) as i16)
+                .collect();
+            let fast = build_wave_layers(&pcm, frames, channels, &divisions).unwrap();
+            let direct = build_wave_layers_pcm16_direct(&pcm, frames, channels, &divisions).unwrap();
+            assert_eq!(fast.len(), direct.len(), "frames={frames}");
+            for (fast, direct) in fast.iter().zip(&direct) {
+                assert_eq!(fast.header, direct.header, "frames={frames}");
+                assert_eq!(fast.bytes, direct.bytes, "frames={frames}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_rpkl_matches_direct_scan_with_out_of_range_and_nan_values() {
+        let divisions = [3u32, 9, 27];
+        let pattern = [
+            f32::NAN,
+            -300.0,
+            -2.0,
+            -1.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            300.0,
+            f32::from_bits(0x3880_0000),
+            -f32::from_bits(0x3880_0000),
+        ];
+        for frames in 0usize..=41 {
+            let channels = 3usize;
+            let pcm: Vec<f32> = (0..frames * channels)
+                .map(|index| pattern[index % pattern.len()])
+                .collect();
+            let fast = build_wave_layers_f32_source(
+                pcm.as_slice(),
+                frames,
+                channels,
+                &divisions,
+                WaveEncoding::Rpkl,
+            )
+            .unwrap();
+            let direct = build_wave_layers_f32_source_direct(
+                pcm.as_slice(),
+                frames,
+                channels,
+                &divisions,
+                WaveEncoding::Rpkl,
+            )
+            .unwrap();
+            assert_eq!(fast.len(), direct.len(), "frames={frames}");
+            for (fast, direct) in fast.iter().zip(&direct) {
+                assert_eq!(fast.header, direct.header, "frames={frames}");
+                assert_eq!(fast.bytes, direct.bytes, "frames={frames}");
+            }
+        }
     }
 
     #[test]
