@@ -5,6 +5,7 @@ GPU and source-PCM endpoints. It adds:
 
 * the DAW web page/assets;
 * browser file open / drag-and-drop with background full-cache preparation;
+* persistent cache-placement settings shared with the PySide demo;
 * progress/session reporting; and
 * an RPKX container inventory endpoint.
 
@@ -16,7 +17,9 @@ Run with an optional initial source:
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from http import HTTPStatus
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -30,17 +33,27 @@ if str(EXAMPLES) not in sys.path:
     sys.path.insert(0, str(EXAMPLES))
 
 import server as base  # noqa: E402
+from demo_cache_config import (  # noqa: E402
+    DemoConfigError,
+    config_from_mapping,
+    demo_config_path,
+    load_demo_cache_config,
+    resolve_demo_cache_plan,
+    save_demo_cache_config,
+)
 from player_native_cache import ensure_reapeaks_native  # noqa: E402
 from player_common import prepare_playback_audio  # noqa: E402
 from rpkx_inventory import rpkx_inventory  # noqa: E402
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
+MAX_CONFIG_BYTES = 64 * 1024
 
 
 class SessionState:
     def __init__(self, options: argparse.Namespace):
         self.options = options
+        self.cache_config = load_demo_cache_config()
         self.lock = threading.RLock()
         self.server = None
         self.revision = 0
@@ -51,8 +64,28 @@ class SessionState:
         self.audio_path: Path | None = None
         self.peaks_path: Path | None = None
         self.generated = False
+        self.path_origin = ""
         self.prepared = None
         self.tempdir = tempfile.TemporaryDirectory(prefix="libreapeaks-web-daw-")
+
+    def config_payload(self) -> dict[str, object]:
+        with self.lock:
+            payload = asdict(self.cache_config)
+        payload.pop("version", None)
+        return {
+            "version": 1,
+            "cache": payload,
+            "config_path": str(demo_config_path()),
+        }
+
+    def update_config(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise DemoConfigError("config payload must be an object")
+        config = config_from_mapping(payload)
+        save_demo_cache_config(config)
+        with self.lock:
+            self.cache_config = config
+        return self.config_payload()
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
@@ -66,6 +99,8 @@ class SessionState:
                 "audio_name": self.audio_path.name if self.audio_path is not None else None,
                 "peaks_name": self.peaks_path.name if self.peaks_path is not None else None,
                 "generated_cache": self.generated,
+                "cache_policy": self.cache_config.policy,
+                "path_origin": self.path_origin,
             }
 
     def _progress(self, stage: str, value: int) -> None:
@@ -73,17 +108,32 @@ class SessionState:
             self.status = str(stage)
             self.progress = max(0, min(100, int(value)))
 
-    def _build_service(self, audio: Path, *, peaks_path: Path | None) -> tuple[object, Path, bool, object]:
+    def _build_service(self, audio: Path, *, peaks_path: Path | None) -> tuple[object, Path, bool, object, str]:
         opts = self.options
+        explicit_rate = opts.fine_peaks_per_second
+        if opts.cache_mode == "auto" and explicit_rate == 300:
+            explicit_rate = None
+        with self.lock:
+            config = self.cache_config
+        plan = resolve_demo_cache_plan(
+            audio,
+            config,
+            explicit_peaks=peaks_path,
+            legacy_cache_mode=opts.cache_mode,
+            legacy_cache_directory=opts.cache_dir,
+            reaper_cache_map=opts.reaper_cache_map,
+            explicit_peak_rate=explicit_rate,
+        )
+        self._progress(f"Cache policy: {plan.policy} ({plan.path_origin})", 3)
         peaks, generated = ensure_reapeaks_native(
             audio,
-            peaks_path,
+            plan.peaks_path,
             generation_mode="spectrogram",
             rebuild=bool(opts.rebuild_cache),
             decoder=opts.cache_decoder,
-            cache_mode=opts.cache_mode,
-            cache_directory=opts.cache_dir,
-            reaper_cache_map=opts.reaper_cache_map,
+            cache_mode="sidecar",
+            cache_directory=None,
+            reaper_cache_map=None,
             allow_stale_cache=bool(opts.allow_stale_cache),
             ffmpeg=opts.ffmpeg,
             ffprobe=opts.ffprobe,
@@ -91,7 +141,7 @@ class SessionState:
             max_decode_bytes=opts.max_decode_bytes,
             wave_encoding=opts.wave_encoding,
             divisions=opts.divisions,
-            fine_peaks_per_second=opts.fine_peaks_per_second,
+            fine_peaks_per_second=plan.peak_rate,
             lock_timeout=opts.lock_timeout,
             progress=self._progress,
         )
@@ -120,15 +170,16 @@ class SessionState:
             pcm_max_window_bytes=opts.pcm_max_window_bytes,
             pcm_target_page_bytes=opts.pcm_target_page_bytes,
         )
-        return service, peaks, generated, prepared
+        return service, peaks, generated, prepared, plan.path_origin
 
-    def _publish(self, audio: Path, service, peaks: Path, generated: bool, prepared) -> None:
+    def _publish(self, audio: Path, service, peaks: Path, generated: bool, prepared, path_origin: str) -> None:
         old_prepared = None
         with self.lock:
             old_prepared = self.prepared
             self.audio_path = audio
             self.peaks_path = peaks
             self.generated = bool(generated)
+            self.path_origin = path_origin
             self.prepared = prepared
             self.revision += 1
             self.progress = 100
@@ -151,8 +202,8 @@ class SessionState:
             self.error = ""
         prepared = None
         try:
-            service, peaks, generated, prepared = self._build_service(audio, peaks_path=peaks_path)
-            self._publish(audio, service, peaks, generated, prepared)
+            service, peaks, generated, prepared, path_origin = self._build_service(audio, peaks_path=peaks_path)
+            self._publish(audio, service, peaks, generated, prepared, path_origin)
         except Exception:
             if prepared is not None:
                 prepared.close()
@@ -173,8 +224,8 @@ class SessionState:
         def worker() -> None:
             prepared = None
             try:
-                service, peaks, generated, prepared = self._build_service(audio, peaks_path=None)
-                self._publish(audio, service, peaks, generated, prepared)
+                service, peaks, generated, prepared, path_origin = self._build_service(audio, peaks_path=None)
+                self._publish(audio, service, peaks, generated, prepared, path_origin)
             except Exception as exc:
                 if prepared is not None:
                     try:
@@ -239,6 +290,8 @@ class DawHandler(base.DemoHandler):
             return self.send_static(HERE / "daw_style.css")
         if parsed.path == "/api/session":
             return self.send_json(self.session.snapshot())
+        if parsed.path == "/api/config":
+            return self.send_json(self.session.config_payload())
         if parsed.path == "/api/rpkx":
             snapshot = self.session.snapshot()
             if not snapshot["ready"]:
@@ -261,6 +314,25 @@ class DawHandler(base.DemoHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/config":
+            try:
+                length_value = self.headers.get("Content-Length")
+                if length_value is None:
+                    raise ValueError("Content-Length is required")
+                length = int(length_value)
+                if length <= 0 or length > MAX_CONFIG_BYTES:
+                    raise ValueError("invalid config payload size")
+                raw = self.rfile.read(length)
+                payload = json.loads(raw.decode("utf-8"))
+                return self.send_json(self.session.update_config(payload))
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError, DemoConfigError, OSError) as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                return self.send_json(
+                    {"error": f"{type(exc).__name__}: {exc}"},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+
         if parsed.path != "/api/open":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -360,7 +432,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    session = SessionState(args)
+    try:
+        session = SessionState(args)
+    except DemoConfigError as exc:
+        print(f"daw_server: {exc}", file=sys.stderr)
+        return 2
     server = base.DemoHTTPServer((args.host, args.port), DawHandler)
     server.session = session  # type: ignore[attr-defined]
     session.server = server
@@ -372,12 +448,13 @@ def main(argv: list[str] | None = None) -> int:
             peaks = args.peaks.expanduser().resolve(strict=False) if args.peaks else None
             session.build_initial(audio, peaks_path=peaks)
         print(f"libreapeaks DAW web player: http://{args.host}:{args.port}/")
+        print(f"cache_config={demo_config_path()} policy={session.cache_config.policy}")
         if args.audio is None:
             print("Open or drop an audio file in the browser to prepare the full cache.")
         server.serve_forever()
     except KeyboardInterrupt:
         pass
-    except base.PlayerCacheError as exc:
+    except (base.PlayerCacheError, DemoConfigError) as exc:
         print(f"daw_server: {exc}", file=sys.stderr)
         return 2
     finally:

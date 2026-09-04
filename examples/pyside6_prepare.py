@@ -13,7 +13,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from demo_cache_config import resolve_worker_options
 from player_native_cache import NativeGenerationMode, ensure_reapeaks_native
+from pyside6_cache_settings import edit_cache_settings
 
 
 FULL_GENERATION_MODE: NativeGenerationMode = "spectrogram"
@@ -32,11 +34,15 @@ class CacheWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            options, plan = resolve_worker_options(self.audio, self.options)
+            self.progress.emit(
+                f"Cache policy: {plan.policy} ({plan.path_origin})", 3
+            )
             peaks, generated = ensure_reapeaks_native(
                 self.audio,
                 generation_mode=FULL_GENERATION_MODE,
                 progress=lambda stage, value: self.progress.emit(stage, value),
-                **self.options,
+                **options,
             )
         except Exception as exc:  # PyO3 errors have no stable shared base class.
             self.failed.emit(str(exc))
@@ -70,12 +76,13 @@ class CachePreparationDialog(QDialog):
 
         self.setWindowTitle("Prepare libreapeaks cache")
         self.setModal(True)
-        self.resize(620, 190)
+        self.resize(660, 220)
 
         self.summary = QLabel(
             "The player creates the complete REAPER-compatible analysis cache: "
-            "waveform, spectral peaks, spectrogram, and loudness. "
-            "Generation runs on a worker thread so the UI remains responsive."
+            "waveform, spectral peaks, spectrogram, and loudness. By default the "
+            "cache is written beside the source; REAPER-compatible placement can "
+            "be selected and persisted in Cache settings."
         )
         self.summary.setWordWrap(True)
 
@@ -87,12 +94,15 @@ class CachePreparationDialog(QDialog):
         self.status = QLabel("Ready")
         self.status.setWordWrap(True)
 
+        self.settings_button = QPushButton("Cache settings…")
+        self.settings_button.clicked.connect(self._edit_settings)
         self.start_button = QPushButton("Prepare and open")
         self.start_button.clicked.connect(self.start)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()
+        buttons.addWidget(self.settings_button)
         buttons.addStretch(1)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.start_button)
@@ -105,11 +115,19 @@ class CachePreparationDialog(QDialog):
         self.setLayout(layout)
 
     @Slot()
+    def _edit_settings(self) -> None:
+        if self._thread is not None:
+            return
+        if edit_cache_settings(self):
+            self.status.setText("Cache settings saved; they apply to this preparation.")
+
+    @Slot()
     def start(self) -> None:
         if self._thread is not None:
             return
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
+        self.settings_button.setEnabled(False)
         self.progress.setValue(0)
         self.status.setText("Starting full cache preparation…")
 
@@ -158,6 +176,7 @@ class CachePreparationDialog(QDialog):
             return
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
+        self.settings_button.setEnabled(True)
 
     def reject(self) -> None:
         # QThread termination would be unsafe while Rust/FFmpeg owns buffers.
