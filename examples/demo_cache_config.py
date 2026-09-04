@@ -103,6 +103,14 @@ def _optional_string(value: object, name: str) -> str:
     return value.strip()
 
 
+def _boolean(value: object, name: str, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise DemoConfigError(f"{name} must be a boolean")
+    return value
+
+
 def config_from_mapping(payload: Mapping[str, object]) -> DemoCacheConfig:
     raw_cache = payload.get("cache", payload)
     if not isinstance(raw_cache, Mapping):
@@ -128,8 +136,12 @@ def config_from_mapping(payload: Mapping[str, object]) -> DemoCacheConfig:
             raw_cache.get("cache_directory", ""), "cache_directory"
         ),
         reaper_ini=_optional_string(raw_cache.get("reaper_ini", ""), "reaper_ini"),
-        auto_reaper_ini=bool(raw_cache.get("auto_reaper_ini", False)),
-        verify_with_reaper=bool(raw_cache.get("verify_with_reaper", False)),
+        auto_reaper_ini=_boolean(
+            raw_cache.get("auto_reaper_ini"), "auto_reaper_ini"
+        ),
+        verify_with_reaper=_boolean(
+            raw_cache.get("verify_with_reaper"), "verify_with_reaper"
+        ),
         reaper_executable=_optional_string(
             raw_cache.get("reaper_executable", ""), "reaper_executable"
         ),
@@ -179,23 +191,6 @@ def reaper_central_peak_path(
     source = str(_resolved(audio_path))
     digest = hashlib.sha1(source.lower().encode("utf-8")).hexdigest()
     return _resolved(cache_directory) / digest[:2] / f"{digest}.reapeaks"
-
-
-def _within(path: Path, parent: Path) -> bool:
-    path_s = os.path.normcase(str(path.resolve(strict=False)))
-    parent_s = os.path.normcase(str(parent.resolve(strict=False)))
-    try:
-        return os.path.commonpath([path_s, parent_s]) == parent_s
-    except ValueError:
-        return False
-
-
-def _matches_alternate_source(audio: Path, candidates: tuple[Path, ...]) -> bool:
-    for candidate in candidates:
-        resolved = candidate.resolve(strict=False)
-        if audio == resolved or _within(audio, resolved):
-            return True
-    return False
 
 
 def _selected_ini(config: DemoCacheConfig) -> Path | None:
@@ -283,8 +278,8 @@ def resolve_demo_cache_plan(
     policy: DemoCachePolicy = config.policy
     cache_directory = config.cache_directory
 
-    # Preserve the existing CLI spellings while moving the GUI/default policy
-    # to the clearer persistent names. ``auto`` means "use saved config".
+    # Preserve existing CLI spellings while moving GUI/default policy to the
+    # clearer persistent names. ``auto`` means "use saved config".
     if legacy_cache_mode and legacy_cache_mode != "auto":
         if legacy_cache_mode in ("sidecar", "subdir"):
             policy = legacy_cache_mode  # type: ignore[assignment]
@@ -294,10 +289,6 @@ def resolve_demo_cache_plan(
             _require_stable_reaper_source(audio)
             ini_path = _selected_ini(config)
             rate = _rate(config, ini_path, explicit_peak_rate)
-            if reaper_cache_map is None and reaper_executable is None:
-                raise DemoConfigError(
-                    "cache_mode=reaper requires --reaper-cache-map or a REAPER executable"
-                )
             target = _oracle_path(
                 audio,
                 cache_map=reaper_cache_map,
@@ -346,15 +337,12 @@ def resolve_demo_cache_plan(
         if not cache_directory:
             raise DemoConfigError("REAPER central cache requires a cache directory")
         derived = reaper_central_peak_path(audio, cache_directory)
-        verifier = reaper_executable or config.reaper_executable or None
-        if config.verify_with_reaper and (
-            verifier is not None or reaper_cache_map is not None
-        ):
+        if config.verify_with_reaper:
             check_ini = _selected_ini(config)
             exact = _oracle_path(
                 audio,
                 cache_map=reaper_cache_map,
-                executable=verifier,
+                executable=reaper_executable or config.reaper_executable or None,
                 ini_path=check_ini,
             )
             if exact != derived:
@@ -377,49 +365,36 @@ def resolve_demo_cache_plan(
         )
     settings = _load_settings(ini_path)
 
-    # The recovered offline policy covers the common REAPER choices: bit 0
-    # selects the alternate central cache globally, while altpeaksopathlist can
-    # select source trees individually. Other non-default flag combinations are
-    # deliberately delegated to the oracle rather than guessed.
-    selected_by_list = _matches_alternate_source(
-        audio, settings.alternate_source_paths
-    )
-    if settings.altpeaks_flags & 1 or selected_by_list:
+    # Only reproduce preference cases whose semantics have been validated
+    # locally. Selective altpeaksopathlist matching and unfamiliar altpeaks bit
+    # combinations stay oracle-backed rather than being guessed from the INI.
+    has_selective_paths = bool(settings.raw_alternate_source_path_list.strip())
+    if settings.altpeaks_flags & 1 and not has_selective_paths:
         if settings.alternate_cache_path is None:
             raise DemoConfigError(
                 "REAPER.ini selects alternate peak storage but altpeakspath is empty"
             )
         derived = reaper_central_peak_path(audio, settings.alternate_cache_path)
         origin = "reaper.ini-central-sha1"
-    elif settings.altpeaks_flags == 0:
+    elif settings.altpeaks_flags == 0 and not has_selective_paths:
         derived = _resolved(sidecar_peak_path(audio))
         origin = "reaper.ini-sidecar"
     else:
-        verifier = reaper_executable or config.reaper_executable or None
-        if verifier is None and reaper_cache_map is None:
-            raise DemoConfigError(
-                "REAPER.ini uses an alternate peak-path flag combination that the "
-                "offline resolver does not reproduce; provide a REAPER executable "
-                "or --reaper-cache-map to resolve this source exactly"
-            )
         exact = _oracle_path(
             audio,
             cache_map=reaper_cache_map,
-            executable=verifier,
+            executable=reaper_executable or config.reaper_executable or None,
             ini_path=ini_path,
         )
         return ResolvedDemoCachePlan(
-            exact, rate, policy, "reaper-oracle-unknown-flags", ini_path
+            exact, rate, policy, "reaper-oracle-selective-policy", ini_path
         )
 
-    verifier = reaper_executable or config.reaper_executable or None
-    if config.verify_with_reaper and (
-        verifier is not None or reaper_cache_map is not None
-    ):
+    if config.verify_with_reaper:
         exact = _oracle_path(
             audio,
             cache_map=reaper_cache_map,
-            executable=verifier,
+            executable=reaper_executable or config.reaper_executable or None,
             ini_path=ini_path,
         )
         if exact != derived:
