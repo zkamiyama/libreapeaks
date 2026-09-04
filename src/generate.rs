@@ -15,6 +15,8 @@ use crate::wave::{
     build_wave_layers, build_wave_layers_f32, build_wave_layers_f32_source, WaveEncoding,
 };
 
+const PARALLEL_ANALYSIS_MIN_SAMPLES: usize = 16 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
     pub sample_rate: u32,
@@ -23,6 +25,20 @@ pub struct GenerateOptions {
     pub source_mtime_low32: u32,
     pub source_size_low32: u32,
     pub spectral: bool,
+}
+
+#[inline]
+fn parallel_analysis_worthwhile(sample_len: usize, task_count: usize) -> bool {
+    task_count > 1
+        && sample_len >= PARALLEL_ANALYSIS_MIN_SAMPLES
+        && std::thread::available_parallelism().is_ok_and(|parallelism| parallelism.get() > 1)
+}
+
+fn join_analysis<T>(handle: std::thread::ScopedJoinHandle<'_, Result<T>>) -> Result<T> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn validate(options: &GenerateOptions, sample_len: usize, loudness: bool) -> Result<usize> {
@@ -116,26 +132,74 @@ fn encode_generated(
 
 fn generate_pcm16_impl(pcm: &[i16], options: &GenerateOptions, loudness: bool) -> Result<Vec<u8>> {
     let frames = validate(options, pcm.len(), loudness)?;
-    let mut layers: Vec<GeneratedLayer> =
-        build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
-    if options.spectral {
-        layers.extend(build_spectral_layers(
-            pcm,
-            frames,
-            options.channels,
-            options.sample_rate,
-            &options.divisions,
-        )?);
-    }
-    if loudness {
-        layers.extend(build_loudness_layers_pcm16(
-            pcm,
-            frames,
-            options.channels,
-            options.sample_rate,
-            &options.divisions,
-        )?);
-    }
+    let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
+
+    let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
+        let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers(pcm, frames, options.channels, &options.divisions)
+            });
+            let spectral = options.spectral.then(|| {
+                scope.spawn(|| {
+                    build_spectral_layers(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+            let loudness_layers = loudness.then(|| {
+                scope.spawn(|| {
+                    build_loudness_layers_pcm16(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+
+            let wave = join_analysis(wave)?;
+            let spectral = match spectral {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            let loudness_layers = match loudness_layers {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            Ok((wave, spectral, loudness_layers))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(loudness_layers);
+        layers
+    } else {
+        let mut layers: Vec<GeneratedLayer> =
+            build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
+        if options.spectral {
+            layers.extend(build_spectral_layers(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        if loudness {
+            layers.extend(build_loudness_layers_pcm16(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        layers
+    };
     encode_generated(Version::Rpkn, options, &layers)
 }
 
@@ -154,27 +218,73 @@ pub fn generate_pcm16_mode3_with_spectrogram(
     let frames = validate(options, pcm.len(), true)?;
     validate_spectrogram_layer_count(options)?;
 
-    let mut layers = build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
-    layers.extend(build_spectral_layers(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
-    layers.extend(build_spectrogram_layers_pcm16(
-        pcm,
-        frames,
-        options.channels,
-        &options.divisions,
-    )?);
-    layers.extend(build_loudness_layers_pcm16(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
+    let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
+        let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers(pcm, frames, options.channels, &options.divisions)
+            });
+            let spectral = scope.spawn(|| {
+                build_spectral_layers(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            let spectrogram = scope.spawn(|| {
+                build_spectrogram_layers_pcm16(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                )
+            });
+            let loudness = scope.spawn(|| {
+                build_loudness_layers_pcm16(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            Ok((
+                join_analysis(wave)?,
+                join_analysis(spectral)?,
+                join_analysis(spectrogram)?,
+                join_analysis(loudness)?,
+            ))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(spectrogram);
+        layers.extend(loudness);
+        layers
+    } else {
+        let mut layers = build_wave_layers(pcm, frames, options.channels, &options.divisions)?;
+        layers.extend(build_spectral_layers(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers.extend(build_spectrogram_layers_pcm16(
+            pcm,
+            frames,
+            options.channels,
+            &options.divisions,
+        )?);
+        layers.extend(build_loudness_layers_pcm16(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers
+    };
     encode_generated(Version::Rpkn, options, &layers)
 }
 
@@ -195,26 +305,79 @@ fn generate_f32_impl(
     } else {
         Version::Rpkn
     };
-    let mut layers =
-        build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
-    if options.spectral {
-        layers.extend(build_spectral_layers_f32(
-            pcm,
-            frames,
-            options.channels,
-            options.sample_rate,
-            &options.divisions,
-        )?);
-    }
-    if loudness {
-        layers.extend(build_loudness_layers_f32(
-            pcm,
-            frames,
-            options.channels,
-            options.sample_rate,
-            &options.divisions,
-        )?);
-    }
+    let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
+
+    let mut layers = if parallel_analysis_worthwhile(pcm.len(), task_count) {
+        let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers_f32(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                    encoding,
+                )
+            });
+            let spectral = options.spectral.then(|| {
+                scope.spawn(|| {
+                    build_spectral_layers_f32(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+            let loudness_layers = loudness.then(|| {
+                scope.spawn(|| {
+                    build_loudness_layers_f32(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+            let wave = join_analysis(wave)?;
+            let spectral = match spectral {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            let loudness_layers = match loudness_layers {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            Ok((wave, spectral, loudness_layers))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(loudness_layers);
+        layers
+    } else {
+        let mut layers =
+            build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
+        if options.spectral {
+            layers.extend(build_spectral_layers_f32(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        if loudness {
+            layers.extend(build_loudness_layers_f32(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        layers
+    };
     encode_generated(version, options, &layers)
 }
 
@@ -258,28 +421,80 @@ pub fn generate_f32_mode3_with_spectrogram(
         Version::Rpkn
     };
 
-    let mut layers =
-        build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
-    layers.extend(build_spectral_layers_f32(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
-    layers.extend(build_spectrogram_layers_f32(
-        pcm,
-        frames,
-        options.channels,
-        &options.divisions,
-    )?);
-    layers.extend(build_loudness_layers_f32(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
+    let mut layers = if parallel_analysis_worthwhile(pcm.len(), 4) {
+        let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers_f32(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                    encoding,
+                )
+            });
+            let spectral = scope.spawn(|| {
+                build_spectral_layers_f32(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            let spectrogram = scope.spawn(|| {
+                build_spectrogram_layers_f32(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                )
+            });
+            let loudness = scope.spawn(|| {
+                build_loudness_layers_f32(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            Ok((
+                join_analysis(wave)?,
+                join_analysis(spectral)?,
+                join_analysis(spectrogram)?,
+                join_analysis(loudness)?,
+            ))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(spectrogram);
+        layers.extend(loudness);
+        layers
+    } else {
+        let mut layers =
+            build_wave_layers_f32(pcm, frames, options.channels, &options.divisions, encoding)?;
+        layers.extend(build_spectral_layers_f32(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers.extend(build_spectrogram_layers_f32(
+            pcm,
+            frames,
+            options.channels,
+            &options.divisions,
+        )?);
+        layers.extend(build_loudness_layers_f32(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers
+    };
     encode_generated(version, options, &layers)
 }
 
@@ -316,26 +531,84 @@ fn generate_f32_source_impl<S: F32SampleSource + ?Sized>(
     } else {
         Version::Rpkn
     };
-    let mut layers =
-        build_wave_layers_f32_source(pcm, frames, options.channels, &options.divisions, encoding)?;
-    if options.spectral {
-        layers.extend(build_spectral_layers_f32_source(
+    let task_count = 1 + usize::from(options.spectral) + usize::from(loudness);
+
+    let mut layers = if parallel_analysis_worthwhile(pcm.sample_len(), task_count) {
+        let (wave, spectral, loudness_layers) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers_f32_source(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                    encoding,
+                )
+            });
+            let spectral = options.spectral.then(|| {
+                scope.spawn(|| {
+                    build_spectral_layers_f32_source(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+            let loudness_layers = loudness.then(|| {
+                scope.spawn(|| {
+                    build_loudness_layers_f32_source(
+                        pcm,
+                        frames,
+                        options.channels,
+                        options.sample_rate,
+                        &options.divisions,
+                    )
+                })
+            });
+            let wave = join_analysis(wave)?;
+            let spectral = match spectral {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            let loudness_layers = match loudness_layers {
+                Some(handle) => join_analysis(handle)?,
+                None => Vec::new(),
+            };
+            Ok((wave, spectral, loudness_layers))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(loudness_layers);
+        layers
+    } else {
+        let mut layers = build_wave_layers_f32_source(
             pcm,
             frames,
             options.channels,
-            options.sample_rate,
             &options.divisions,
-        )?);
-    }
-    if loudness {
-        layers.extend(build_loudness_layers_f32_source(
-            pcm,
-            frames,
-            options.channels,
-            options.sample_rate,
-            &options.divisions,
-        )?);
-    }
+            encoding,
+        )?;
+        if options.spectral {
+            layers.extend(build_spectral_layers_f32_source(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        if loudness {
+            layers.extend(build_loudness_layers_f32_source(
+                pcm,
+                frames,
+                options.channels,
+                options.sample_rate,
+                &options.divisions,
+            )?);
+        }
+        layers
+    };
     encode_generated(version, options, &layers)
 }
 
@@ -357,27 +630,84 @@ pub(crate) fn generate_f32_source_mode3_with_spectrogram<S: F32SampleSource + ?S
         Version::Rpkn
     };
 
-    let mut layers =
-        build_wave_layers_f32_source(pcm, frames, options.channels, &options.divisions, encoding)?;
-    layers.extend(build_spectral_layers_f32_source(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
-    layers.extend(build_spectrogram_layers_f32_source(
-        pcm,
-        frames,
-        options.channels,
-        &options.divisions,
-    )?);
-    layers.extend(build_loudness_layers_f32_source(
-        pcm,
-        frames,
-        options.channels,
-        options.sample_rate,
-        &options.divisions,
-    )?);
+    let mut layers = if parallel_analysis_worthwhile(pcm.sample_len(), 4) {
+        let (wave, spectral, spectrogram, loudness) = std::thread::scope(|scope| -> Result<_> {
+            let wave = scope.spawn(|| {
+                build_wave_layers_f32_source(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                    encoding,
+                )
+            });
+            let spectral = scope.spawn(|| {
+                build_spectral_layers_f32_source(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            let spectrogram = scope.spawn(|| {
+                build_spectrogram_layers_f32_source(
+                    pcm,
+                    frames,
+                    options.channels,
+                    &options.divisions,
+                )
+            });
+            let loudness = scope.spawn(|| {
+                build_loudness_layers_f32_source(
+                    pcm,
+                    frames,
+                    options.channels,
+                    options.sample_rate,
+                    &options.divisions,
+                )
+            });
+            Ok((
+                join_analysis(wave)?,
+                join_analysis(spectral)?,
+                join_analysis(spectrogram)?,
+                join_analysis(loudness)?,
+            ))
+        })?;
+        let mut layers = wave;
+        layers.extend(spectral);
+        layers.extend(spectrogram);
+        layers.extend(loudness);
+        layers
+    } else {
+        let mut layers = build_wave_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            &options.divisions,
+            encoding,
+        )?;
+        layers.extend(build_spectral_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers.extend(build_spectrogram_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            &options.divisions,
+        )?);
+        layers.extend(build_loudness_layers_f32_source(
+            pcm,
+            frames,
+            options.channels,
+            options.sample_rate,
+            &options.divisions,
+        )?);
+        layers
+    };
     encode_generated(version, options, &layers)
 }
