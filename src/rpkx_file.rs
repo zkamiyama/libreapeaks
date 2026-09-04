@@ -424,11 +424,7 @@ fn create_temp_file(target: &Path) -> Result<(File, TempGuard)> {
 fn copy_file_to_temp(source_path: &Path, target: &Path) -> Result<(File, TempGuard, u64)> {
     for _ in 0..128 {
         let path = temp_path(target)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(reservation) => {
                 drop(reservation);
                 let guard = TempGuard::new(path.clone());
