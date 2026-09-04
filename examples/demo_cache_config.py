@@ -1,8 +1,8 @@
 """Persistent cache-placement settings shared by the reference demo apps.
 
 The default policy is deliberately standalone and unsurprising: write a
-``.reapeaks`` sidecar beside the source media.  REAPER-compatible placement is
-opt-in.  In particular, the recovered central-cache filename can be derived
+``.reapeaks`` sidecar beside the source media. REAPER-compatible placement is
+opt-in. In particular, the recovered central-cache filename can be derived
 without launching REAPER; ``GetPeakFileNameEx`` remains an optional oracle for
 verification and for REAPER path-policy cases that are not safely reproduced
 locally.
@@ -17,10 +17,11 @@ from pathlib import Path
 import sys
 from typing import Literal, Mapping
 
-from player_common import reaper_mapped_peak_path, sidecar_peak_path, subdir_peak_path
+from player_common import sidecar_peak_path, subdir_peak_path
 from reaper_config import (
     DEFAULT_PEAK_RATE,
     ReaperConfigError,
+    ReaperPeakSettings,
     discover_reaper_ini,
     load_reaper_ini,
     resolve_exact_reaper_peak_paths,
@@ -123,11 +124,15 @@ def config_from_mapping(payload: Mapping[str, object]) -> DemoCacheConfig:
         parsed_peak_rate = peak_rate
     return DemoCacheConfig(
         policy=policy,  # type: ignore[arg-type]
-        cache_directory=_optional_string(raw_cache.get("cache_directory", ""), "cache_directory"),
+        cache_directory=_optional_string(
+            raw_cache.get("cache_directory", ""), "cache_directory"
+        ),
         reaper_ini=_optional_string(raw_cache.get("reaper_ini", ""), "reaper_ini"),
         auto_reaper_ini=bool(raw_cache.get("auto_reaper_ini", False)),
         verify_with_reaper=bool(raw_cache.get("verify_with_reaper", False)),
-        reaper_executable=_optional_string(raw_cache.get("reaper_executable", ""), "reaper_executable"),
+        reaper_executable=_optional_string(
+            raw_cache.get("reaper_executable", ""), "reaper_executable"
+        ),
         peak_rate=parsed_peak_rate,
     )
 
@@ -201,8 +206,18 @@ def _selected_ini(config: DemoCacheConfig) -> Path | None:
         return path
     if config.auto_reaper_ini:
         executable = config.reaper_executable or None
-        return discover_reaper_ini(executable=executable)
+        try:
+            return discover_reaper_ini(executable=executable)
+        except (OSError, ReaperConfigError) as exc:
+            raise DemoConfigError(f"cannot discover REAPER.ini: {exc}") from exc
     return None
+
+
+def _load_settings(path: Path) -> ReaperPeakSettings:
+    try:
+        return load_reaper_ini(path)
+    except (OSError, ReaperConfigError) as exc:
+        raise DemoConfigError(f"cannot load REAPER.ini {path}: {exc}") from exc
 
 
 def _rate(config: DemoCacheConfig, ini_path: Path | None, explicit: int | None) -> int:
@@ -213,7 +228,7 @@ def _rate(config: DemoCacheConfig, ini_path: Path | None, explicit: int | None) 
     if config.peak_rate is not None:
         return config.peak_rate
     if ini_path is not None:
-        return load_reaper_ini(ini_path).peak_rate
+        return _load_settings(ini_path).peak_rate
     return DEFAULT_PEAK_RATE
 
 
@@ -224,13 +239,31 @@ def _oracle_path(
     executable: str | Path | None,
     ini_path: Path | None,
 ) -> Path:
-    paths = resolve_exact_reaper_peak_paths(
-        audio,
-        cache_map=cache_map,
-        reaper_executable=executable,
-        reaper_ini=ini_path,
-    )
+    try:
+        paths = resolve_exact_reaper_peak_paths(
+            audio,
+            cache_map=cache_map,
+            reaper_executable=executable,
+            reaper_ini=ini_path,
+        )
+    except (OSError, ReaperConfigError) as exc:
+        raise DemoConfigError(f"cannot resolve exact REAPER cache path: {exc}") from exc
     return paths.write
+
+
+def _require_stable_reaper_source(audio: Path) -> None:
+    """Reject browser uploads whose original absolute path is unavailable."""
+
+    if (
+        audio.name.startswith("upload-")
+        and audio.parent.name.startswith("libreapeaks-web-daw-")
+    ):
+        raise DemoConfigError(
+            "REAPER-compatible cache placement needs the source's original absolute "
+            "path, but browser uploads do not expose it. Start daw_server.py with "
+            "the media path for REAPER central/REAPER.ini placement, or use the "
+            "sidecar/subdirectory policy for browser uploads."
+        )
 
 
 def resolve_demo_cache_plan(
@@ -258,6 +291,7 @@ def resolve_demo_cache_plan(
         elif legacy_cache_mode == "central":
             policy = "reaper-central"
         elif legacy_cache_mode == "reaper":
+            _require_stable_reaper_source(audio)
             ini_path = _selected_ini(config)
             rate = _rate(config, ini_path, explicit_peak_rate)
             if reaper_cache_map is None and reaper_executable is None:
@@ -270,7 +304,9 @@ def resolve_demo_cache_plan(
                 executable=reaper_executable or config.reaper_executable or None,
                 ini_path=ini_path,
             )
-            return ResolvedDemoCachePlan(target, rate, "reaper-config", "reaper-oracle", ini_path)
+            return ResolvedDemoCachePlan(
+                target, rate, "reaper-config", "reaper-oracle", ini_path
+            )
         else:
             raise DemoConfigError(f"unknown cache mode: {legacy_cache_mode}")
     if legacy_cache_directory is not None:
@@ -306,11 +342,14 @@ def resolve_demo_cache_plan(
             None,
         )
     if policy == "reaper-central":
+        _require_stable_reaper_source(audio)
         if not cache_directory:
             raise DemoConfigError("REAPER central cache requires a cache directory")
         derived = reaper_central_peak_path(audio, cache_directory)
         verifier = reaper_executable or config.reaper_executable or None
-        if config.verify_with_reaper and (verifier is not None or reaper_cache_map is not None):
+        if config.verify_with_reaper and (
+            verifier is not None or reaper_cache_map is not None
+        ):
             check_ini = _selected_ini(config)
             exact = _oracle_path(
                 audio,
@@ -331,17 +370,20 @@ def resolve_demo_cache_plan(
 
     if policy != "reaper-config":
         raise DemoConfigError(f"unhandled cache policy: {policy}")
+    _require_stable_reaper_source(audio)
     if ini_path is None:
         raise DemoConfigError(
             "Follow REAPER settings requires a REAPER.ini path or Auto-detect REAPER.ini"
         )
-    settings = load_reaper_ini(ini_path)
+    settings = _load_settings(ini_path)
 
     # The recovered offline policy covers the common REAPER choices: bit 0
     # selects the alternate central cache globally, while altpeaksopathlist can
     # select source trees individually. Other non-default flag combinations are
     # deliberately delegated to the oracle rather than guessed.
-    selected_by_list = _matches_alternate_source(audio, settings.alternate_source_paths)
+    selected_by_list = _matches_alternate_source(
+        audio, settings.alternate_source_paths
+    )
     if settings.altpeaks_flags & 1 or selected_by_list:
         if settings.alternate_cache_path is None:
             raise DemoConfigError(
@@ -371,7 +413,9 @@ def resolve_demo_cache_plan(
         )
 
     verifier = reaper_executable or config.reaper_executable or None
-    if config.verify_with_reaper and (verifier is not None or reaper_cache_map is not None):
+    if config.verify_with_reaper and (
+        verifier is not None or reaper_cache_map is not None
+    ):
         exact = _oracle_path(
             audio,
             cache_map=reaper_cache_map,
@@ -392,12 +436,7 @@ def resolve_worker_options(
     """Turn existing player-worker options into an explicit resolved target."""
 
     result = dict(options)
-    try:
-        config = load_demo_cache_config()
-    except DemoConfigError:
-        # A malformed persisted config should be visible to the GUI/worker, not
-        # silently reset to a different write location.
-        raise
+    config = load_demo_cache_config()
     legacy_mode = str(result.get("cache_mode") or "auto")
     explicit_rate = result.get("fine_peaks_per_second")
     # Existing demo CLIs historically used 300 as their parser default. Treat
@@ -412,9 +451,7 @@ def resolve_worker_options(
         legacy_cache_mode=legacy_mode,
         legacy_cache_directory=result.get("cache_directory"),
         reaper_cache_map=result.get("reaper_cache_map"),
-        explicit_peak_rate=(
-            int(explicit_rate) if explicit_rate is not None else None
-        ),
+        explicit_peak_rate=(int(explicit_rate) if explicit_rate is not None else None),
     )
     result["peaks_path"] = plan.peaks_path
     result["cache_mode"] = "sidecar"
