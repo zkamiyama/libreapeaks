@@ -67,7 +67,12 @@ jobs:
             examples/pyside6_reaper_gl_view.py \
             examples/pyside6_views.py \
             examples/pyside6_player.py \
+            examples/rpkx_inventory.py \
+            examples/pyside6_rpkx_browser.py \
+            examples/pyside6_player_with_rpkx.py \
+            examples/pyside6_daw_player_with_rpkx.py \
             examples/web_player/server.py \
+            examples/web_player/daw_server.py \
             examples/web_player/benchmark_webgl2.py \
             examples/web_player/webgl2_api.py \
             tests/python/test_player_common.py \
@@ -77,11 +82,15 @@ jobs:
         run: |
           node --check examples/web_player/app.js
           node --check examples/web_player/webgl2_renderer.mjs
+          node --check examples/web_player/daw_bootstrap.mjs
+          node --check examples/web_player/daw_app.mjs
+          node --check examples/web_player/daw_render_math.mjs
       - name: web player interaction and WebGL2 regression tests
         run: |
           node --test \
             examples/web_player/interaction_math.test.mjs \
-            examples/web_player/webgl2_renderer.test.mjs
+            examples/web_player/webgl2_renderer.test.mjs \
+            examples/web_player/daw_render_math.test.mjs
       - run: python -m pip install --upgrade pip maturin
       - name: build Python wheel
         run: maturin build --release --out dist
