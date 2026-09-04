@@ -1,0 +1,206 @@
+--- a/src/spectral.rs
++++ b/src/spectral.rs
+@@ -9,6 +9,7 @@
+ const FFT_N: usize = 1024;
+ const HALF_BINS: usize = 512;
+ 
++#[repr(C)]
+ #[derive(Debug, Clone, Copy, Default)]
+ struct C64 {
+     re: f64,
+@@ -121,21 +122,15 @@
+ }
+ 
+ #[cfg(feature = "strict-wdl")]
+-fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
++fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+     unsafe extern "C" {
+-        fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
++        fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
+     }
+-    let mut re = [0.0f64; HALF_BINS + 1];
+-    let mut im = [0.0f64; HALF_BINS + 1];
+-    let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+-    assert_eq!(rc, 0, "WDL FFT bridge failed");
+     let mut out = [C64::default(); HALF_BINS + 1];
+-    for k in 0..=HALF_BINS {
+-        out[k] = C64 {
+-            re: re[k],
+-            im: im[k],
+-        };
+-    }
++    let rc = unsafe {
++        rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
++    };
++    assert_eq!(rc, 0, "WDL FFT bridge failed");
+     out
+ }
+ 
+@@ -414,7 +409,7 @@
+         let product = sample * window[i];
+         fft_in[i & (FFT_N - 1)] += product as f64;
+     }
+-    let spec = real_fft_1024(&fft_in);
++    let spec = real_fft_1024(&mut fft_in);
+ 
+     // REAPER stores the current complex spectrum to its f32 phase-history
+     // buffer before checking whether the magnitude sum is zero. Preserve that
+--- a/src/spectrogram_generate.rs
++++ b/src/spectrogram_generate.rs
+@@ -22,6 +22,7 @@
+ const CODE_BIAS: f64 = 4095.5;
+ const CODE_MAX: u16 = 4095;
+ 
++#[repr(C)]
+ #[derive(Debug, Clone, Copy, Default)]
+ struct C64 {
+     re: f64,
+@@ -92,23 +93,16 @@
+ }
+ 
+ #[cfg(feature = "strict-wdl")]
+-fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
++fn real_fft_256(input: &mut [f64; FFT_SIZE]) -> [C64; FFT_BINS] {
+     unsafe extern "C" {
+-        fn rpk_wdl_real_fft_256(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
++        fn rpk_wdl_real_fft_256_inplace(input: *mut f64, output: *mut f64) -> i32;
+     }
+ 
+-    let mut re = [0.0f64; FFT_BINS];
+-    let mut im = [0.0f64; FFT_BINS];
+-    let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+-    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
+-
+     let mut out = [C64::default(); FFT_BINS];
+-    for bin in 0..FFT_BINS {
+-        out[bin] = C64 {
+-            re: re[bin],
+-            im: im[bin],
+-        };
+-    }
++    let rc = unsafe {
++        rpk_wdl_real_fft_256_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
++    };
++    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
+     out
+ }
+ 
+@@ -276,7 +270,7 @@
+         }
+     }
+ 
+-    let spectrum = real_fft_256(&input);
++    let spectrum = real_fft_256(&mut input);
+     let mut bins = [0u16; SPECTROGRAM_BINS];
+     for stored_bin in 0..SPECTROGRAM_BINS {
+         let value = spectrum[stored_bin + 1];
+--- a/src/spectrogram_generate_f32.rs
++++ b/src/spectrogram_generate_f32.rs
+@@ -19,6 +19,7 @@
+ const CODE_BIAS: f64 = 4095.5;
+ const CODE_MAX: u16 = 4095;
+ 
++#[repr(C)]
+ #[derive(Debug, Clone, Copy, Default)]
+ struct C64 {
+     re: f64,
+@@ -89,23 +90,16 @@
+ }
+ 
+ #[cfg(feature = "strict-wdl")]
+-fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
++fn real_fft_256(input: &mut [f64; FFT_SIZE]) -> [C64; FFT_BINS] {
+     unsafe extern "C" {
+-        fn rpk_wdl_real_fft_256(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
++        fn rpk_wdl_real_fft_256_inplace(input: *mut f64, output: *mut f64) -> i32;
+     }
+ 
+-    let mut re = [0.0f64; FFT_BINS];
+-    let mut im = [0.0f64; FFT_BINS];
+-    let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
+-    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
+-
+     let mut out = [C64::default(); FFT_BINS];
+-    for bin in 0..FFT_BINS {
+-        out[bin] = C64 {
+-            re: re[bin],
+-            im: im[bin],
+-        };
+-    }
++    let rc = unsafe {
++        rpk_wdl_real_fft_256_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
++    };
++    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
+     out
+ }
+ 
+@@ -241,7 +235,7 @@
+         }
+     }
+ 
+-    let spectrum = real_fft_256(&input);
++    let spectrum = real_fft_256(&mut input);
+     let mut bins = [0u16; SPECTROGRAM_BINS];
+     for stored_bin in 0..SPECTROGRAM_BINS {
+         let value = spectrum[stored_bin + 1];
+--- a/src/strict_wdl.cpp
++++ b/src/strict_wdl.cpp
+@@ -146,6 +146,58 @@
+     }
+ }
+ 
++int rpk_wdl_real_fft_1024_inplace(
++    double *buffer,
++    double *output) noexcept {
++    try {
++        if (!buffer || !output) return kInvalidArgument;
++        rpk_wdl_fft_init_once();
++        WDL_real_fft(buffer, 1024, 0);
++
++        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buffer);
++        output[0] = c[0].re;
++        output[1] = 0.0;
++        output[1024] = c[0].im;
++        output[1025] = 0.0;
++        int *perm = WDL_fft_permute_tab(512);
++        if (!perm) return kProcessingFailure;
++        for (int k = 1; k < 512; ++k) {
++            const int j = perm[k];
++            output[2 * k] = c[j].re;
++            output[2 * k + 1] = c[j].im;
++        }
++        return 0;
++    } catch (...) {
++        return kCppException;
++    }
++}
++
++int rpk_wdl_real_fft_256_inplace(
++    double *buffer,
++    double *output) noexcept {
++    try {
++        if (!buffer || !output) return kInvalidArgument;
++        rpk_wdl_fft_init_once();
++        WDL_real_fft(buffer, 256, 0);
++
++        auto *c = reinterpret_cast<WDL_FFT_COMPLEX *>(buffer);
++        output[0] = c[0].re;
++        output[1] = 0.0;
++        output[256] = c[0].im;
++        output[257] = 0.0;
++        int *perm = WDL_fft_permute_tab(128);
++        if (!perm) return kProcessingFailure;
++        for (int k = 1; k < 128; ++k) {
++            const int j = perm[k];
++            output[2 * k] = c[j].re;
++            output[2 * k + 1] = c[j].im;
++        }
++        return 0;
++    } catch (...) {
++        return kCppException;
++    }
++}
++
+ int rpk_wdl_real_fft_1024(
+     const double *input,
+     double *out_re,
