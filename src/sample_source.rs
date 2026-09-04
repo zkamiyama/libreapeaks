@@ -9,8 +9,9 @@ const PCM24_SCALE: f32 = 1.0 / 8_388_608.0;
 /// Implementations return exactly one source sample on demand. This lets the
 /// analysis pipeline preserve the established f32 arithmetic without forcing
 /// callers that cache integer PCM to materialize a second whole-file f32
-/// buffer.
-pub(crate) trait F32SampleSource {
+/// buffer. Sources are immutable during generation, so requiring `Sync` lets
+/// independent byte-identical analysis layers read the same source in parallel.
+pub(crate) trait F32SampleSource: Sync {
     fn sample_len(&self) -> usize;
     fn sample_f32(&self, index: usize) -> f32;
 }

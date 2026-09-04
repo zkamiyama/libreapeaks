@@ -2,11 +2,14 @@ use crate::error::{ReaPeaksError, Result};
 use crate::format::{GeneratedLayer, LayerHeader, SpectralPeak, TOKEN_SPECTRAL};
 use crate::sample_source::F32SampleSource;
 use std::f64::consts::PI;
+#[cfg(feature = "strict-wdl")]
+use std::ffi::c_void;
 
 const ANALYSIS_RATE: f64 = 22_050.0;
 const FFT_N: usize = 1024;
 const HALF_BINS: usize = 512;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct C64 {
     re: f64,
@@ -19,6 +22,15 @@ struct C32 {
     im: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExpectedCount {
+    SourceDomain,
+    #[cfg(feature = "strict-wdl")]
+    Exact(usize),
+    #[cfg(feature = "strict-wdl")]
+    AnalysisDomain,
+}
+
 #[inline]
 fn wrap_phase(mut x: f64) -> f64 {
     x %= 2.0;
@@ -28,6 +40,30 @@ fn wrap_phase(mut x: f64) -> f64 {
         x -= 2.0;
     }
     x
+}
+
+#[cfg(feature = "strict-wdl")]
+#[inline]
+fn analysis_domain_fine_count(analysis_frames: usize, source_rate: u32, division: u32) -> usize {
+    if analysis_frames == 0 || division == 0 || source_rate == 0 {
+        return 0;
+    }
+    let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
+    let rounded = (hop + 0.5).floor() as i32;
+    let mut phase = if rounded <= 1023 {
+        (rounded - 1024) as f64 * 0.5
+    } else {
+        0.0
+    };
+    let mut count = 0usize;
+    for _ in 0..analysis_frames {
+        phase += 1.0;
+        while phase >= hop {
+            count = count.saturating_add(1);
+            phase -= hop;
+        }
+    }
+    count
 }
 
 #[cfg(not(feature = "strict-wdl"))]
@@ -86,21 +122,15 @@ fn fft_radix2(input: &[f64; FFT_N]) -> [C64; FFT_N] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_1024(input: &[f64; FFT_N]) -> [C64; HALF_BINS + 1] {
+fn real_fft_1024(input: &mut [f64; FFT_N]) -> [C64; HALF_BINS + 1] {
     unsafe extern "C" {
-        fn rpk_wdl_real_fft_1024(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+        fn rpk_wdl_real_fft_1024_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-    let mut re = [0.0f64; HALF_BINS + 1];
-    let mut im = [0.0f64; HALF_BINS + 1];
-    let rc = unsafe { rpk_wdl_real_fft_1024(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
-    assert_eq!(rc, 0, "WDL FFT bridge failed");
     let mut out = [C64::default(); HALF_BINS + 1];
-    for k in 0..=HALF_BINS {
-        out[k] = C64 {
-            re: re[k],
-            im: im[k],
-        };
-    }
+    let rc = unsafe {
+        rpk_wdl_real_fft_1024_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>())
+    };
+    assert_eq!(rc, 0, "WDL FFT bridge failed");
     out
 }
 
@@ -187,6 +217,142 @@ fn resample_to_analysis(
     out
 }
 
+#[cfg(feature = "strict-wdl")]
+fn resample_samples_to_analysis<F>(
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    mut sample: F,
+) -> Vec<f64>
+where
+    F: FnMut(usize) -> f64,
+{
+    unsafe extern "C" {
+        fn rpk_wdl_resampler_create(
+            channels: i32,
+            input_rate: f64,
+            output_rate: f64,
+        ) -> *mut c_void;
+        fn rpk_wdl_resampler_destroy(state: *mut c_void);
+        fn rpk_wdl_resampler_prepare(
+            state: *mut c_void,
+            request_frames: i32,
+            input_buffer: *mut *mut f64,
+        ) -> i32;
+        fn rpk_wdl_resampler_out(
+            state: *mut c_void,
+            output: *mut f64,
+            input_frames: i32,
+            output_capacity_frames: i32,
+        ) -> i32;
+    }
+
+    struct ResamplerGuard(*mut c_void);
+    impl Drop for ResamplerGuard {
+        fn drop(&mut self) {
+            unsafe { rpk_wdl_resampler_destroy(self.0) };
+        }
+    }
+
+    if frames == 0 || channels == 0 {
+        return Vec::new();
+    }
+    let state =
+        unsafe { rpk_wdl_resampler_create(channels as i32, source_rate as f64, ANALYSIS_RATE) };
+    if state.is_null() {
+        return Vec::new();
+    }
+    let _guard = ResamplerGuard(state);
+
+    let cap_frames =
+        ((frames as f64 * ANALYSIS_RATE / source_rate as f64).ceil() as usize).saturating_add(4096);
+    let mut out = vec![0.0f64; cap_frames.saturating_mul(channels)];
+    let block_frames = (2048 / channels).max(1);
+    let mut in_pos = 0usize;
+    let mut out_pos = 0usize;
+
+    while in_pos < frames && out_pos < cap_frames {
+        let request_frames = block_frames.min(frames - in_pos);
+        let mut inbuf = std::ptr::null_mut();
+        let wanted = unsafe { rpk_wdl_resampler_prepare(state, request_frames as i32, &mut inbuf) };
+        if wanted <= 0 || inbuf.is_null() {
+            return Vec::new();
+        }
+        let avail = (wanted as usize).min(frames - in_pos);
+        if avail == 0 {
+            return Vec::new();
+        }
+
+        let first_sample = in_pos.saturating_mul(channels);
+        let sample_count = avail.saturating_mul(channels);
+        for offset in 0..sample_count {
+            unsafe {
+                *inbuf.add(offset) = sample(first_sample + offset);
+            }
+        }
+
+        let out_cap = block_frames.min(cap_frames - out_pos);
+        if out_cap == 0 {
+            return Vec::new();
+        }
+        let output_offset = out_pos.saturating_mul(channels);
+        let got = unsafe {
+            rpk_wdl_resampler_out(
+                state,
+                out.as_mut_ptr().add(output_offset),
+                avail as i32,
+                out_cap as i32,
+            )
+        };
+        if got < 0 || got as usize > out_cap {
+            return Vec::new();
+        }
+
+        in_pos += avail;
+        out_pos += got as usize;
+        if avail < wanted as usize {
+            break;
+        }
+    }
+
+    out.truncate(out_pos.saturating_mul(channels));
+    out
+}
+
+#[cfg(feature = "strict-wdl")]
+fn resample_i16_to_analysis(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+) -> Vec<f64> {
+    resample_samples_to_analysis(frames, channels, source_rate, |index| {
+        pcm[index] as f64 / 32768.0
+    })
+}
+
+#[cfg(feature = "strict-wdl")]
+fn resample_f32_to_analysis(
+    pcm: &[f32],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+) -> Vec<f64> {
+    resample_samples_to_analysis(frames, channels, source_rate, |index| f64::from(pcm[index]))
+}
+
+#[cfg(feature = "strict-wdl")]
+fn resample_f32_source_to_analysis<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+) -> Vec<f64> {
+    resample_samples_to_analysis(frames, channels, source_rate, |index| {
+        f64::from(pcm.sample_f32(index))
+    })
+}
+
 #[cfg(not(feature = "strict-wdl"))]
 fn resample_to_analysis(
     input: &[f64],
@@ -238,6 +404,9 @@ fn analyze_channel(
         let product = sample * window[i];
         fft_in[i & (FFT_N - 1)] += product as f64;
     }
+    #[cfg(feature = "strict-wdl")]
+    let spec = real_fft_1024(&mut fft_in);
+    #[cfg(not(feature = "strict-wdl"))]
     let spec = real_fft_1024(&fft_in);
 
     // REAPER stores the current complex spectrum to its f32 phase-history
@@ -322,44 +491,48 @@ fn analyze_channel(
     )
 }
 
-fn build_fine_spectral_f64_impl(
-    source: &[f64],
+fn analyze_resampled_spectral(
+    resampled: &[f64],
     frames: usize,
     channels: usize,
     source_rate: u32,
     division: u32,
-    expected_override: Option<usize>,
+    expected_mode: ExpectedCount,
 ) -> Result<Vec<SpectralPeak>> {
-    if channels == 0 {
-        return Err(ReaPeaksError::InvalidArgument("channels=0"));
-    }
-    if division == 0 || source_rate == 0 {
-        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
-    }
-    if source.len() < frames.saturating_mul(channels) {
-        return Err(ReaPeaksError::InvalidArgument(
-            "PCM buffer shorter than frames*channels",
-        ));
-    }
-
-    // Normal mode deliberately keeps the historical source-domain termination
-    // rule. Strict mode supplies REAPER's analysis-domain count here, without
-    // changing the source slice or the frame count seen by WDL_Resampler.
-    let expected = match expected_override {
-        Some(expected) => expected,
-        None => {
+    let expected_before_resample = match expected_mode {
+        ExpectedCount::SourceDomain => {
             if frames <= 1024 {
                 return Ok(Vec::new());
             }
-            (frames - 1024) / division as usize
+            Some((frames - 1024) / division as usize)
+        }
+        #[cfg(feature = "strict-wdl")]
+        ExpectedCount::Exact(expected) => Some(expected),
+        #[cfg(feature = "strict-wdl")]
+        ExpectedCount::AnalysisDomain => None,
+    };
+    if expected_before_resample == Some(0) {
+        return Ok(Vec::new());
+    }
+
+    let out_frames = resampled.len() / channels;
+    let expected = match expected_mode {
+        #[cfg(feature = "strict-wdl")]
+        ExpectedCount::AnalysisDomain => {
+            analysis_domain_fine_count(out_frames, source_rate, division)
+        }
+        ExpectedCount::SourceDomain => {
+            expected_before_resample.expect("expected count resolved before resampling")
+        }
+        #[cfg(feature = "strict-wdl")]
+        ExpectedCount::Exact(_) => {
+            expected_before_resample.expect("expected count resolved before resampling")
         }
     };
     if expected == 0 {
         return Ok(Vec::new());
     }
 
-    let resampled = resample_to_analysis(source, frames, channels, source_rate);
-    let out_frames = resampled.len() / channels;
     let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
     let rounded = (hop + 0.5).floor() as i32;
     let nwin = rounded.max(1024) as usize;
@@ -432,6 +605,45 @@ fn build_fine_spectral_f64_impl(
     Ok(out)
 }
 
+fn build_fine_spectral_f64_impl(
+    source: &[f64],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+    expected_mode: ExpectedCount,
+) -> Result<Vec<SpectralPeak>> {
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    if source.len() < frames.saturating_mul(channels) {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+
+    if matches!(expected_mode, ExpectedCount::SourceDomain) && frames <= 1024 {
+        return Ok(Vec::new());
+    }
+    #[cfg(feature = "strict-wdl")]
+    if matches!(expected_mode, ExpectedCount::Exact(0)) {
+        return Ok(Vec::new());
+    }
+
+    let resampled = resample_to_analysis(source, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
+        frames,
+        channels,
+        source_rate,
+        division,
+        expected_mode,
+    )
+}
+
 fn source_from_i16(pcm: &[i16], frames: usize, channels: usize) -> Result<Vec<f64>> {
     Ok(pcm
         .get(..frames.saturating_mul(channels))
@@ -473,7 +685,14 @@ pub fn build_fine_spectral(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_i16(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
 }
 
 pub fn build_fine_spectral_f32(
@@ -484,7 +703,14 @@ pub fn build_fine_spectral_f32(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_f32(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
 }
 
 pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
@@ -495,7 +721,107 @@ pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_f32_source(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_analysis_counted(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    if pcm.len() < frames.saturating_mul(channels) {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_analysis_counted(
+    pcm: &[f32],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    if pcm.len() < frames.saturating_mul(channels) {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_source_analysis_counted<S: F32SampleSource + ?Sized>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    let required = frames
+        .checked_mul(channels)
+        .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    if pcm.sample_len() < required {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
 }
 
 #[cfg(feature = "strict-wdl")]
@@ -507,14 +833,28 @@ pub(crate) fn build_fine_spectral_with_expected(
     division: u32,
     expected: usize,
 ) -> Result<Vec<SpectralPeak>> {
-    let source = source_from_i16(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(
-        &source,
+    if expected == 0 {
+        return Ok(Vec::new());
+    }
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if pcm.len() < frames.saturating_mul(channels) {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    let resampled = resample_i16_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
         frames,
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
@@ -527,14 +867,28 @@ pub(crate) fn build_fine_spectral_f32_with_expected(
     division: u32,
     expected: usize,
 ) -> Result<Vec<SpectralPeak>> {
-    let source = source_from_f32(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(
-        &source,
+    if expected == 0 {
+        return Ok(Vec::new());
+    }
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if pcm.len() < frames.saturating_mul(channels) {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    let resampled = resample_f32_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
         frames,
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
@@ -547,14 +901,31 @@ pub(crate) fn build_fine_spectral_f32_source_with_expected<S: F32SampleSource + 
     division: u32,
     expected: usize,
 ) -> Result<Vec<SpectralPeak>> {
-    let source = source_from_f32_source(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(
-        &source,
+    if expected == 0 {
+        return Ok(Vec::new());
+    }
+    let required = frames
+        .checked_mul(channels)
+        .ok_or(ReaPeaksError::InvalidArgument("frames*channels overflow"))?;
+    if channels == 0 {
+        return Err(ReaPeaksError::InvalidArgument("channels=0"));
+    }
+    if pcm.sample_len() < required {
+        return Err(ReaPeaksError::InvalidArgument(
+            "PCM buffer shorter than frames*channels",
+        ));
+    }
+    if division == 0 || source_rate == 0 {
+        return Err(ReaPeaksError::InvalidArgument("zero rate/division"));
+    }
+    let resampled = resample_f32_source_to_analysis(pcm, frames, channels, source_rate);
+    analyze_resampled_spectral(
+        &resampled,
         frames,
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
@@ -683,4 +1054,44 @@ pub(crate) fn build_spectral_layers_f32_source<S: F32SampleSource + ?Sized>(
     }
     let fine = build_fine_spectral_f32_source(pcm, frames, channels, source_rate, divisions[0])?;
     assemble_spectral_layers(&fine, frames, channels, divisions)
+}
+
+#[cfg(all(test, feature = "strict-wdl"))]
+mod strict_streaming_resample_tests {
+    use super::*;
+
+    fn assert_same_f64_stream(left: &[f64], right: &[f64]) {
+        assert_eq!(left.len(), right.len());
+        for (index, (&a, &b)) in left.iter().zip(right).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "resampled sample {index}");
+        }
+    }
+
+    #[test]
+    fn direct_i16_feed_matches_whole_file_f64_staging() {
+        for &(rate, channels) in &[(44_100u32, 1usize), (48_000, 2), (96_000, 6)] {
+            let frames = 5_137usize;
+            let pcm: Vec<i16> = (0..frames * channels)
+                .map(|i| ((i as i32 * 7_919 + 12_347) as i16).wrapping_sub(8_123))
+                .collect();
+            let staged_source = source_from_i16(&pcm, frames, channels).unwrap();
+            let staged = resample_to_analysis(&staged_source, frames, channels, rate);
+            let direct = resample_i16_to_analysis(&pcm, frames, channels, rate);
+            assert_same_f64_stream(&staged, &direct);
+        }
+    }
+
+    #[test]
+    fn direct_f32_source_feed_matches_whole_file_f64_staging() {
+        for &(rate, channels) in &[(44_100u32, 2usize), (88_200, 1), (192_000, 4)] {
+            let frames = 4_321usize;
+            let pcm: Vec<f32> = (0..frames * channels)
+                .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
+                .collect();
+            let staged_source = source_from_f32(&pcm, frames, channels).unwrap();
+            let staged = resample_to_analysis(&staged_source, frames, channels, rate);
+            let direct = resample_f32_source_to_analysis(&pcm[..], frames, channels, rate);
+            assert_same_f64_stream(&staged, &direct);
+        }
+    }
 }

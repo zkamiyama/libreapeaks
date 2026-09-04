@@ -1,0 +1,40 @@
+name: Temporary format optimize branch
+
+on:
+  push:
+    branches:
+      - optimize/byte-identical-analysis
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: optimize/byte-identical-analysis
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply optimization patch
+        run: |
+          if [[ -f .github/optimize.patch ]]; then
+            git apply .github/optimize.patch
+            rm .github/optimize.patch
+          fi
+      - name: Format Rust sources
+        run: cargo fmt --all
+      - name: Commit patch and formatting
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Stream strict WDL input without whole-file staging"
+          git push origin HEAD:optimize/byte-identical-analysis

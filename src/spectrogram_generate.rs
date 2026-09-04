@@ -13,6 +13,8 @@ const BH_A1: f64 = 0.48829;
 const BH_A2: f64 = 0.14128;
 const BH_A3: f64 = 0.01168;
 const PCM_SCALE_F32: f32 = 1.0 / 32768.0;
+const INTERNAL_PARALLEL_MIN_TASKS: usize = 8;
+const INTERNAL_PARALLEL_MAX_WORKERS: usize = 4;
 // REAPER quantizes squared FFT magnitude directly.  Because the WDL real FFT
 // is 2x the conventional DFT scale and the Blackman-Harris coefficients are
 // normalized to unit sum, an exact-bin sine of amplitude A produces power A^2.
@@ -20,6 +22,7 @@ const POWER_LOG_SCALE: f64 = 88.92179516969081;
 const CODE_BIAS: f64 = 4095.5;
 const CODE_MAX: u16 = 4095;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct C64 {
     re: f64,
@@ -90,23 +93,15 @@ fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
 }
 
 #[cfg(feature = "strict-wdl")]
-fn real_fft_256(input: &[f64; FFT_SIZE]) -> [C64; FFT_BINS] {
+fn real_fft_256(input: &mut [f64; FFT_SIZE]) -> [C64; FFT_BINS] {
     unsafe extern "C" {
-        fn rpk_wdl_real_fft_256(input: *const f64, out_re: *mut f64, out_im: *mut f64) -> i32;
+        fn rpk_wdl_real_fft_256_inplace(input: *mut f64, output: *mut f64) -> i32;
     }
-
-    let mut re = [0.0f64; FFT_BINS];
-    let mut im = [0.0f64; FFT_BINS];
-    let rc = unsafe { rpk_wdl_real_fft_256(input.as_ptr(), re.as_mut_ptr(), im.as_mut_ptr()) };
-    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
 
     let mut out = [C64::default(); FFT_BINS];
-    for bin in 0..FFT_BINS {
-        out[bin] = C64 {
-            re: re[bin],
-            im: im[bin],
-        };
-    }
+    let rc =
+        unsafe { rpk_wdl_real_fft_256_inplace(input.as_mut_ptr(), out.as_mut_ptr().cast::<f64>()) };
+    assert_eq!(rc, 0, "WDL 256-point FFT bridge failed");
     out
 }
 
@@ -274,6 +269,9 @@ fn analyze_base_frame(
         }
     }
 
+    #[cfg(feature = "strict-wdl")]
+    let spectrum = real_fft_256(&mut input);
+    #[cfg(not(feature = "strict-wdl"))]
     let spectrum = real_fft_256(&input);
     let mut bins = [0u16; SPECTROGRAM_BINS];
     for stored_bin in 0..SPECTROGRAM_BINS {
@@ -334,6 +332,107 @@ fn encode_layer(frames: &[SpectrogramFrame], channels: usize) -> Result<Generate
     })
 }
 
+#[inline]
+fn internal_worker_count(task_count: usize) -> usize {
+    if task_count < INTERNAL_PARALLEL_MIN_TASKS {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |parallelism| {
+        parallelism
+            .get()
+            .min(INTERNAL_PARALLEL_MAX_WORKERS)
+            .min(task_count)
+    })
+}
+
+fn build_first_frame(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    channel: usize,
+    time_frame: usize,
+    first_ratio: usize,
+    base_count: usize,
+    fine_division: u32,
+    window: &[f32; FFT_SIZE],
+) -> SpectrogramFrame {
+    let first_base = time_frame * first_ratio;
+    let last_base = (first_base + first_ratio).min(base_count);
+    let actual_count = last_base - first_base;
+    let mut sums = [0u64; SPECTROGRAM_BINS];
+    for base_index in first_base..last_base {
+        let frame = analyze_base_frame(
+            pcm,
+            frames,
+            channels,
+            channel,
+            base_index,
+            fine_division,
+            window,
+        );
+        for bin in 0..SPECTROGRAM_BINS {
+            sums[bin] += u64::from(frame.bins[bin]);
+        }
+    }
+    let mut bins = [0u16; SPECTROGRAM_BINS];
+    for bin in 0..SPECTROGRAM_BINS {
+        bins[bin] = (sums[bin] / actual_count as u64) as u16;
+    }
+    SpectrogramFrame { bins }
+}
+
+fn fill_first_frames(
+    output: &mut [SpectrogramFrame],
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    first_ratio: usize,
+    base_count: usize,
+    fine_division: u32,
+    window: &[f32; FFT_SIZE],
+) {
+    let workers = internal_worker_count(output.len());
+    if workers <= 1 {
+        for (index, slot) in output.iter_mut().enumerate() {
+            *slot = build_first_frame(
+                pcm,
+                frames,
+                channels,
+                index % channels,
+                index / channels,
+                first_ratio,
+                base_count,
+                fine_division,
+                window,
+            );
+        }
+        return;
+    }
+
+    let chunk_size = output.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in output.chunks_mut(chunk_size).enumerate() {
+            let start_index = chunk_index * chunk_size;
+            scope.spawn(move || {
+                for (local_index, slot) in chunk.iter_mut().enumerate() {
+                    let index = start_index + local_index;
+                    *slot = build_first_frame(
+                        pcm,
+                        frames,
+                        channels,
+                        index % channels,
+                        index / channels,
+                        first_ratio,
+                        base_count,
+                        fine_division,
+                        window,
+                    );
+                }
+            });
+        }
+    });
+}
+
 pub(crate) fn build_spectrogram_layers_pcm16(
     pcm: &[i16],
     frames: usize,
@@ -364,35 +463,23 @@ pub(crate) fn build_spectrogram_layers_pcm16(
             .ok_or(ReaPeaksError::InvalidArgument(
                 "spectrogram frame capacity overflow",
             ))?;
-    let mut current_frames = Vec::with_capacity(first_capacity);
+    let mut current_frames = vec![
+        SpectrogramFrame {
+            bins: [0u16; SPECTROGRAM_BINS]
+        };
+        first_capacity
+    ];
     let first_ratio = ratios[0];
-    for time_frame in 0..first_count {
-        let first_base = time_frame * first_ratio;
-        let last_base = (first_base + first_ratio).min(base_count);
-        let actual_count = last_base - first_base;
-        for channel in 0..channels {
-            let mut sums = [0u64; SPECTROGRAM_BINS];
-            for base_index in first_base..last_base {
-                let frame = analyze_base_frame(
-                    pcm,
-                    frames,
-                    channels,
-                    channel,
-                    base_index,
-                    divisions[0],
-                    &window,
-                );
-                for bin in 0..SPECTROGRAM_BINS {
-                    sums[bin] += u64::from(frame.bins[bin]);
-                }
-            }
-            let mut bins = [0u16; SPECTROGRAM_BINS];
-            for bin in 0..SPECTROGRAM_BINS {
-                bins[bin] = (sums[bin] / actual_count as u64) as u16;
-            }
-            current_frames.push(SpectrogramFrame { bins });
-        }
-    }
+    fill_first_frames(
+        &mut current_frames,
+        pcm,
+        frames,
+        channels,
+        first_ratio,
+        base_count,
+        divisions[0],
+        &window,
+    );
 
     let mut layers = Vec::with_capacity(divisions.len() - 1);
     layers.push(encode_layer(&current_frames, channels)?);
