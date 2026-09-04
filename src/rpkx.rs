@@ -169,7 +169,9 @@ impl RpkxContainer {
             .len()
             .checked_mul(RPKX_DIRECTORY_ENTRY_SIZE)
             .and_then(|len| len.checked_add(RPKX_HEADER_SIZE))
-            .ok_or(ReaPeaksError::InvalidArgument("RPKX directory size overflow"))?;
+            .ok_or(ReaPeaksError::InvalidArgument(
+                "RPKX directory size overflow",
+            ))?;
         let payload_len = self.chunks.iter().try_fold(0usize, |total, chunk| {
             total
                 .checked_add(chunk.payload.len())
@@ -203,9 +205,12 @@ impl RpkxContainer {
             out.extend_from_slice(&0u32.to_le_bytes());
             out.extend_from_slice(&payload_offset.to_le_bytes());
             out.extend_from_slice(&payload_len.to_le_bytes());
-            payload_offset = payload_offset
-                .checked_add(payload_len)
-                .ok_or(ReaPeaksError::InvalidArgument("RPKX payload offset overflow"))?;
+            payload_offset =
+                payload_offset
+                    .checked_add(payload_len)
+                    .ok_or(ReaPeaksError::InvalidArgument(
+                        "RPKX payload offset overflow",
+                    ))?;
         }
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.payload);
@@ -283,7 +288,9 @@ fn parse_rpkx_header(bytes: &[u8]) -> Result<RpkxHeaderFields> {
         return Err(ReaPeaksError::Truncated);
     }
     if bytes.get(0..4) != Some(RPKX_MAGIC.as_slice()) {
-        let magic: [u8; 4] = bytes[0..4].try_into().map_err(|_| ReaPeaksError::Truncated)?;
+        let magic: [u8; 4] = bytes[0..4]
+            .try_into()
+            .map_err(|_| ReaPeaksError::Truncated)?;
         return Err(ReaPeaksError::InvalidMagic(magic));
     }
     let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
@@ -442,7 +449,9 @@ pub fn standard_end(raw: &[u8]) -> Result<usize> {
         let payload_len = layer_payload_size(magic, channels, division, count)?;
         payload_off = payload_off
             .checked_add(payload_len)
-            .ok_or(ReaPeaksError::InvalidHeader("layer payload offset overflow"))?;
+            .ok_or(ReaPeaksError::InvalidHeader(
+                "layer payload offset overflow",
+            ))?;
         if payload_off > raw.len() {
             return Err(ReaPeaksError::Truncated);
         }
@@ -491,9 +500,12 @@ pub fn standard_end_reader<R: Read + Seek>(reader: &mut R) -> Result<u64> {
         let division = i32::from_le_bytes(table[off..off + 4].try_into().unwrap());
         let count = u32::from_le_bytes(table[off + 4..off + 8].try_into().unwrap()) as usize;
         let payload_len = layer_payload_size(magic, channels, division, count)?;
-        payload_off = payload_off
-            .checked_add(payload_len as u64)
-            .ok_or(ReaPeaksError::InvalidHeader("layer payload offset overflow"))?;
+        payload_off =
+            payload_off
+                .checked_add(payload_len as u64)
+                .ok_or(ReaPeaksError::InvalidHeader(
+                    "layer payload offset overflow",
+                ))?;
     }
     Ok(payload_off)
 }
