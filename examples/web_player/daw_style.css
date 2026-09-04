@@ -6,7 +6,8 @@
   justify-content: flex-end;
 }
 
-.launchPanel {
+.launchPanel,
+.configPanel {
   position: fixed;
   inset: 0;
   z-index: 50;
@@ -17,7 +18,8 @@
   background: rgba(7, 10, 14, .86);
   backdrop-filter: blur(8px);
 }
-.launchPanel.hidden { display: none; }
+.launchPanel.hidden,
+.configPanel.hidden { display: none; }
 .launchDrop {
   min-width: min(680px, 80vw);
   min-height: 220px;
@@ -34,6 +36,42 @@
 .launchDrop.dragging { border-color: #6edaa4; box-shadow: 0 0 0 3px rgba(110,218,164,.18); }
 #launchProgress { width: min(680px, 80vw); height: 18px; }
 #launchStatus { text-align: center; max-width: min(680px, 80vw); }
+.launchActions { text-align: center; }
+
+.configPanel { z-index: 60; overflow: auto; }
+.configCard {
+  width: min(720px, 88vw);
+  max-height: 88vh;
+  overflow: auto;
+  display: grid;
+  gap: .8rem;
+  padding: 1.4rem 1.5rem;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 14px;
+  background: rgba(20, 28, 39, .98);
+  box-shadow: 0 18px 60px rgba(0,0,0,.45);
+}
+.configCard h2 { margin: 0; }
+.configIntro { margin: 0 0 .3rem; opacity: .85; line-height: 1.45; }
+.configCard label {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) 1fr;
+  gap: .65rem;
+  align-items: center;
+}
+.configCard label[hidden] { display: none; }
+.configCard label > input[type="checkbox"] { justify-self: start; }
+.configCard input[type="text"],
+.configCard input[type="number"],
+.configCard select { min-width: 0; width: 100%; box-sizing: border-box; }
+.configCard small { grid-column: 2; opacity: .72; }
+.configPath,
+.configStatus {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.configStatus { min-height: 1.4em; }
+.configActions { display: flex; justify-content: flex-end; gap: .65rem; }
 
 .dawCanvas {
   position: absolute;
@@ -112,4 +150,6 @@ body.dawMode #analysisGl { opacity: 0; }
   .headerActions { justify-content: flex-start; }
   .launchDrop, #launchProgress, #launchStatus { min-width: 0; width: 90vw; }
   .dawControls .controlGrid { align-items: flex-start; flex-direction: column; }
+  .configCard label { grid-template-columns: 1fr; }
+  .configCard small { grid-column: 1; }
 }
