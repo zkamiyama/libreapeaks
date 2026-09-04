@@ -19,6 +19,13 @@ struct C32 {
     im: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExpectedCount {
+    SourceDomain,
+    Exact(usize),
+    AnalysisDomain,
+}
+
 #[inline]
 fn wrap_phase(mut x: f64) -> f64 {
     x %= 2.0;
@@ -28,6 +35,33 @@ fn wrap_phase(mut x: f64) -> f64 {
         x -= 2.0;
     }
     x
+}
+
+#[inline]
+fn analysis_domain_fine_count(
+    analysis_frames: usize,
+    source_rate: u32,
+    division: u32,
+) -> usize {
+    if analysis_frames == 0 || division == 0 || source_rate == 0 {
+        return 0;
+    }
+    let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
+    let rounded = (hop + 0.5).floor() as i32;
+    let mut phase = if rounded <= 1023 {
+        (rounded - 1024) as f64 * 0.5
+    } else {
+        0.0
+    };
+    let mut count = 0usize;
+    for _ in 0..analysis_frames {
+        phase += 1.0;
+        while phase >= hop {
+            count = count.saturating_add(1);
+            phase -= hop;
+        }
+    }
+    count
 }
 
 #[cfg(not(feature = "strict-wdl"))]
@@ -328,7 +362,7 @@ fn build_fine_spectral_f64_impl(
     channels: usize,
     source_rate: u32,
     division: u32,
-    expected_override: Option<usize>,
+    expected_mode: ExpectedCount,
 ) -> Result<Vec<SpectralPeak>> {
     if channels == 0 {
         return Err(ReaPeaksError::InvalidArgument("channels=0"));
@@ -342,24 +376,39 @@ fn build_fine_spectral_f64_impl(
         ));
     }
 
-    // Normal mode deliberately keeps the historical source-domain termination
-    // rule. Strict mode supplies REAPER's analysis-domain count here, without
-    // changing the source slice or the frame count seen by WDL_Resampler.
-    let expected = match expected_override {
-        Some(expected) => expected,
-        None => {
+    // Portable mode retains the historical source-domain rule. Strict mode can
+    // either accept an explicitly supplied oracle count or derive the count from
+    // the real WDL analysis stream produced below. Deriving it from that stream
+    // avoids the former zero-signal WDL resampler prepass without changing any
+    // DSP operation or EOF scheduler rule.
+    let expected_before_resample = match expected_mode {
+        ExpectedCount::SourceDomain => {
             if frames <= 1024 {
                 return Ok(Vec::new());
             }
-            (frames - 1024) / division as usize
+            Some((frames - 1024) / division as usize)
+        }
+        ExpectedCount::Exact(expected) => Some(expected),
+        ExpectedCount::AnalysisDomain => None,
+    };
+    if expected_before_resample == Some(0) {
+        return Ok(Vec::new());
+    }
+
+    let resampled = resample_to_analysis(source, frames, channels, source_rate);
+    let out_frames = resampled.len() / channels;
+    let expected = match expected_mode {
+        ExpectedCount::AnalysisDomain => {
+            analysis_domain_fine_count(out_frames, source_rate, division)
+        }
+        ExpectedCount::SourceDomain | ExpectedCount::Exact(_) => {
+            expected_before_resample.expect("expected count resolved before resampling")
         }
     };
     if expected == 0 {
         return Ok(Vec::new());
     }
 
-    let resampled = resample_to_analysis(source, frames, channels, source_rate);
-    let out_frames = resampled.len() / channels;
     let hop = division as f64 * ANALYSIS_RATE / source_rate as f64;
     let rounded = (hop + 0.5).floor() as i32;
     let nwin = rounded.max(1024) as usize;
@@ -473,7 +522,14 @@ pub fn build_fine_spectral(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_i16(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
 }
 
 pub fn build_fine_spectral_f32(
@@ -484,7 +540,14 @@ pub fn build_fine_spectral_f32(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_f32(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
 }
 
 pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
@@ -495,7 +558,73 @@ pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
     let source = source_from_f32_source(pcm, frames, channels)?;
-    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::SourceDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_analysis_counted(
+    pcm: &[i16],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_i16(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_analysis_counted(
+    pcm: &[f32],
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
+}
+
+#[cfg(feature = "strict-wdl")]
+pub(crate) fn build_fine_spectral_f32_source_analysis_counted<
+    S: F32SampleSource + ?Sized,
+>(
+    pcm: &S,
+    frames: usize,
+    channels: usize,
+    source_rate: u32,
+    division: u32,
+) -> Result<Vec<SpectralPeak>> {
+    let source = source_from_f32_source(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
+        frames,
+        channels,
+        source_rate,
+        division,
+        ExpectedCount::AnalysisDomain,
+    )
 }
 
 #[cfg(feature = "strict-wdl")]
@@ -514,7 +643,7 @@ pub(crate) fn build_fine_spectral_with_expected(
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
@@ -534,7 +663,7 @@ pub(crate) fn build_fine_spectral_f32_with_expected(
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
@@ -554,7 +683,7 @@ pub(crate) fn build_fine_spectral_f32_source_with_expected<S: F32SampleSource + 
         channels,
         source_rate,
         division,
-        Some(expected),
+        ExpectedCount::Exact(expected),
     )
 }
 
