@@ -415,12 +415,13 @@ impl StreamingSpectralAnalyzer {
 
     fn push_interleaved(&mut self, samples: &[f64]) -> bool {
         debug_assert_eq!(samples.len() % self.channels, 0);
+        let nwin = self.window.len();
         for frame in samples.chunks_exact(self.channels) {
             for (channel, &sample) in frame.iter().enumerate() {
-                self.ring[self.write_pos * self.channels + channel] = sample as f32;
+                self.ring[channel * nwin + self.write_pos] = sample as f32;
             }
             self.write_pos += 1;
-            if self.write_pos == self.window.len() {
+            if self.write_pos == nwin {
                 self.write_pos = 0;
             }
             self.phase += 1.0;
@@ -430,7 +431,6 @@ impl StreamingSpectralAnalyzer {
                     let peak = analyze_channel(
                         &self.ring,
                         self.write_pos,
-                        self.channels,
                         channel,
                         &self.window,
                         &mut self.previous[channel],
@@ -605,26 +605,20 @@ fn resample_to_analysis(
 }
 
 #[inline]
-fn fill_fft_input(
-    ring: &[f32],
-    write_pos: usize,
-    channels: usize,
-    channel: usize,
-    window: &[f32],
-) -> [f64; FFT_N] {
+fn fill_fft_input(ring: &[f32], write_pos: usize, channel: usize, window: &[f32]) -> [f64; FFT_N] {
     let nwin = window.len();
+    let lane_start = channel * nwin;
+    let lane = &ring[lane_start..lane_start + nwin];
     let mut fft_in = [0.0f64; FFT_N];
     if nwin == FFT_N {
         let mut i = 0usize;
-        for rf in write_pos..FFT_N {
-            let sample = ring[rf * channels + channel];
+        for &sample in &lane[write_pos..] {
             // Preserve REAPER's scalar f32 multiply before promotion.
             let product = sample * window[i];
             fft_in[i] += product as f64;
             i += 1;
         }
-        for rf in 0..write_pos {
-            let sample = ring[rf * channels + channel];
+        for &sample in &lane[..write_pos] {
             let product = sample * window[i];
             fft_in[i] += product as f64;
             i += 1;
@@ -632,8 +626,7 @@ fn fill_fft_input(
     } else {
         for i in 0..nwin {
             let rf = (write_pos + i) % nwin;
-            let sample = ring[rf * channels + channel];
-            let product = sample * window[i];
+            let product = lane[rf] * window[i];
             fft_in[i & (FFT_N - 1)] += product as f64;
         }
     }
@@ -684,16 +677,15 @@ fn summarize_spectrum_magnitudes(
 fn analyze_channel(
     ring: &[f32],
     write_pos: usize,
-    channels: usize,
     channel: usize,
     window: &[f32],
     previous: &mut [C32; HALF_BINS + 1],
     elapsed: usize,
 ) -> SpectralPeak {
     #[cfg(feature = "strict-wdl")]
-    let mut fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+    let mut fft_in = fill_fft_input(ring, write_pos, channel, window);
     #[cfg(not(feature = "strict-wdl"))]
-    let fft_in = fill_fft_input(ring, write_pos, channels, channel, window);
+    let fft_in = fill_fft_input(ring, write_pos, channel, window);
     #[cfg(feature = "strict-wdl")]
     let spec = real_fft_1024(&mut fft_in);
     #[cfg(not(feature = "strict-wdl"))]
@@ -821,7 +813,7 @@ fn analyze_resampled_spectral(
 
     'samples: for f in 0..out_frames {
         for c in 0..channels {
-            ring[write_pos * channels + c] = resampled[f * channels + c] as f32;
+            ring[c * nwin + write_pos] = resampled[f * channels + c] as f32;
         }
         write_pos += 1;
         if write_pos == nwin {
@@ -831,15 +823,7 @@ fn analyze_resampled_spectral(
         elapsed += 1;
         while phase >= hop {
             for c in 0..channels {
-                let p = analyze_channel(
-                    &ring,
-                    write_pos,
-                    channels,
-                    c,
-                    &window,
-                    &mut previous[c],
-                    elapsed,
-                );
+                let p = analyze_channel(&ring, write_pos, c, &window, &mut previous[c], elapsed);
                 out.push(p);
             }
             elapsed = 0;
@@ -1447,7 +1431,7 @@ mod strict_streaming_analysis_tests {
 mod spectral_fft_input_fast_path_tests {
     use super::*;
 
-    fn reference_fft_input(
+    fn reference_interleaved_fft_input(
         ring: &[f32],
         write_pos: usize,
         channels: usize,
@@ -1465,19 +1449,36 @@ mod spectral_fft_input_fast_path_tests {
         fft_in
     }
 
+    fn planarize(interleaved: &[f32], frames: usize, channels: usize) -> Vec<f32> {
+        let mut planar = vec![0.0f32; interleaved.len()];
+        for frame in 0..frames {
+            for channel in 0..channels {
+                planar[channel * frames + frame] = interleaved[frame * channels + channel];
+            }
+        }
+        planar
+    }
+
     #[test]
-    fn modulo_free_1024_gather_is_bit_identical() {
+    fn planar_modulo_free_1024_gather_is_bit_identical() {
         let channels = 6usize;
-        let ring: Vec<f32> = (0..FFT_N * channels)
+        let interleaved: Vec<f32> = (0..FFT_N * channels)
             .map(|i| (((i * 37) % 20_003) as f32 - 10_001.0) / 10_003.0)
             .collect();
+        let planar = planarize(&interleaved, FFT_N, channels);
         let window: Vec<f32> = (0..FFT_N)
             .map(|i| (((i * 53) % 4_093) as f32 + 1.0) / 4_096.0)
             .collect();
         for write_pos in [0usize, 1, 127, 511, 512, 777, 1023] {
             for channel in 0..channels {
-                let fast = fill_fft_input(&ring, write_pos, channels, channel, &window);
-                let reference = reference_fft_input(&ring, write_pos, channels, channel, &window);
+                let fast = fill_fft_input(&planar, write_pos, channel, &window);
+                let reference = reference_interleaved_fft_input(
+                    &interleaved,
+                    write_pos,
+                    channels,
+                    channel,
+                    &window,
+                );
                 for (index, (&actual, &expected)) in fast.iter().zip(reference.iter()).enumerate() {
                     assert_eq!(
                         actual.to_bits(),
