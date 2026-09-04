@@ -483,7 +483,8 @@ pub fn build_fine_spectral_f32(
     source_rate: u32,
     division: u32,
 ) -> Result<Vec<SpectralPeak>> {
-    build_fine_spectral_f32_source(pcm, frames, channels, source_rate, division)
+    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(&source, frames, channels, source_rate, division, None)
 }
 
 pub(crate) fn build_fine_spectral_f32_source<S: F32SampleSource + ?Sized>(
@@ -526,13 +527,14 @@ pub(crate) fn build_fine_spectral_f32_with_expected(
     division: u32,
     expected: usize,
 ) -> Result<Vec<SpectralPeak>> {
-    build_fine_spectral_f32_source_with_expected(
-        pcm,
+    let source = source_from_f32(pcm, frames, channels)?;
+    build_fine_spectral_f64_impl(
+        &source,
         frames,
         channels,
         source_rate,
         division,
-        expected,
+        Some(expected),
     )
 }
 
@@ -662,7 +664,11 @@ pub fn build_spectral_layers_f32(
     source_rate: u32,
     divisions: &[u32],
 ) -> Result<Vec<GeneratedLayer>> {
-    build_spectral_layers_f32_source(pcm, frames, channels, source_rate, divisions)
+    if divisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fine = build_fine_spectral_f32(pcm, frames, channels, source_rate, divisions[0])?;
+    assemble_spectral_layers(&fine, frames, channels, divisions)
 }
 
 pub(crate) fn build_spectral_layers_f32_source<S: F32SampleSource + ?Sized>(
