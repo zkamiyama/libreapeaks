@@ -4,7 +4,8 @@ Positive cases use the distributable build; only negative controls use the
 separately hashed diagnostic build. Workspaces are isolated and disposable.
 """
 from __future__ import annotations
-import hashlib,json,math,os,pathlib,shutil,struct,subprocess,sys,time,wave
+import hashlib,json,math,os,pathlib,shutil,struct,sys,time,wave
+from host_process import launch
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 OUT=ROOT/'host-results'; INFO=json.loads((OUT/'environment.json').read_text())
 SCRIPT=ROOT/'tools/reaper_plugin/host_actions.lua'
@@ -64,11 +65,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     env.pop('LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE',None)
     if fail: env['LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE']='1'
     started=time.perf_counter()
-    try:
-        with (case/'console.txt').open('wb') as log:
-            p=subprocess.run([INFO['reaper'],'-newinst','-cfgfile',str(cfg),'-new','-nosplash',str(SCRIPT)],env=env,stdout=log,stderr=subprocess.STDOUT,timeout=65)
-        rc=p.returncode
-    except subprocess.TimeoutExpired: rc=-999
+    rc=launch([INFO['reaper'],'-newinst','-cfgfile',str(cfg),'-new','-nosplash',str(SCRIPT)],env,case)
     result=(case/'result.txt').read_text(errors='replace') if (case/'result.txt').exists() else ''
     trace=(case/'plugin.tsv').read_text(errors='replace') if (case/'plugin.tsv').exists() else ''
     kv=dict(line.split('=',1) for line in result.splitlines() if '=' in line)
@@ -107,7 +104,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     (case/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
     print(json.dumps(row),flush=True)
     if row['errors']:
-        for filename in ('console.txt','actions.txt'):
+        for filename in ('console.txt','actions.txt','startup-windows.json'):
             p=case/filename
             if p.exists(): print('DIAGNOSTIC',name,filename,p.read_text(errors='replace')[-12000:],flush=True)
         print('CACHE_FILES',list(map(str,case.rglob('*.reapeaks'))),flush=True)
@@ -116,8 +113,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
 def main():
     rows=[]
     native_row,native=run_case('native-wave',plugin=False,action='manual');rows.append(native_row)
-    if native is not None:
-        native=native[:standard_end(native)]
+    if native is not None:native=native[:standard_end(native)]
     for name,kw in [('plugin-auto',{}),('plugin-float32',{'fmt':'float32'}),('negative-auto',{'fail':True})]:
         row,data=run_case(name,**kw)
         if name=='plugin-auto' and data is not None and native is not None and data[:standard_end(data)]!=native:
@@ -133,12 +129,11 @@ def main():
             ('negative-manual',{'action':'manual','fail':True}),
         ]:
             row,data=run_case(name,seed=native,tail_mib=1,**kw);rows.append(row)
-    else:
-        rows.append({'name':'seeded-cases','passed':False,'errors':['BLOCKED: native control produced no cache']})
+    else:rows.append({'name':'seeded-cases','passed':False,'errors':['BLOCKED: native control produced no cache']})
     report={'environment':INFO,'cases':rows,'passed':all(r['passed'] for r in rows),'scope':'Real host 7.79 normal actions; recording/render/sink interception and long-source streaming not yet covered.'}
     (OUT/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     text=['# REAPER host acceptance',f"Commit: {INFO['commit']}",'','| Case | Result | Error |','|---|---|---|']
-    for r in rows: text.append('| '+r['name']+' | '+('PASS' if r['passed'] else 'FAIL')+' | '+'; '.join(r['errors'])+' |')
+    for r in rows:text.append('| '+r['name']+' | '+('PASS' if r['passed'] else 'FAIL')+' | '+'; '.join(r['errors'])+' |')
     text.append('\nPositive cases use the regular plugin; negative controls a separately hashed diagnostic build. Failures are not skips.')
     (OUT/'SUMMARY.md').write_text('\n'.join(text)+'\n')
     if os.getenv('GITHUB_STEP_SUMMARY'):
