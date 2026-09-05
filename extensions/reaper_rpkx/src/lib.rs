@@ -1,6 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 pub mod store;
 mod read_guard;
+mod read_only;
 use std::cell::RefCell;
 use std::ffi::{c_char,c_void,CStr};
 use std::io;
@@ -43,7 +44,7 @@ pub unsafe extern "C" fn lrpk_stamp(p:*const c_char,mtime:*mut u32,size:*mut u32
 }
 #[no_mangle]
 pub unsafe extern "C" fn lrpk_read_standard(p:*const c_char,out:*mut Buffer)->i32{
-    if out.is_null(){return -1;}*out=Buffer::empty();guard(||{*out=Buffer::take(store::read_standard(path(p)?)?);Ok(())})
+    if out.is_null(){return -1;}*out=Buffer::empty();guard(||{*out=Buffer::take(read_only::read_standard(path(p)?)?);Ok(())})
 }
 #[no_mangle]
 pub unsafe extern "C" fn lrpk_recover(p:*const c_char)->i32{guard(||{store::recover(path(p)?)?;Ok(())})}

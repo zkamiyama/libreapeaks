@@ -18,11 +18,8 @@ struct Job{
         media=src->GetFileName()?src->GetFileName():"";
         if(media.empty()||!supported(src->GetType()))throw std::runtime_error("unsupported source");
         source_stamp=stat_file(media);
-        char read[32768]{},write[32768]{};
-        peak_name(media.c_str(),read,sizeof read,false);peak_name(media.c_str(),write,sizeof write,true);
-        if(!*write)throw std::runtime_error("REAPER returned no peak path");
-        if(*read&&strcmp(read,write)&&fs::exists(fs::u8path(read)))throw std::runtime_error("read/write peak paths differ; refusing implicit migration");
-        cache=fs::weakly_canonical(fs::u8path(write)).u8string();
+        cache=lrpk_cache_path_for_media(media.c_str());
+        lrpk_recover_guard(cache,force);
         const double sr=src->GetSampleRate(),len=src->GetLength();
         if(!std::isfinite(sr)||sr<1||sr>768000||!std::isfinite(len)||len<0||len*sr>double(SIZE_MAX/32))throw std::runtime_error("unsupported source geometry");
         rate=uint32_t(std::llround(sr));nch=uint32_t(src->GetNumChannels());
@@ -32,19 +29,17 @@ struct Job{
         format=lossless&&src->GetBitsPerSample()==16?0:(src->GetBitsPerSample()>=32&&std::string(src->GetType())=="WAVE"?2:1);
         expected=size_t(std::llround(len*rate));
         if(lrpk_stamp(media.c_str(),&mtime,&size))throw std::runtime_error(error_text());
-        // We never delegate a deleting clear to the native source. A non-deleting
-        // clear is safe and lets Windows release any peak-reader handle before
-        // this job opens the RPKX-bearing cache for validation or commit.
+        // We never delegate a deleting clear here. A non-deleting clear is safe
+        // and asks the native decoder to release any internal peak state.
         src->Peaks_Clear(false);
         {Delegating guard;decoder.reset(src->Duplicate());}
         if(!decoder)throw std::runtime_error("native decoder duplication failed");
-        live_div=std::max<size_t>(1,rate/300);bucket.resize(nch);
+        live_div=std::max<size_t>(1,rate/pps);bucket.resize(nch);
         pending=std::async(std::launch::async,[this](){
             Result r;try{
                 fs::create_directories(fs::u8path(cache).parent_path());
                 // A forced rebuild cannot reuse the current standard prefix. Do
-                // not take an avoidable read/write handle before decoding; the
-                // transactional replace performs recovery and validation later.
+                // not take an avoidable cache handle before decoding.
                 if(force)return r;
                 if(!fs::exists(fs::u8path(cache)))return r;
                 if(lrpk_read_standard(cache.c_str(),&r.image.b))throw std::runtime_error(error_text());
@@ -105,12 +100,19 @@ struct Job{
                     r.generation_s=elapsed(t);
                     if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during analysis");
                     t=Clock::now();
+                    const std::string commit=lrpk_commit_path(cache);
                     // Preserve the original RPKX binding, including stale chunks.
-                    if(lrpk_replace(cache.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
+                    if(lrpk_replace(commit.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
+                    lrpk_finalize_guard(cache,commit);
                     r.commit_s=elapsed(t);
-                }catch(const std::exception&e){r.error=e.what();}return r;
+                }catch(const std::exception&e){
+                    const std::string cause=e.what();
+                    try{lrpk_restore_guard(cache);r.error=cause;}catch(const std::exception&restore){r.error=cause+"; recovery guard restore failed: "+restore.what();}
+                }return r;
             });return 1;
-        }catch(const std::exception&e){fail(e.what());return 0;}
+        }catch(const std::exception&e){
+            const std::string cause=e.what();try{lrpk_restore_guard(cache);fail(cause);}catch(const std::exception&restore){fail(cause+"; recovery guard restore failed: "+restore.what());}return 0;
+        }
     }
     void live_peaks(PCM_source_peaktransfer_t*b){
         std::unique_lock<std::mutex>g(mutex,std::try_to_lock);if(!g.owns_lock()||live.empty()||b->peakrate<=0||b->nchpeaks<1||b->nchpeaks>32)return;

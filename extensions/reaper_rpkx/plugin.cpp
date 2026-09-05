@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -63,6 +64,7 @@ static Stamp stat_file(const std::string&p){auto f=fs::u8path(p);return {fs::fil
 static bool supported(const char*t){return t&&(!strcmp(t,"WAVE")||!strcmp(t,"FLAC")||!strcmp(t,"MP3")||!strcmp(t,"VORBIS")||!strcmp(t,"WAVPACK"));}
 struct Pair{double hi=-1e300,lo=1e300;};
 struct Result{Buffer image;std::string error;bool reuse=false;LrpkReport report{};double generation_s=0,commit_s=0;};
+#include "windows_guard.h"
 #include "plugin_job.h"
 static std::mutex jobs_mu;
 using JobKey=std::tuple<std::string,uintmax_t,fs::file_time_type,int,int>;
@@ -74,7 +76,7 @@ class Source final:public PCM_source{
     std::unique_ptr<PCM_source> inner;
     std::unique_ptr<REAPER_PeakGet_Interface> getter;
     Stamp getter_stamp;
-    std::string cache,error;
+    std::string cache,error,clear_error;
     std::shared_ptr<Job> job;
     bool dirty=false,online=true,online_recheck=false,timer_owned=false;
     std::atomic<bool> displayed{false};
@@ -89,18 +91,18 @@ public:
     PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p):nullptr;}catch(...){return nullptr;}}
     bool IsAvailable()override{return inner->IsAvailable();}
     void SetAvailable(bool v)override{
-        getter.reset();cache.clear();error.clear();online=v;
-        if(job&&job->state>=3)job.reset();
+        getter.reset();cache.clear();error.clear();clear_error.clear();online=v;
         if(!v)timer_owned=false;
         inner->SetAvailable(v);
         // Reopening can alter the source stamp even if REAPER doesn't invoke
-        // PeaksBuild_Begin. Queue validation; do not do file IO from drawing.
+        // PeaksBuild_Begin. Queue validation; service() skips disk IO when the
+        // just-committed job already proves the same source/profile is ready.
         online_recheck=v;
         log(std::string("AVAILABLE\tvalue=")+(v?"1":"0")+"\tfile="+(GetFileName()?GetFileName():""));
     }
     const char*GetType()override{return inner->GetType();}
     const char*GetFileName()override{return inner->GetFileName();}
-    bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();return inner->SetFileName(s);}
+    bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();clear_error.clear();return inner->SetFileName(s);}
     PCM_source*GetSource()override{return inner->GetSource();}
     void SetSource(PCM_source*p)override{inner->SetSource(p);}
     int GetNumChannels()override{return inner->GetNumChannels();}
@@ -112,15 +114,25 @@ public:
     int PropertiesWindow(HWND h)override{return inner->PropertiesWindow(h);}
     void GetSamples(PCM_source_transfer_t*b)override{inner->GetSamples(b);}
     void SaveState(ProjectStateContext*c)override{inner->SaveState(c);}
-    int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();return inner->LoadState(s,c);}
+    int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();clear_error.clear();return inner->LoadState(s,c);}
     int Extended(int c,void*a,void*b,void*d)override{return inner->Extended(c,a,b,d);}
     void Peaks_Clear(bool remove)override{
-        getter.reset();dirty=dirty||remove;job.reset();error.clear();timer_owned=false;
+        getter.reset();job.reset();error.clear();clear_error.clear();timer_owned=false;
         log("CLEAR\tdelete_requested="+std::to_string(remove)+"\tfile="+(GetFileName()?GetFileName():""));
-        // No inner->Peaks_Clear(): that would unlink the RPKX-bearing cache.
+        try{
+            if(remove){
+#ifdef _WIN32
+                lrpk_prepare_guarded_clear(inner.get(),GetFileName());
+#else
+                Delegating g;inner->Peaks_Clear(false);
+#endif
+                dirty=true;
+            }else{Delegating g;inner->Peaks_Clear(false);}
+        }catch(const std::exception&e){dirty=false;clear_error=e.what();error=clear_error;log("ERROR\tclear\t"+clear_error);if(console)console(("libreapeaks: "+clear_error+"\n").c_str());}
     }
     int PeaksBuild_Begin()override{
         try{
+            if(!clear_error.empty())throw std::runtime_error(clear_error);
             if(job&&job->state<3)return 1;
             observed_mode=desired_mode();observed_pps=cfg("peakcachegenrs",300);online_recheck=false;
             getter.reset();error.clear();
@@ -147,6 +159,15 @@ public:
         if(!online)return false;
         if(!timer_owned&&(!job||job->state>=3)&&(displayed.load()||online_recheck)){
             const int mode=desired_mode(),pps=cfg("peakcachegenrs",300);
+            if(online_recheck&&job&&job->state==3){
+                try{
+                    const char*fn=GetFileName();
+                    if(fn&&*fn&&stat_file(fn)==job->source_stamp&&mode<=int(job->mode)&&pps==int(job->pps)){
+                        observed_mode=mode;observed_pps=pps;online_recheck=false;
+                        log("RECHECK_SKIP\treason=online-ready\tmode="+std::to_string(mode)+"\tfile="+fn);
+                    }
+                }catch(...){/* A real stamp/read problem falls through to validation. */}
+            }
             if(online_recheck||mode!=observed_mode||pps!=observed_pps){
                 const bool reopening=online_recheck;
                 observed_mode=mode;observed_pps=pps;online_recheck=false;
