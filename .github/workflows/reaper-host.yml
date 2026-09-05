@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +46,15 @@ jobs:
             xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/host_acceptance.py
           else
             python tools/reaper_plugin/host_acceptance.py
+          fi
+      - name: Verified native and RPKX-size benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/benchmark.py
+          else
+            python tools/reaper_plugin/benchmark.py
           fi
       - uses: actions/upload-artifact@v4
         if: always()

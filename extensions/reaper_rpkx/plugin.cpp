@@ -1,5 +1,5 @@
-// Experimental REAPER extension. Native PCM decoding and read-only peak getters
-// are retained. No native peak writer entry point is imported or called.
+// Experimental REAPER extension. Retain native decoding and read-only getters;
+// never import or invoke a native peak writer. See README for coverage limits.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -27,7 +27,6 @@
 #ifdef max
 #undef max
 #endif
-
 namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
 static PCM_source* (*create_file)(const char*);
@@ -37,6 +36,7 @@ static REAPER_PeakGet_Interface* (*peak_get)(const char*,int,int);
 static void (*hires)(PCM_source*,PCM_source_peaktransfer_t*);
 static void* (*config_var)(const char*,int*);
 static void (*console)(const char*);
+static void (*update_arrange)();
 static int (*regfn)(const char*,void*);
 static const char* (*app_version)();
 static thread_local unsigned delegate_depth=0;
@@ -58,163 +58,13 @@ struct Buffer{
     Buffer(Buffer&&o)noexcept:b(o.b){o.b={};}
     Buffer&operator=(Buffer&&o)noexcept{if(this!=&o){lrpk_free(&b);b=o.b;o.b={};}return*this;}
 };
-struct Stamp{
-    uintmax_t size=0;fs::file_time_type time{};
-    bool operator==(const Stamp&o)const{return size==o.size&&time==o.time;}
-};
+struct Stamp{uintmax_t size=0;fs::file_time_type time{};bool operator==(const Stamp&o)const{return size==o.size&&time==o.time;}};
 static Stamp stat_file(const std::string&p){auto f=fs::u8path(p);return {fs::file_size(f),fs::last_write_time(f)};}
 static bool supported(const char*t){return t&&(!strcmp(t,"WAVE")||!strcmp(t,"FLAC")||!strcmp(t,"MP3")||!strcmp(t,"VORBIS")||!strcmp(t,"WAVPACK"));}
 struct Pair{double hi=-1e300,lo=1e300;};
 struct Result{Buffer image;std::string error;bool reuse=false;LrpkReport report{};double generation_s=0,commit_s=0;};
-struct Job{
-    unsigned id=++serial;
-    std::string media,cache;
-    Stamp source_stamp;
-    uint32_t rate=0,nch=0,pps=0,mtime=0,size=0;
-    uint8_t format=0,mode=0;
-    size_t expected=0,decoded=0;
-    bool force=false;
-    // 0=loading,1=decode,2=analysis/commit,3=ready,4=failed
-    std::atomic<int> state{0};
-    std::string error;
-    std::unique_ptr<PCM_source> decoder;
-    std::future<Result> pending;
-    std::vector<int16_t> i16;
-    std::vector<float> f32;
-    std::vector<Pair> live;
-    std::vector<Pair> bucket;
-    size_t live_div=1,bucket_frames=0;
-    double decode_s=0;
-    Clock::time_point started=Clock::now();
-    std::mutex mutex;
-    bool reported=false;
-    ~Job(){if(pending.valid())pending.wait();}
-    explicit Job(PCM_source*src,bool dirty):force(dirty){
-        media=src->GetFileName()?src->GetFileName():"";
-        if(media.empty()||!supported(src->GetType()))throw std::runtime_error("unsupported source");
-        source_stamp=stat_file(media);
-        char read[32768]{},write[32768]{};
-        peak_name(media.c_str(),read,sizeof read,false);peak_name(media.c_str(),write,sizeof write,true);
-        if(!*write)throw std::runtime_error("REAPER returned no peak path");
-        // Do not silently migrate an existing cache between different paths.
-        if(*read&&strcmp(read,write)&&fs::exists(fs::u8path(read)))throw std::runtime_error("read/write peak paths differ; refusing implicit migration");
-        cache=fs::weakly_canonical(fs::u8path(write)).u8string();
-        const double sr=src->GetSampleRate(),len=src->GetLength();
-        if(!std::isfinite(sr)||sr<1||sr>768000||!std::isfinite(len)||len<0||len*sr>double(SIZE_MAX/32))throw std::runtime_error("unsupported source geometry");
-        rate=uint32_t(std::llround(sr));nch=uint32_t(src->GetNumChannels());
-        if(nch<1||nch>32)throw std::runtime_error("unsupported source channel count");
-        pps=uint32_t(std::max(1,cfg("peakcachegenrs",300)));mode=uint8_t(requested_mode());
-        // The host owns scheduling (including disabled/background/on-load choices).
-        // Once a build is requested, always generate a valid cache for the display
-        // profile. Never require the user to change peakcachegenmode to enable us.
-        const bool lossless=std::string(src->GetType())=="WAVE"||std::string(src->GetType())=="FLAC"||std::string(src->GetType())=="WAVPACK";
-        format=lossless&&src->GetBitsPerSample()==16?0:(src->GetBitsPerSample()>=32&&std::string(src->GetType())=="WAVE"?2:1);
-        expected=size_t(std::llround(len*rate));
-        if(lrpk_stamp(media.c_str(),&mtime,&size))throw std::runtime_error(error_text());
-        {Delegating guard;decoder.reset(src->Duplicate());}
-        if(!decoder)throw std::runtime_error("native decoder duplication failed");
-        live_div=std::max<size_t>(1,rate/300);bucket.resize(nch);
-        pending=std::async(std::launch::async,[this](){
-            Result r;
-            try{
-                fs::create_directories(fs::u8path(cache).parent_path());
-                if(!fs::exists(fs::u8path(cache)))return r;
-                if(lrpk_read_standard(cache.c_str(),&r.image.b))throw std::runtime_error(error_text());
-                const auto*b=r.image.b.data;const auto n=r.image.b.len;
-                if(n<18)return r;
-                bool spectral=false,gram=false;uint32_t fine=0;
-                if(n<18+size_t(b[5])*8)throw std::runtime_error("truncated cached layer table");
-                for(unsigned j=0;j<b[5];++j){const int32_t d=int32_t(u32(b+18+j*8));if(d>0&&!fine)fine=uint32_t(d);if(d==-115)spectral=true;if(d==-103)gram=true;}
-                const int cached_mode=gram?2:(spectral?1:0);
-                r.reuse=!force&&b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
-            }catch(const std::exception&e){r.error=e.what();}return r;
-        });
-        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
-    }
-    void fail(const std::string&s){error=s;state=4;log("ERROR\tid="+std::to_string(id)+"\t"+s);}
-    int run(){
-        std::lock_guard<std::mutex>g(mutex);
-        try{
-            if(state==3||state==4)return 0;
-            if(state==0||state==2){
-                if(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){std::this_thread::sleep_for(std::chrono::milliseconds(1));return state==0?100:1;}
-                Result r=pending.get();
-                if(!r.error.empty()){fail(r.error);return 0;}
-                if(state==2||r.reuse){
-                    std::vector<int16_t>().swap(i16);std::vector<float>().swap(f32);
-                    std::vector<Pair>().swap(live);decoder.reset();
-                    state=3;
-                    log("DONE\tid="+std::to_string(id)+"\treuse="+std::to_string(r.reuse)+"\ttotal_s="+std::to_string(elapsed(started))+"\tdecode_s="+std::to_string(decode_s)+"\tgenerate_s="+std::to_string(r.generation_s)+"\tcommit_s="+std::to_string(r.commit_s)+"\tstandard_written="+std::to_string(r.report.standard_bytes_written)+"\ttail_moved="+std::to_string(r.report.tail_bytes_moved)+"\tjournal_written="+std::to_string(r.report.journal_bytes_written)+"\tsyncs="+std::to_string(r.report.syncs));
-                    return 0;
-                }
-                // A large existing cache may be reused without allocating its PCM.
-                // The batch generator limit is checked only when a decode is needed.
-                const size_t bytes_per_sample=format?4:2;
-                if(expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget; original cache preserved");
-                state=1;
-                if(format)i16.clear();else f32.clear();
-                if(format)f32.reserve(expected*nch);else i16.reserve(expected*nch);
-            }
-            const auto t=Clock::now();
-            if(decoded<expected){
-                const size_t count=std::min<size_t>(16384,expected-decoded);
-                std::vector<double> samples(count*nch);
-                PCM_source_transfer_t b{};b.time_s=double(decoded)/rate;b.samplerate=rate;b.nch=int(nch);b.length=int(count);b.samples=samples.data();
-                decoder->GetSamples(&b);
-                if(b.samples_out<=0||size_t(b.samples_out)>count)throw std::runtime_error("decoder returned invalid/short source; refusing partial commit");
-                for(int f=0;f<b.samples_out;++f){
-                    for(unsigned c=0;c<nch;++c){const double x=samples[size_t(f)*nch+c];if(!std::isfinite(x))throw std::runtime_error("nonfinite decoded sample is outside plugin validation scope");
-                        if(format)f32.push_back(float(x));else i16.push_back(int16_t(std::clamp(std::llround(x*32768.),-32768LL,32767LL)));
-                        bucket[c].hi=std::max(bucket[c].hi,x);bucket[c].lo=std::min(bucket[c].lo,x);
-                    }
-                    if(++bucket_frames==live_div){live.insert(live.end(),bucket.begin(),bucket.end());std::fill(bucket.begin(),bucket.end(),Pair{});bucket_frames=0;}
-                }
-                decoded+=size_t(b.samples_out);
-                if(size_t(b.samples_out)<count&&decoded!=expected)throw std::runtime_error("decoder length differs from source metadata");
-            }
-            decode_s+=elapsed(t);
-            if(decoded<expected)return std::max(2,100-int(decoded*95/std::max<size_t>(expected,1)));
-            if(bucket_frames){live.insert(live.end(),bucket.begin(),bucket.end());bucket_frames=0;}
-            if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during decode");
-            state=2;
-            pending=std::async(std::launch::async,[this](){
-                Result r;try{
-                    auto t=Clock::now();const void*p=format?static_cast<const void*>(f32.data()):static_cast<const void*>(i16.data());
-                    if(lrpk_generate(p,decoded,nch,rate,pps,mtime,size,format,mode,&r.image.b))throw std::runtime_error(error_text());
-                    log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len));
-#ifdef LRPK_TEST_HOOKS
-                    // Diagnostic build only: fail AFTER the real generator returned.
-                    // The normal distributable contains neither this hook nor its env flag.
-                    if(const char*v=std::getenv("LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE")){if(!std::strcmp(v,"1"))throw std::runtime_error("TEST_GENERATOR_FAILURE_AFTER_GENERATE");}
-#endif
-                    r.generation_s=elapsed(t);
-                    if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during analysis");
-                    t=Clock::now();
-                    // Preserve the original RPKX binding. Source-derived data is
-                    // stale on a source change; never silently rebound or deleted.
-                    if(lrpk_replace(cache.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
-                    r.commit_s=elapsed(t);
-                }catch(const std::exception&e){r.error=e.what();}return r;
-            });
-            return 1;
-        }catch(const std::exception&e){fail(e.what());return 0;}
-    }
-    void live_peaks(PCM_source_peaktransfer_t*b){
-        std::unique_lock<std::mutex>g(mutex,std::try_to_lock);if(!g.owns_lock()||live.empty()||b->peakrate<=0||b->nchpeaks<1||b->nchpeaks>32)return;
-        size_t records=live.size()/nch;
-        for(int i=0;i<b->numpeak_points;++i){const double t=b->start_time+i/b->peakrate;if(t<0)break;
-            if(t*rate/live_div>=double(records))break;
-            const size_t a=size_t(t*rate/live_div),z=size_t(std::min(double(records),std::ceil((t+1/b->peakrate)*rate/live_div)));
-            if(a>=records)break;
-            for(int c=0;c<b->nchpeaks;++c){Pair p;for(size_t j=a;j<std::max(a+1,z);++j){const auto&v=live[j*nch+unsigned(c)%nch];p.hi=std::max(p.hi,v.hi);p.lo=std::min(p.lo,v.lo);}
-                b->peaks[size_t(i)*b->nchpeaks+c]=p.hi;if(b->peaks_minvals)b->peaks_minvals[size_t(i)*b->nchpeaks+c]=p.lo;
-            }++b->peaks_out;
-        }b->peaks_minvals_used=b->peaks_minvals?b->peaks_out:0;b->output_mode=0;
-    }
-};
+#include "plugin_job.h"
 static std::mutex jobs_mu;
-// file_clock::rep can be a 128-bit integer on Apple libc++. Keep time_point
-// typed: no to_string overload, narrowing, rounding, or string collisions.
 using JobKey=std::tuple<std::string,uintmax_t,fs::file_time_type,int,int>;
 static std::map<JobKey,std::weak_ptr<Job>> jobs;
 class Source;
@@ -226,17 +76,27 @@ class Source final:public PCM_source{
     Stamp getter_stamp;
     std::string cache,error;
     std::shared_ptr<Job> job;
-    bool dirty=false;
+    bool dirty=false,online=true,online_recheck=false,timer_owned=false;
+    std::atomic<bool> displayed{false};
+    std::atomic<int> peak_mode_hint{0};
+    int observed_mode=0,observed_pps=300;
+    int desired_mode()const{return std::max(requested_mode(),peak_mode_hint.load());}
 public:
-    explicit Source(PCM_source*p):inner(p){std::lock_guard<std::mutex>g(sources_mu);sources.insert(this);}
+    explicit Source(PCM_source*p):inner(p),observed_mode(requested_mode()),observed_pps(cfg("peakcachegenrs",300)){
+        std::lock_guard<std::mutex>g(sources_mu);sources.insert(this);
+    }
     ~Source()override{std::lock_guard<std::mutex>g(sources_mu);sources.erase(this);}
     PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p):nullptr;}catch(...){return nullptr;}}
     bool IsAvailable()override{return inner->IsAvailable();}
     void SetAvailable(bool v)override{
-        getter.reset();cache.clear();error.clear();
-        // Do not retain a completed job as proof of freshness across offline/online.
+        getter.reset();cache.clear();error.clear();online=v;
         if(job&&job->state>=3)job.reset();
+        if(!v)timer_owned=false;
         inner->SetAvailable(v);
+        // Reopening can alter the source stamp even if REAPER doesn't invoke
+        // PeaksBuild_Begin. Queue validation; do not do file IO from drawing.
+        online_recheck=v;
+        log(std::string("AVAILABLE\tvalue=")+(v?"1":"0")+"\tfile="+(GetFileName()?GetFileName():""));
     }
     const char*GetType()override{return inner->GetType();}
     const char*GetFileName()override{return inner->GetFileName();}
@@ -255,36 +115,61 @@ public:
     int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();return inner->LoadState(s,c);}
     int Extended(int c,void*a,void*b,void*d)override{return inner->Extended(c,a,b,d);}
     void Peaks_Clear(bool remove)override{
-        getter.reset();dirty=dirty||remove;job.reset();error.clear();
+        getter.reset();dirty=dirty||remove;job.reset();error.clear();timer_owned=false;
         log("CLEAR\tdelete_requested="+std::to_string(remove)+"\tfile="+(GetFileName()?GetFileName():""));
-        // Deliberately do NOT call inner->Peaks_Clear or a native builder.
+        // No inner->Peaks_Clear(): that would unlink the RPKX-bearing cache.
     }
     int PeaksBuild_Begin()override{
         try{
             if(job&&job->state<3)return 1;
+            observed_mode=desired_mode();observed_pps=cfg("peakcachegenrs",300);online_recheck=false;
             getter.reset();error.clear();
             const std::string media=GetFileName()?GetFileName():"";
             const auto st=stat_file(media);
-            const JobKey key{media,st.size,st.time,requested_mode(),cfg("peakcachegenrs",300)};
+            const JobKey key{media,st.size,st.time,observed_mode,observed_pps};
             std::lock_guard<std::mutex>g(jobs_mu);
-            // Expired entries must not accumulate across a long editing session.
             for(auto it=jobs.begin();it!=jobs.end();){if(it->second.expired())it=jobs.erase(it);else ++it;}
             auto existing=jobs[key].lock();
             if(existing&&existing->state<3&&(!dirty||existing->force))job=existing;
-            else{job=std::make_shared<Job>(inner.get(),dirty);jobs[key]=job;}
+            else{job=std::make_shared<Job>(inner.get(),dirty,observed_mode);jobs[key]=job;}
             dirty=false;cache=job->cache;return 1;
         }catch(const std::exception&e){error=e.what();log("ERROR\tbegin\t"+error);if(console)console(("libreapeaks: "+error+"\n").c_str());return 0;}
     }
     int PeaksBuild_Run()override{return job?job->run():0;}
     void PeaksBuild_Finish()override{
         if(job&&job->state==4){error=job->error;if(!job->reported&&console){console(("libreapeaks: "+error+"\n").c_str());job->reported=true;}}
-        // Finish may also mean cancellation. Never commit an incomplete decode.
         if(job&&job->state<2){job.reset();dirty=true;}
-        getter.reset();
+        getter.reset();timer_owned=false;
+    }
+    // Called only by REAPER's main-thread timer. No command interception or
+    // test API is needed for a display-profile change or online transition.
+    bool service(std::set<unsigned>&advanced){
+        if(!online)return false;
+        if(!timer_owned&&(!job||job->state>=3)&&(displayed.load()||online_recheck)){
+            const int mode=desired_mode(),pps=cfg("peakcachegenrs",300);
+            if(online_recheck||mode!=observed_mode||pps!=observed_pps){
+                const bool reopening=online_recheck;
+                observed_mode=mode;observed_pps=pps;online_recheck=false;
+                log("RECHECK\treason="+std::string(reopening?"online":"profile")+"\tmode="+std::to_string(mode)+"\tshowpeaks="+std::to_string(cfg("showpeaks",1))+"\tfile="+(GetFileName()?GetFileName():""));
+                timer_owned=PeaksBuild_Begin()!=0;
+            }
+        }
+        if(!timer_owned||!job)return false;
+        if(job->state>=3){PeaksBuild_Finish();return true;}
+        if(!advanced.insert(job->id).second)return false;
+        if(PeaksBuild_Run()==0)PeaksBuild_Finish();
+        return true;
     }
     void GetPeakInfo(PCM_source_peaktransfer_t*b)override{
         b->peaks_out=0;b->peaks_minvals_used=0;b->extra_requested_data_out=0;b->extra_requested_data_out2=0;
         if(!b->peaks||b->numpeak_points<1||b->numpeak_points>1000000||!std::isfinite(b->start_time)||!std::isfinite(b->peakrate))return;
+        displayed=true;
+        // Some host views request extra peak data without changing showpeaks.
+        // Record the requirement only; the timer performs the work.
+        for(int type:{b->extra_requested_data_type,b->extra_requested_data_type2}){
+            const int need=(type=='g'||type=='G')?2:((type=='s'||type=='r')?1:0);
+            int seen=peak_mode_hint.load();while(seen<need&&!peak_mode_hint.compare_exchange_weak(seen,need)){}
+        }
         try{
             if(job&&job->state<3){job->live_peaks(b);return;}
             if(cache.empty()){const char*fn=GetFileName();if(!fn||!*fn)return;char p[32768]{};peak_name(fn,p,sizeof p,false);cache=p;}
@@ -301,11 +186,24 @@ public:
     }
     int status()const{return !error.empty()||(job&&job->state==4)?-1:(job?(job->state==3?2:1):0);}
 };
-static PCM_source* from_file(const char*p,int priority){
+static bool timer_running=false;
+static void service_sources(){
+    if(timer_running)return;
+    struct Running{Running(){timer_running=true;}~Running(){timer_running=false;}}running;
+    bool changed=false;
+    try{
+        std::unique_lock<std::mutex>g(sources_mu,std::try_to_lock);if(!g.owns_lock())return;
+        std::set<unsigned>advanced;const auto started=Clock::now();
+        for(auto*s:sources){changed=s->service(advanced)||changed;if(elapsed(started)>0.008)break;}
+        g.unlock();
+        if(changed&&update_arrange)update_arrange();
+    }catch(const std::exception&e){log(std::string("ERROR\ttimer\t")+e.what());}catch(...){log("ERROR\ttimer\tunknown exception");}
+}
+static PCM_source*from_file(const char*p,int priority){
     if(!p||priority||delegate_depth)return nullptr;
     try{Delegating g;auto*src=create_file(p);if(!src)return nullptr;if(!supported(src->GetType())){log(std::string("UNWRAPPED\ttype=")+src->GetType()+"\tfile="+p);return src;}return new Source(src);}catch(...){return nullptr;}
 }
-static PCM_source* from_type(const char*p,int priority){
+static PCM_source*from_type(const char*p,int priority){
     if(!supported(p)||priority||delegate_depth)return nullptr;
     try{Delegating g;auto*src=create_type(p);return src?new Source(src):nullptr;}catch(...){return nullptr;}
 }
@@ -317,13 +215,13 @@ static int status(PCM_source*p){if(auto*s=checked(p))return s->status();return -
 static void*force_va(void**a,int n){return reinterpret_cast<void*>(static_cast<intptr_t>(n==1?force_build(static_cast<PCM_source*>(a[0])):0));}
 static void*status_va(void**a,int n){return reinterpret_cast<void*>(static_cast<intptr_t>(n==1?status(static_cast<PCM_source*>(a[0])):-2));}
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE,reaper_plugin_info_t*r){
-    if(!r){if(regfn)regfn("-pcmsrc",&provider);return 0;}
+    if(!r){if(regfn){regfn("-timer",reinterpret_cast<void*>(service_sources));regfn("-pcmsrc",&provider);}return 0;}
     if(r->caller_version!=REAPER_PLUGIN_VERSION||!r->GetFunc||!r->Register)return 0;
     regfn=r->Register;
 #define LOAD(name,var) var=reinterpret_cast<decltype(var)>(r->GetFunc(name));if(!var)return 0
     LOAD("PCM_Source_CreateFromFile",create_file);LOAD("PCM_Source_CreateFromType",create_type);
     LOAD("GetPeakFileNameEx",peak_name);LOAD("PeakGet_Create",peak_get);LOAD("get_config_var",config_var);
-    LOAD("ShowConsoleMsg",console);LOAD("GetAppVersion",app_version);
+    LOAD("ShowConsoleMsg",console);LOAD("GetAppVersion",app_version);LOAD("UpdateArrange",update_arrange);
 #undef LOAD
     hires=reinterpret_cast<decltype(hires)>(r->GetFunc("HiresPeaksFromSource"));
     if(const char*p=std::getenv("LIBREAPEAKS_PLUGIN_LOG"))log_path=p;
@@ -333,6 +231,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
 #endif
     if(std::strncmp(app_version(),"7.79",4)){console("libreapeaks experimental plugin is pinned to REAPER 7.79; it was not loaded.\n");return 0;}
     if(!r->Register("<pcmsrc",&provider))return 0;
+    if(!r->Register("timer",reinterpret_cast<void*>(service_sources))){r->Register("-pcmsrc",&provider);return 0;}
     r->Register("ext_name",const_cast<char*>("libreapeaks RPKX protection (experimental)"));
     r->Register("ext_vendor",const_cast<char*>("libreapeaks"));
     r->Register("API_RPKX_ForceBuild",reinterpret_cast<void*>(force_build));
