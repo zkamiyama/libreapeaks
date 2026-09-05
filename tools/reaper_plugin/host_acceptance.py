@@ -43,6 +43,14 @@ def fixture(path,fmt='pcm16'):
         path.write_bytes(b'RIFF'+struct.pack('<I',36+len(data))+b'WAVEfmt '+struct.pack('<I',16)+form+b'data'+struct.pack('<I',len(data))+data)
     os.utime(path,(FIXED_MTIME,FIXED_MTIME))
 
+def real_done_fields(trace):
+    out=[]
+    for line in trace.splitlines():
+        if not line.startswith('DONE\t'): continue
+        fields=dict(x.split('=',1) for x in line.split('\t')[1:] if '=' in x)
+        if fields.get('reuse')=='0': out.append(fields)
+    return out
+
 def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm16',show=1,genmode=3,stale=False,fail=False):
     case=OUT/name;case.mkdir(parents=True,exist_ok=False)
     media=case/'audio.wav';fixture(media,fmt)
@@ -53,7 +61,9 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     before=cache.read_bytes() if cache.exists() else None
     if stale: os.utime(media,(FIXED_MTIME+120,FIXED_MTIME+120))
     cfg=case/'reaper.ini'
-    cfg.write_text('[REAPER]\npeakcachegenmode='+str(genmode)+'\npeakcachegenrs=300\nshowpeaks='+str(show)+'\n',encoding='utf-8')
+    cfg.write_text(
+        '[REAPER]\npeakcachegenmode='+str(genmode)+'\npeakcachegenrs=300\nshowpeaks='+str(show)+'\n'
+        '[audioconfig]\nmode=5\ndummy_srate=48000\ndummy_blocksize=512\n',encoding='utf-8')
     if plugin:
         (case/'UserPlugins').mkdir()
         source=pathlib.Path(INFO['diagnostic_plugin' if fail else 'plugin'])
@@ -78,6 +88,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     require(rc==0,'REAPER did not exit successfully')
     require('finished=true' in result,'test script did not finish')
     require('error=' not in result,'script error')
+    real_done=real_done_fields(trace)
     if plugin:
         require('plugin=true' in result,'extension API missing');require('LOAD\t' in trace,'extension entrypoint not observed')
         require('final_status=-2' not in result,'source bypassed wrapper')
@@ -90,7 +101,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
             require('DIAGNOSTIC_BUILD' not in trace,'positive test accidentally used diagnostic binary')
             require('final_status=2' in result,'plugin job did not become ready')
             if seed is None or stale or action in ('manual','selected','reverse','spectrogram'):
-                require(any(x.startswith('DONE\t') and '\treuse=0\t' in x for x in trace.splitlines()),'no real plugin generation, only reuse/no job')
+                require(bool(real_done),'no real plugin generation, only reuse/no job')
     if not fail:
         require(after is not None,'cache missing')
         if after is not None:
@@ -99,7 +110,11 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
                 if action=='spectrogram': require(any(struct.unpack_from('<i',after,18+i*8)[0]==-103 for i in range(after[5])),'spectrogram layer missing after toggle')
                 if tail is not None:
                     require(after[end:]==tail,'RPKX or unrelated tail changed/lost');row['tail_sha256']=sha(after[end:])
-            except ValueError as e: require(False,str(e))
+                    if real_done:
+                        moves=[int(x.get('tail_moved','-1')) for x in real_done]
+                        if action=='spectrogram': require(any(x>0 for x in moves),'growing spectrogram rebuild did not relocate RPKX')
+                        else: require(all(x==0 for x in moves),'same-size rebuild unnecessarily moved RPKX')
+            except (ValueError,struct.error) as e: require(False,str(e))
     row['passed']=not row['errors']
     (case/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
     print(json.dumps(row),flush=True)
@@ -113,18 +128,24 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
 def standalone_standard(data):
     return data[:standard_end(data)] if data is not None else None
 
+def compare_standard(row,data,expected,label):
+    if data is not None and expected is not None and standalone_standard(data)!=expected:
+        row['errors'].append('standard differs from '+label);row['passed']=False
+
 def main():
     rows=[]
-    native_row,native=run_case('native-wave',plugin=False,action='manual');rows.append(native_row)
-    native=standalone_standard(native)
-    native_f32_row,native_f32=run_case('native-float32',plugin=False,action='manual',fmt='float32');rows.append(native_f32_row)
-    native_f32=standalone_standard(native_f32)
+    native_row,native_data=run_case('native-wave',plugin=False,action='manual');rows.append(native_row)
+    native=standalone_standard(native_data)
+    native_stale_row,native_stale_data=run_case('native-stale',plugin=False,action='manual',stale=True);rows.append(native_stale_row)
+    native_stale=standalone_standard(native_stale_data)
+    native_f32_row,native_f32_data=run_case('native-float32',plugin=False,action='manual',fmt='float32');rows.append(native_f32_row)
+    native_f32=standalone_standard(native_f32_data)
+    native_spec_row,native_spec_data=run_case('native-spectrogram',plugin=False,action='spectrogram');rows.append(native_spec_row)
+    native_spec=standalone_standard(native_spec_data)
     for name,kw in [('plugin-auto',{}),('plugin-float32',{'fmt':'float32'}),('negative-auto',{'fail':True})]:
         row,data=run_case(name,**kw)
-        if name=='plugin-auto' and data is not None and native is not None and standalone_standard(data)!=native:
-            row['errors'].append('standard differs from native waveform control');row['passed']=False
-        if name=='plugin-float32' and data is not None and native_f32 is not None and standalone_standard(data)!=native_f32:
-            row['errors'].append('RPKL standard differs from native float32 control');row['passed']=False
+        if name=='plugin-auto': compare_standard(row,data,native,'native waveform control')
+        if name=='plugin-float32': compare_standard(row,data,native_f32,'native float32 control')
         rows.append(row)
     if native is not None:
         for name,kw in [
@@ -133,11 +154,16 @@ def main():
             ('plugin-spectrogram',{'action':'spectrogram'}),('plugin-reverse',{'action':'reverse'}),
             ('plugin-online',{'action':'online'}),('plugin-genmode-0',{'action':'manual','genmode':0}),
             ('plugin-genmode-1',{'action':'manual','genmode':1}),('plugin-genmode-2',{'action':'manual','genmode':2}),
-            ('negative-manual',{'action':'manual','fail':True}),
+            ('plugin-genmode-3',{'action':'manual','genmode':3}),('negative-manual',{'action':'manual','fail':True}),
         ]:
-            row,data=run_case(name,seed=native,tail_mib=1,**kw);rows.append(row)
+            row,data=run_case(name,seed=native,tail_mib=1,**kw)
+            if not kw.get('fail'):
+                expected=native_spec if name=='plugin-spectrogram' else native_stale if kw.get('stale') else native
+                label='native spectrogram control' if name=='plugin-spectrogram' else 'native stale control' if kw.get('stale') else 'native waveform control'
+                compare_standard(row,data,expected,label)
+            rows.append(row)
     else:rows.append({'name':'seeded-cases','passed':False,'errors':['BLOCKED: native control produced no cache']})
-    report={'environment':INFO,'cases':rows,'passed':all(r['passed'] for r in rows),'scope':'Real host 7.79 normal actions; recording/render/sink interception and long-source streaming not yet covered.'}
+    report={'environment':INFO,'cases':rows,'passed':all(r['passed'] for r in rows),'scope':'Real REAPER 7.79 ordinary import/project/rebuild/profile/offline-online paths with exact same-platform native controls, genmodes 0-3, RPKX byte preservation/relocation checks, float32 RPKL, and injected-failure no-write controls. Creation/long-source coverage is in extended-report.json.'}
     (OUT/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     text=['# REAPER host acceptance',f"Commit: {INFO['commit']}",'','| Case | Result | Error |','|---|---|---|']
     for r in rows:text.append('| '+r['name']+' | '+('PASS' if r['passed'] else 'FAIL')+' | '+'; '.join(r['errors'])+' |')
