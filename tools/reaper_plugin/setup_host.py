@@ -6,9 +6,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 RESULTS = ROOT / 'host-results'
 HOST = ROOT / 'host-runtime'
 
-def run(*args):
+def run(*args, input_text=None):
     print('+', *map(str,args), flush=True)
-    subprocess.run(list(map(str,args)), check=True, cwd=ROOT, timeout=300)
+    subprocess.run(list(map(str,args)), check=True, cwd=ROOT, timeout=300, input=input_text, text=True)
 
 def build():
     rel = ROOT / 'extensions/reaper_rpkx/target/release'
@@ -32,7 +32,9 @@ def install():
         exe=next(p for p in HOST.rglob('reaper') if p.is_file())
     elif sysname=='Darwin':
         mount=HOST/'mount'; mount.mkdir(exist_ok=True)
-        run('hdiutil','attach','-nobrowse','-readonly','-mountpoint',mount,archive)
+        # Authorized, disposable evaluation install. Keep the publisher EULA
+        # intact and answer its normal hdiutil prompt; never alter the host.
+        run('hdiutil','attach','-nobrowse','-readonly','-mountpoint',mount,archive,input_text='Y\n')
         try: run('ditto',next(mount.glob('*.app')),HOST/'REAPER.app')
         finally: run('hdiutil','detach',mount)
         exe=HOST/'REAPER.app/Contents/MacOS/REAPER'
