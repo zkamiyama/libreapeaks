@@ -1,0 +1,36 @@
+name: reaper-rpkx-plugin
+on:
+  push:
+    branches: [feature/reaper-rpkx-preserving-plugin]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and test existing library
+        run: |
+          cargo build --release --features strict-wdl
+          cargo test --lib --features strict-wdl
+      - name: Export isolated development inputs
+        run: |
+          mkdir -p /tmp/plugin-inputs
+          git clone https://github.com/justinfrankel/reaper-sdk.git /tmp/reaper-sdk
+          git -C /tmp/reaper-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
+          git clone --depth 1 https://github.com/justinfrankel/WDL.git /tmp/reaper-sdk/WDL
+          git -C /tmp/reaper-sdk/WDL rev-parse HEAD > /tmp/plugin-inputs/wdl-sdk-sha.txt
+          tar --exclude=.git --exclude=target -czf /tmp/plugin-inputs/source.tar.gz .
+          tar --exclude=.git -czf /tmp/plugin-inputs/sdk.tar.gz -C /tmp reaper-sdk
+          cp target/release/libreapeaks.so /tmp/plugin-inputs/
+          rustc -Vv > /tmp/plugin-inputs/rustc.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-development-inputs
+          path: /tmp/plugin-inputs/
+          retention-days: 7
