@@ -1,4 +1,4 @@
--- Normal host actions only: never call PCM_Source_BuildPeaks or ForceBuild.
+-- Normal host actions only: never call PCM_Source_BuildPeaks or ForceBuild on wrapped media.
 local root=assert(os.getenv('LRPK_CASE'))
 local media=assert(os.getenv('LRPK_MEDIA'))
 local op=os.getenv('LRPK_ACTION') or 'import'
@@ -17,6 +17,25 @@ end
 local function main()
   log('version',reaper.GetAppVersion());log('resource',reaper.GetResourcePath())
   log('plugin',reaper.APIExists('RPKX_Status'))
+  if plugin then
+    -- Exercise the public API with a real PCM_source that this extension does
+    -- not wrap. MIDI is deliberately outside the supported audio type list.
+    -- This catches unsafe Source* downcasts in RPKX_Status/ForceBuild under the
+    -- same REAPER process that runs the rest of host acceptance.
+    local midi=root..'/unwrapped.mid'
+    local mf=assert(io.open(midi,'wb'))
+    mf:write('MThd',string.char(0,0,0,6,0,0,0,1,0,96),'MTrk',string.char(0,0,0,4,0,255,47,0))
+    mf:close()
+    local native=reaper.PCM_Source_CreateFromFile(midi)
+    if not native then error('Could not create native unwrapped MIDI source') end
+    local native_type=reaper.GetMediaSourceType(native,'') or ''
+    local native_status=reaper.RPKX_Status(native)
+    local native_force=reaper.RPKX_ForceBuild(native)
+    log('unwrapped_type',native_type);log('unwrapped_status',native_status);log('unwrapped_force',native_force)
+    reaper.PCM_Source_Destroy(native)
+    if native_status~=-2 then error('RPKX_Status accepted an unwrapped native source: '..tostring(native_status)) end
+    if native_force~=0 then error('RPKX_ForceBuild accepted an unwrapped native source: '..tostring(native_force)) end
+  end
   local by_id,by_name={},{}
   local function normalize(s) return tostring(s or ''):gsub('%z',''):gsub('%s+',' '):match('^%s*(.-)%s*$'):lower() end
   for i=0,65535 do
