@@ -121,6 +121,10 @@ public:
         log("CLEAR\tdelete_requested="+std::to_string(remove)+"\tfile="+(GetFileName()?GetFileName():""));
         try{
             if(remove){
+                // A user-requested rebuild must follow the currently selected
+                // display profile. Drop a stale higher-mode hint left by a prior
+                // spectrogram/spectral view before choosing the forced profile.
+                peak_mode_hint.store(requested_mode());
 #ifdef _WIN32
                 rebuild_cache=lrpk_prepare_guarded_clear(inner.get(),GetFileName());
 #else

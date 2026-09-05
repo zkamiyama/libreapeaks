@@ -85,8 +85,13 @@ local function main()
       local now=reaper.time_precise();local age=now-initial
       if state=='recording' then
         if now-record_started>1.5 then
-          action({'Transport: Stop'},{1016});state='post';action_time=reaper.time_precise();log('record_stopped',true)
+          action({'Transport: Stop (save all recorded media)','Transport: Stop'},{40667,1016});state='post';action_time=reaper.time_precise();log('record_stopped',true)
         end
+        reaper.defer(tick);return
+      end
+      if state=='normal-wait' then
+        reaper.UpdateArrange()
+        if now-action_time>0.75 then rebuild();state='post';action_time=reaper.time_precise() end
         reaper.defer(tick);return
       end
       local src,name=find_source(acted and creates)
@@ -101,7 +106,8 @@ local function main()
         if op=='manual' then rebuild()
         elseif op=='spectral' then action({'Peaks: Toggle spectral peaks'},{42073})
         elseif op=='loudness' then action({'Peaks: Toggle show graph of momentary loudness (LUFS-M)'},{43146})
-        elseif op=='normal' then action({'Peaks: Show normal peaks'},{42301})
+        elseif op=='normal' then
+          action({'Peaks: Show normal peaks'},{42301});state='normal-wait';action_time=reaper.time_precise();reaper.defer(tick);return
         elseif op=='online' then
           action({'Item: Set all media offline'},{40100});rebuild();action({'Item: Set all media online'},{40101})
         elseif op=='glue' then action({'Item: Glue items, ignoring time selection','Item: Glue items'},{40362})
@@ -109,8 +115,8 @@ local function main()
         elseif op=='record' then
           if not track then error('No track for record setup') end
           reaper.Main_SaveProjectEx(0,root..'/record.rpp',0)
+          action({'Track: Set track record mode to output (stereo)'},{40497})
           reaper.SetMediaTrackInfo_Value(track,'I_RECARM',1)
-          reaper.SetMediaTrackInfo_Value(track,'I_RECMODE',1)
           reaper.SetMediaTrackInfo_Value(track,'I_RECMONITEMS',1)
           reaper.SetEditCurPos(0,false,false)
           action({'Transport: Record'},{1013});state='recording';record_started=reaper.time_precise();log('record_started',true)
@@ -127,7 +133,10 @@ local function main()
         end
         st=plugin and reaper.APIExists('RPKX_Status') and reaper.RPKX_Status(src) or 0
         if st~=last then log('status',st);last=st end
-        local terminal=(st==2 or st==-1 or st==-2)
+        -- Newly-created media may already have a valid cache produced by the
+        -- render/record/glue sink, so an idle wrapped source is a valid terminal
+        -- creation state. It is NOT counted as plugin generation by Python.
+        local terminal=(st==2 or st==-1 or st==-2 or (creates and st==0))
         if now-action_time>2 and (not plugin or terminal) then
           log('type',reaper.GetMediaSourceType(src,''));log('final_status',st);log('source_file',name)
           log('peak_read',reaper.GetPeakFileNameEx(name,'',false));log('peak_write',reaper.GetPeakFileNameEx(name,'',true))

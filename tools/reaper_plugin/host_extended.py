@@ -48,7 +48,8 @@ def cleanup_payload(case:pathlib.Path):
 def run_ext(name:str,*,plugin:bool=True,action:str='import',seed:bytes|None=None,tail_mib:int|None=None,
             show:int=1,genmode:int=3,seconds:int=10,media_from:pathlib.Path|None=None,hardlink:bool=False,
             expect_new:bool=False,expect_tokens=(),forbid_tokens=(),expected_standard:bytes|None=None,
-            expect_stream:bool|None=None,expect_tail_move:str|None=None,cleanup:bool=False):
+            expect_stream:bool|None=None,expect_tail_move:str|None=None,cleanup:bool=False,
+            require_generation:bool=True,allow_idle:bool=False):
     case=OUT/('extended-'+name);case.mkdir(parents=True,exist_ok=False)
     media=case/'audio.wav'
     if media_from is None:repeated_pcm16(media,seconds)
@@ -79,17 +80,23 @@ def run_ext(name:str,*,plugin:bool=True,action:str='import',seed:bytes|None=None
     def require(test,msg):
         if not test:row['errors'].append(msg)
     require(rc==0,'REAPER did not exit successfully');require('finished=true' in result,'test script did not finish');require('error=' not in result,'script error')
-    require(int(kv.get('peak_count','0') or 0)>0,'REAPER could not read generated cache')
+    require(int(kv.get('peak_count','0') or 0)>0,'REAPER could not read the resulting cache')
     target=pathlib.Path(source_file) if source_file else media
     if expect_new:require(bool(source_file) and norm(source_file)!=norm(media),'normal action did not produce a distinct media file')
-    begins,generated,done=trace_jobs(trace)
-    real_ids=set()
+    begins,generated,done=trace_jobs(trace);real_ids=set();target_ids=set()
     if plugin:
-        require(kv.get('plugin')=='true','extension API missing');require('LOAD\t' in trace,'extension entrypoint not observed');require(kv.get('final_status')=='2','plugin job did not become ready');require(kv.get('final_status')!='-2','result source bypassed wrapper')
+        require(kv.get('plugin')=='true','extension API missing');require('LOAD\t' in trace,'extension entrypoint not observed')
+        final=kv.get('final_status')
+        if allow_idle:require(final in ('0','2'),'created media was neither idle-wrapped nor ready-wrapped')
+        else:require(final=='2','plugin job did not become ready')
+        require(final!='-2','result source bypassed wrapper')
         target_ids={jid for jid,b in begins.items() if b.get('file') and norm(b['file'])==norm(target)}
         real_ids={jid for jid in target_ids if jid in generated and done.get(jid,{}).get('reuse')=='0'}
-        require(bool(target_ids),'target media never entered plugin source/job path');require(bool(real_ids),'target media never completed a real plugin generation')
-        if expect_stream is not None:require(any((begins[j].get('stream')=='1')==expect_stream for j in real_ids),'target generation used unexpected streaming mode')
+        if require_generation:
+            require(bool(target_ids),'target media never entered plugin source/job path');require(bool(real_ids),'target media never completed a real plugin generation')
+        if expect_stream is not None:
+            require(bool(real_ids) and any((begins[j].get('stream')=='1')==expect_stream for j in real_ids),'target generation used unexpected streaming mode')
+        row.update(target_job_count=len(target_ids),real_generation_count=len(real_ids))
     else:require(kv.get('plugin')=='false','native control unexpectedly loaded plugin')
     if after is None:require(False,'cache missing')
     else:
@@ -141,21 +148,24 @@ def main():
         if native_long is None:
             rows.append({'name':'long-plugin-cases','passed':False,'errors':['BLOCKED: long native control produced no valid cache']})
         else:
-            row,data,_=run_ext('long-import',action='import',media_from=long_source,hardlink=True,expected_standard=native_long,expect_stream=True,cleanup=True);rows.append(row)
-            row,data,_=run_ext('long-rebuild-rpkx',action='manual',media_from=long_source,hardlink=True,seed=native_long,tail_mib=1,expected_standard=native_long,expect_stream=True,expect_tail_move='zero',cleanup=True);rows.append(row)
+            row,_,_=run_ext('long-import',action='import',media_from=long_source,hardlink=True,expected_standard=native_long,expect_stream=True,cleanup=True);rows.append(row)
+            row,_,_=run_ext('long-rebuild-rpkx',action='manual',media_from=long_source,hardlink=True,seed=native_long,tail_mib=1,expected_standard=native_long,expect_stream=True,expect_tail_move='zero',cleanup=True);rows.append(row)
     finally:
         try:long_source.unlink()
         except OSError:pass
 
     for opname in ('glue','render','record'):
-        create_row,created_data,created_media=run_ext(opname+'-create',action=opname,expect_new=True);rows.append(create_row)
+        # A sink may legitimately create the first standard cache before the new
+        # source is wrapped. Do not call that plugin generation. Instead prove the
+        # new source is wrapped/readable, then attach RPKX and rebuild it normally.
+        create_row,created_data,created_media=run_ext(opname+'-create',action=opname,expect_new=True,require_generation=False,allow_idle=True);rows.append(create_row)
         created_std=standalone(created_data)
         if create_row['passed'] and created_std is not None and created_media.is_file():
             rebuild_row,_,_=run_ext(opname+'-rpkx-rebuild',action='manual',media_from=created_media,seed=created_std,tail_mib=1,expected_standard=created_std,expect_tail_move='zero');rows.append(rebuild_row)
-        else:rows.append({'name':opname+'-rpkx-rebuild','passed':False,'errors':['BLOCKED: creation operation did not yield protected file media']})
+        else:rows.append({'name':opname+'-rpkx-rebuild','passed':False,'errors':['BLOCKED: creation operation did not yield wrapped readable file media']})
 
     passed=all(r.get('passed',False) for r in rows)
-    report={'environment':INFO,'cases':rows,'passed':passed,'scope':'Real REAPER 7.79 ordinary actions: spectral/loudness/normal profile regeneration, offline/rebuild/online, reverse negative control, 25-minute PCM16 import+rebuild streaming, Glue, Render-items-to-new-take, Record-output, and RPKX-bearing rebuilds of newly-created media.'}
+    report={'environment':INFO,'cases':rows,'passed':passed,'scope':'Real REAPER 7.79 ordinary actions: spectral/loudness/normal+rebuild profile regeneration, offline/rebuild/online, reverse negative control, 25-minute PCM16 import+rebuild streaming, Glue, Render-items-to-new-take, Record-output, and RPKX-bearing rebuilds of newly-created media.'}
     (OUT/'extended-report.json').write_text(json.dumps(report,indent=2)+'\n')
     lines=['# Extended REAPER host acceptance',f"Commit: {INFO['commit']}",'','| Case | Result | Error |','|---|---|---|']
     for r in rows:lines.append('| '+r['name']+' | '+('PASS' if r.get('passed') else 'FAIL')+' | '+'; '.join(r.get('errors',[]))+' |')

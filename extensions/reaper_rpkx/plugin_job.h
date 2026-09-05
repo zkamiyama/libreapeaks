@@ -91,21 +91,28 @@ struct Job{
             }
             const auto t=Clock::now();
             if(decoded<expected){
-                const size_t count=std::min<size_t>(16384,expected-decoded);std::vector<double>samples(count*nch);
-                PCM_source_transfer_t b{};b.time_s=double(decoded)/rate;b.samplerate=rate;b.nch=int(nch);b.length=int(count);b.samples=samples.data();decoder->GetSamples(&b);
-                if(b.samples_out<=0||size_t(b.samples_out)>count)throw std::runtime_error("decoder returned invalid/short source; refusing partial commit");
-                for(int f=0;f<b.samples_out;++f){
-                    for(unsigned c=0;c<nch;++c){const double x=samples[size_t(f)*nch+c];if(!std::isfinite(x))throw std::runtime_error("nonfinite decoded sample is outside plugin validation scope");
-                        if(format)f32.push_back(float(x));else{
-                            const int16_t q=int16_t(std::clamp(std::llround(x*32768.),-32768LL,32767LL));
-                            if(stream_wave){wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);}else i16.push_back(q);
+                // Waveform streaming is bounded by time rather than by one tiny
+                // scheduler quantum. Keep the temporary decode block small, but
+                // advance multiple 16k blocks for at most ~8 ms per host call.
+                // This preserves UI responsiveness while avoiding thousands of
+                // timer round trips on practical long-form media.
+                do{
+                    const size_t count=std::min<size_t>(16384,expected-decoded);std::vector<double>samples(count*nch);
+                    PCM_source_transfer_t b{};b.time_s=double(decoded)/rate;b.samplerate=rate;b.nch=int(nch);b.length=int(count);b.samples=samples.data();decoder->GetSamples(&b);
+                    if(b.samples_out<=0||size_t(b.samples_out)>count)throw std::runtime_error("decoder returned invalid/short source; refusing partial commit");
+                    for(int f=0;f<b.samples_out;++f){
+                        for(unsigned c=0;c<nch;++c){const double x=samples[size_t(f)*nch+c];if(!std::isfinite(x))throw std::runtime_error("nonfinite decoded sample is outside plugin validation scope");
+                            if(format)f32.push_back(float(x));else{
+                                const int16_t q=int16_t(std::clamp(std::llround(x*32768.),-32768LL,32767LL));
+                                if(stream_wave){wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);}else i16.push_back(q);
+                            }
+                            bucket[c].hi=std::max(bucket[c].hi,x);bucket[c].lo=std::min(bucket[c].lo,x);
                         }
-                        bucket[c].hi=std::max(bucket[c].hi,x);bucket[c].lo=std::min(bucket[c].lo,x);
+                        if(++bucket_frames==live_div)finish_bucket();
                     }
-                    if(++bucket_frames==live_div)finish_bucket();
-                }
-                decoded+=size_t(b.samples_out);
-                if(size_t(b.samples_out)<count&&decoded!=expected)throw std::runtime_error("decoder length differs from source metadata");
+                    decoded+=size_t(b.samples_out);
+                    if(size_t(b.samples_out)<count&&decoded!=expected)throw std::runtime_error("decoder length differs from source metadata");
+                }while(stream_wave&&decoded<expected&&elapsed(t)<0.008);
             }
             decode_s+=elapsed(t);
             if(decoded<expected)return std::max(2,100-int(decoded*95/std::max<size_t>(expected,1)));
