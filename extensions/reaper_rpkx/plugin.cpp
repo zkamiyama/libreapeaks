@@ -70,7 +70,10 @@ static std::mutex jobs_mu;
 using JobKey=std::tuple<std::string,uintmax_t,fs::file_time_type,int,int>;
 static std::map<JobKey,std::weak_ptr<Job>> jobs;
 class Source;
-static std::set<Source*> sources;
+// Key the registry by the exact PCM_source base pointer exposed to REAPER. The
+// public APIs may receive any PCM_source*, including an unwrapped native source;
+// never downcast until membership proves it is one of our Source instances.
+static std::map<PCM_source*,Source*> sources;
 static std::mutex sources_mu;
 class Source final:public PCM_source{
     std::unique_ptr<PCM_source> inner;
@@ -85,9 +88,9 @@ class Source final:public PCM_source{
     int desired_mode()const{return std::max(requested_mode(),peak_mode_hint.load());}
 public:
     explicit Source(PCM_source*p):inner(p),observed_mode(requested_mode()),observed_pps(cfg("peakcachegenrs",300)){
-        std::lock_guard<std::mutex>g(sources_mu);sources.insert(this);
+        std::lock_guard<std::mutex>g(sources_mu);sources.emplace(static_cast<PCM_source*>(this),this);
     }
-    ~Source()override{std::lock_guard<std::mutex>g(sources_mu);sources.erase(this);}
+    ~Source()override{std::lock_guard<std::mutex>g(sources_mu);sources.erase(static_cast<PCM_source*>(this));}
     PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p):nullptr;}catch(...){return nullptr;}}
     bool IsAvailable()override{return inner->IsAvailable();}
     void SetAvailable(bool v)override{
@@ -219,7 +222,7 @@ static void service_sources(){
     try{
         std::unique_lock<std::mutex>g(sources_mu,std::try_to_lock);if(!g.owns_lock())return;
         std::set<unsigned>advanced;const auto started=Clock::now();
-        for(auto*s:sources){changed=s->service(advanced)||changed;if(elapsed(started)>0.008)break;}
+        for(auto&entry:sources){auto*s=entry.second;changed=s->service(advanced)||changed;if(elapsed(started)>0.008)break;}
         g.unlock();
         if(changed&&update_arrange)update_arrange();
     }catch(const std::exception&e){log(std::string("ERROR\ttimer\t")+e.what());}catch(...){log("ERROR\ttimer\tunknown exception");}
@@ -234,7 +237,7 @@ static PCM_source*from_type(const char*p,int priority){
 }
 static const char*extensions(int,const char**desc){if(desc)*desc=nullptr;return nullptr;}
 static pcmsrc_register_t provider={from_type,from_file,extensions};
-static Source*checked(PCM_source*p){std::lock_guard<std::mutex>g(sources_mu);auto*s=static_cast<Source*>(p);return sources.count(s)?s:nullptr;}
+static Source*checked(PCM_source*p){std::lock_guard<std::mutex>g(sources_mu);auto it=sources.find(p);return it==sources.end()?nullptr:it->second;}
 static int force_build(PCM_source*p){if(auto*s=checked(p)){s->Peaks_Clear(true);return 1;}return 0;}
 static int status(PCM_source*p){if(auto*s=checked(p))return s->status();return -2;}
 static void*force_va(void**a,int n){return reinterpret_cast<void*>(static_cast<intptr_t>(n==1?force_build(static_cast<PCM_source*>(a[0])):0));}
