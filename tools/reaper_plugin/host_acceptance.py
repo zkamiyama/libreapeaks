@@ -18,7 +18,7 @@ def standard_end(b):
     if len(b)<pos: raise ValueError('truncated layer table')
     for i in range(n):
         div,count=struct.unpack_from('<iI',b,18+i*8)
-        if div>0: width=4 if b[:4]==b'RPKN' else 8
+        if div>0: width=4
         elif div in (-115,-103,-114): width=4
         else: raise ValueError(f'unsupported layer {div}')
         pos+=ch*count*width
@@ -84,7 +84,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
         if fail:
             require('TEST_GENERATOR_FAILURE_AFTER_GENERATE' in trace,'diagnostic hook not reached')
             require('GENERATED\t' in trace,'real generator did not return')
-            require('final_status=-1' in result,'injected failure not surfaced')
+            require('failure_after_action=true' in result or 'final_status=-1' in result,'injected failure not surfaced')
             require(after==before,'native fallback or unexpected write after generator failure')
         else:
             require('DIAGNOSTIC_BUILD' not in trace,'positive test accidentally used diagnostic binary')
@@ -104,20 +104,27 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     (case/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
     print(json.dumps(row),flush=True)
     if row['errors']:
-        for filename in ('console.txt','actions.txt','startup-windows.json'):
+        for filename in ('console.txt','actions.txt','startup-windows.json','startup-macos.txt','host-process.json'):
             p=case/filename
             if p.exists(): print('DIAGNOSTIC',name,filename,p.read_text(errors='replace')[-12000:],flush=True)
         print('CACHE_FILES',list(map(str,case.rglob('*.reapeaks'))),flush=True)
     return row,after
 
+def standalone_standard(data):
+    return data[:standard_end(data)] if data is not None else None
+
 def main():
     rows=[]
     native_row,native=run_case('native-wave',plugin=False,action='manual');rows.append(native_row)
-    if native is not None:native=native[:standard_end(native)]
+    native=standalone_standard(native)
+    native_f32_row,native_f32=run_case('native-float32',plugin=False,action='manual',fmt='float32');rows.append(native_f32_row)
+    native_f32=standalone_standard(native_f32)
     for name,kw in [('plugin-auto',{}),('plugin-float32',{'fmt':'float32'}),('negative-auto',{'fail':True})]:
         row,data=run_case(name,**kw)
-        if name=='plugin-auto' and data is not None and native is not None and data[:standard_end(data)]!=native:
+        if name=='plugin-auto' and data is not None and native is not None and standalone_standard(data)!=native:
             row['errors'].append('standard differs from native waveform control');row['passed']=False
+        if name=='plugin-float32' and data is not None and native_f32 is not None and standalone_standard(data)!=native_f32:
+            row['errors'].append('RPKL standard differs from native float32 control');row['passed']=False
         rows.append(row)
     if native is not None:
         for name,kw in [

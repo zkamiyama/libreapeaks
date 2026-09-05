@@ -3,6 +3,7 @@ local root=assert(os.getenv('LRPK_CASE'))
 local media=assert(os.getenv('LRPK_MEDIA'))
 local op=os.getenv('LRPK_ACTION') or 'import'
 local plugin=os.getenv('LRPK_EXPECT_PLUGIN')=='1'
+local diagnostic=os.getenv('LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE')=='1'
 local f=assert(io.open(root..'/result.txt','w'))
 local closed=false
 local function log(k,v) if not closed then f:write(k,'=',tostring(v),'\n');f:flush() end end
@@ -54,10 +55,10 @@ local function main()
     return src
   end
   local initial=reaper.time_precise();local acted=false;local action_time=initial
+  local last=-999;local failure_after_action=false
   log('phase','import_begin')
   if op=='project' then reaper.Main_openProject(root..'/input.rpp') else reaper.InsertMedia(media,0) end
   log('phase','import_returned')
-  local last=-999
   local tick
   tick=function()
     local ok,err=xpcall(function()
@@ -65,19 +66,21 @@ local function main()
       if not src then if reaper.time_precise()-initial>5 then error('No imported source') end;reaper.defer(tick);return end
       local st=plugin and reaper.APIExists('RPKX_Status') and reaper.RPKX_Status(src) or 0
       if st~=last then log('status',st);last=st end
+      if acted and st==-1 and not failure_after_action then failure_after_action=true;log('failure_observed',true) end
       local now=reaper.time_precise();local age=now-initial
       if not acted and age>1 and (not plugin or st==2 or st==0 or st==-1 or st==-2) then
         acted=true;log('pre_action_status',st)
         if op=='manual' then rebuild()
         elseif op=='selected' then action({'Peaks: Rebuild peaks for selected items'},{40441})
-        elseif op=='spectrogram' then action({'Peaks: Toggle spectrogram'},{42073})
-        elseif op=='reverse' then action({'Item properties: Reverse active take','Item properties: Toggle take reverse'},{40912});rebuild()
+        elseif op=='spectrogram' then action({'Peaks: Toggle spectrogram'},{42073,42294})
+        elseif op=='reverse' then action({'Item properties: Reverse active take','Item properties: Toggle take reverse'},{40912,41051});rebuild()
         elseif op=='online' then action({'Item: Set all media offline'},{40100});action({'Item: Set all media online'},{40101}) end
         action_time=reaper.time_precise();reaper.defer(tick);return
       end
       reaper.UpdateArrange()
-      if now-action_time>2 and acted and (not plugin or st==2 or st==-1 or st==-2) then
-        log('type',reaper.GetMediaSourceType(src,''));log('final_status',st)
+      local terminal=(st==2 or st==-1 or st==-2 or (diagnostic and failure_after_action))
+      if now-action_time>2 and acted and (not plugin or terminal) then
+        log('type',reaper.GetMediaSourceType(src,''));log('final_status',st);log('failure_after_action',failure_after_action)
         log('peak_read',reaper.GetPeakFileNameEx(media,'',false));log('peak_write',reaper.GetPeakFileNameEx(media,'',true))
         local arr=reaper.new_array(64)
         local n=reaper.PCM_Source_GetPeaks(src,100,0,2,16,0,arr)

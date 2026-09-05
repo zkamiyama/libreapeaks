@@ -11,13 +11,26 @@ on run argv
                 try
                     set reportText to reportText & "WINDOW " & (name of win as text) & linefeed
                     set elementsList to entire contents of win
+                    set audioPrompt to false
                     repeat with el in elementsList
                         try
                             set roleText to role of el as text
                             set nameText to name of el as text
                             set reportText to reportText & roleText & " " & nameText & linefeed
-                            if roleText is "AXButton" and nameText contains "Still Evaluating" then
-                                if enabled of el then
+                            if roleText is "AXStaticText" and nameText contains "audio device" then
+                                set audioPrompt to true
+                            end if
+                        end try
+                    end repeat
+                    repeat with el in elementsList
+                        try
+                            set roleText to role of el as text
+                            set nameText to name of el as text
+                            if roleText is "AXButton" and enabled of el then
+                                if nameText contains "Still Evaluating" then
+                                    click el
+                                    set reportText to reportText & "CLICKED " & nameText & linefeed
+                                else if audioPrompt and nameText is "No" then
                                     click el
                                     set reportText to reportText & "CLICKED " & nameText & linefeed
                                 end if

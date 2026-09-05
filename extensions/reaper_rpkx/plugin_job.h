@@ -32,12 +32,20 @@ struct Job{
         format=lossless&&src->GetBitsPerSample()==16?0:(src->GetBitsPerSample()>=32&&std::string(src->GetType())=="WAVE"?2:1);
         expected=size_t(std::llround(len*rate));
         if(lrpk_stamp(media.c_str(),&mtime,&size))throw std::runtime_error(error_text());
+        // We never delegate a deleting clear to the native source. A non-deleting
+        // clear is safe and lets Windows release any peak-reader handle before
+        // this job opens the RPKX-bearing cache for validation or commit.
+        src->Peaks_Clear(false);
         {Delegating guard;decoder.reset(src->Duplicate());}
         if(!decoder)throw std::runtime_error("native decoder duplication failed");
         live_div=std::max<size_t>(1,rate/300);bucket.resize(nch);
         pending=std::async(std::launch::async,[this](){
             Result r;try{
                 fs::create_directories(fs::u8path(cache).parent_path());
+                // A forced rebuild cannot reuse the current standard prefix. Do
+                // not take an avoidable read/write handle before decoding; the
+                // transactional replace performs recovery and validation later.
+                if(force)return r;
                 if(!fs::exists(fs::u8path(cache)))return r;
                 if(lrpk_read_standard(cache.c_str(),&r.image.b))throw std::runtime_error(error_text());
                 const auto*b=r.image.b.data;const auto n=r.image.b.len;
@@ -46,7 +54,7 @@ struct Job{
                 if(n<18+size_t(b[5])*8)throw std::runtime_error("truncated cached layer table");
                 for(unsigned j=0;j<b[5];++j){const int32_t d=int32_t(u32(b+18+j*8));if(d>0&&!fine)fine=uint32_t(d);if(d==-115)spectral=true;if(d==-103)gram=true;}
                 const int cached_mode=gram?2:(spectral?1:0);
-                r.reuse=!force&&b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
+                r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
             }catch(const std::exception&e){r.error=e.what();}return r;
         });
         log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));

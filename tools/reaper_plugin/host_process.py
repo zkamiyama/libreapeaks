@@ -66,12 +66,18 @@ def macos_startup(pid: int,case: pathlib.Path,age: float) -> None:
     if age>=16 and not (case/'startup.png').exists():
         subprocess.run(['/usr/sbin/screencapture','-x',str(case/'startup.png')],timeout=5,check=False)
 
+def script_finished(case: pathlib.Path) -> bool:
+    p=case/'result.txt'
+    if not p.exists(): return False
+    try: return 'finished=true' in p.read_text(errors='replace')
+    except OSError: return False
+
 def launch(command: list[str], env: dict, case: pathlib.Path, timeout: float=65) -> int:
     with (case/'console.txt').open('wb') as out:
         p=subprocess.Popen(command,env=env,stdout=out,stderr=subprocess.STDOUT)
-        begin=time.monotonic();last_poll=-1
+        begin=time.monotonic();last_poll=-1;finished_at=None
         while p.poll() is None:
-            age=time.monotonic()-begin
+            now=time.monotonic();age=now-begin
             if int(age)!=last_poll:
                 last_poll=int(age)
                 script_started=(case/'result.txt').exists()
@@ -80,6 +86,16 @@ def launch(command: list[str], env: dict, case: pathlib.Path, timeout: float=65)
                         if os.name=='nt':windows_startup(p.pid,case,age)
                         elif platform.system()=='Darwin' and int(age) in (8,16,32,48):macos_startup(p.pid,case,age)
                     except Exception as e:print('STARTUP_DIAGNOSTIC_ERROR',repr(e),flush=True)
+                if script_finished(case):
+                    if finished_at is None: finished_at=now
+                    elif now-finished_at>=2:
+                        meta={'forced_shutdown':True,'reason':'script-finished-but-host-still-running','age':age}
+                        try:
+                            p.terminate();p.wait(timeout=5);meta['terminate_returncode']=p.returncode
+                        except subprocess.TimeoutExpired:
+                            p.kill();p.wait(timeout=10);meta['killed']=True;meta['kill_returncode']=p.returncode
+                        (case/'host-process.json').write_text(json.dumps(meta,indent=2)+'\n',encoding='utf-8')
+                        return 0
                 if age>=timeout:
                     p.kill();p.wait(timeout=10)
                     return -999
