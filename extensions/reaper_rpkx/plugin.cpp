@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include "reaper_plugin.h"
 #include "bridge.h"
@@ -101,13 +102,14 @@ struct Job{
         const double sr=src->GetSampleRate(),len=src->GetLength();
         if(!std::isfinite(sr)||sr<1||sr>768000||!std::isfinite(len)||len<0||len*sr>double(SIZE_MAX/32))throw std::runtime_error("unsupported source geometry");
         rate=uint32_t(std::llround(sr));nch=uint32_t(src->GetNumChannels());
+        if(nch<1||nch>32)throw std::runtime_error("unsupported source channel count");
         pps=uint32_t(std::max(1,cfg("peakcachegenrs",300)));mode=uint8_t(requested_mode());
-        if(cfg("peakcachegenmode",3)!=3)throw std::runtime_error("only peakcachegenmode=3 is validated; native writer remains disabled");
+        // The host owns scheduling (including disabled/background/on-load choices).
+        // Once a build is requested, always generate a valid cache for the display
+        // profile. Never require the user to change peakcachegenmode to enable us.
         const bool lossless=std::string(src->GetType())=="WAVE"||std::string(src->GetType())=="FLAC"||std::string(src->GetType())=="WAVPACK";
         format=lossless&&src->GetBitsPerSample()==16?0:(src->GetBitsPerSample()>=32&&std::string(src->GetType())=="WAVE"?2:1);
         expected=size_t(std::llround(len*rate));
-        const size_t bytes_per_sample=format?4:2;
-        if(nch<1||nch>32||expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget; original cache preserved");
         if(lrpk_stamp(media.c_str(),&mtime,&size))throw std::runtime_error(error_text());
         {Delegating guard;decoder.reset(src->Duplicate());}
         if(!decoder)throw std::runtime_error("native decoder duplication failed");
@@ -127,7 +129,7 @@ struct Job{
                 r.reuse=!force&&b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
             }catch(const std::exception&e){r.error=e.what();}return r;
         });
-        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format));
+        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
     }
     void fail(const std::string&s){error=s;state=4;log("ERROR\tid="+std::to_string(id)+"\t"+s);}
     int run(){
@@ -145,6 +147,10 @@ struct Job{
                     log("DONE\tid="+std::to_string(id)+"\treuse="+std::to_string(r.reuse)+"\ttotal_s="+std::to_string(elapsed(started))+"\tdecode_s="+std::to_string(decode_s)+"\tgenerate_s="+std::to_string(r.generation_s)+"\tcommit_s="+std::to_string(r.commit_s)+"\tstandard_written="+std::to_string(r.report.standard_bytes_written)+"\ttail_moved="+std::to_string(r.report.tail_bytes_moved)+"\tjournal_written="+std::to_string(r.report.journal_bytes_written)+"\tsyncs="+std::to_string(r.report.syncs));
                     return 0;
                 }
+                // A large existing cache may be reused without allocating its PCM.
+                // The batch generator limit is checked only when a decode is needed.
+                const size_t bytes_per_sample=format?4:2;
+                if(expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget; original cache preserved");
                 state=1;
                 if(format)i16.clear();else f32.clear();
                 if(format)f32.reserve(expected*nch);else i16.reserve(expected*nch);
@@ -175,11 +181,17 @@ struct Job{
                 Result r;try{
                     auto t=Clock::now();const void*p=format?static_cast<const void*>(f32.data()):static_cast<const void*>(i16.data());
                     if(lrpk_generate(p,decoded,nch,rate,pps,mtime,size,format,mode,&r.image.b))throw std::runtime_error(error_text());
+                    log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len));
+#ifdef LRPK_TEST_HOOKS
+                    // Diagnostic build only: fail AFTER the real generator returned.
+                    // The normal distributable contains neither this hook nor its env flag.
+                    if(const char*v=std::getenv("LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE")){if(!std::strcmp(v,"1"))throw std::runtime_error("TEST_GENERATOR_FAILURE_AFTER_GENERATE");}
+#endif
                     r.generation_s=elapsed(t);
                     if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during analysis");
                     t=Clock::now();
-                    // Keep the original RPKX binding. Changed-source chunks are
-                    // preserved as stale, never silently rebound or deleted.
+                    // Preserve the original RPKX binding. Source-derived data is
+                    // stale on a source change; never silently rebound or deleted.
                     if(lrpk_replace(cache.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
                     r.commit_s=elapsed(t);
                 }catch(const std::exception&e){r.error=e.what();}return r;
@@ -201,7 +213,10 @@ struct Job{
     }
 };
 static std::mutex jobs_mu;
-static std::map<std::string,std::weak_ptr<Job>> jobs;
+// file_clock::rep can be a 128-bit integer on Apple libc++. Keep time_point
+// typed: no to_string overload, narrowing, rounding, or string collisions.
+using JobKey=std::tuple<std::string,uintmax_t,fs::file_time_type,int,int>;
+static std::map<JobKey,std::weak_ptr<Job>> jobs;
 class Source;
 static std::set<Source*> sources;
 static std::mutex sources_mu;
@@ -217,7 +232,12 @@ public:
     ~Source()override{std::lock_guard<std::mutex>g(sources_mu);sources.erase(this);}
     PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p):nullptr;}catch(...){return nullptr;}}
     bool IsAvailable()override{return inner->IsAvailable();}
-    void SetAvailable(bool v)override{getter.reset();inner->SetAvailable(v);}
+    void SetAvailable(bool v)override{
+        getter.reset();cache.clear();error.clear();
+        // Do not retain a completed job as proof of freshness across offline/online.
+        if(job&&job->state>=3)job.reset();
+        inner->SetAvailable(v);
+    }
     const char*GetType()override{return inner->GetType();}
     const char*GetFileName()override{return inner->GetFileName();}
     bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();return inner->SetFileName(s);}
@@ -245,8 +265,10 @@ public:
             getter.reset();error.clear();
             const std::string media=GetFileName()?GetFileName():"";
             const auto st=stat_file(media);
-            const std::string key=media+"|"+std::to_string(st.size)+"|"+std::to_string(st.time.time_since_epoch().count())+"|"+std::to_string(requested_mode())+"|"+std::to_string(cfg("peakcachegenrs",300));
+            const JobKey key{media,st.size,st.time,requested_mode(),cfg("peakcachegenrs",300)};
             std::lock_guard<std::mutex>g(jobs_mu);
+            // Expired entries must not accumulate across a long editing session.
+            for(auto it=jobs.begin();it!=jobs.end();){if(it->second.expired())it=jobs.erase(it);else ++it;}
             auto existing=jobs[key].lock();
             if(existing&&existing->state<3&&(!dirty||existing->force))job=existing;
             else{job=std::make_shared<Job>(inner.get(),dirty);jobs[key]=job;}
@@ -281,7 +303,7 @@ public:
 };
 static PCM_source* from_file(const char*p,int priority){
     if(!p||priority||delegate_depth)return nullptr;
-    try{Delegating g;auto*src=create_file(p);if(!src)return nullptr;if(!supported(src->GetType()))return src;return new Source(src);}catch(...){return nullptr;}
+    try{Delegating g;auto*src=create_file(p);if(!src)return nullptr;if(!supported(src->GetType())){log(std::string("UNWRAPPED\ttype=")+src->GetType()+"\tfile="+p);return src;}return new Source(src);}catch(...){return nullptr;}
 }
 static PCM_source* from_type(const char*p,int priority){
     if(!supported(p)||priority||delegate_depth)return nullptr;
@@ -306,6 +328,9 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
     hires=reinterpret_cast<decltype(hires)>(r->GetFunc("HiresPeaksFromSource"));
     if(const char*p=std::getenv("LIBREAPEAKS_PLUGIN_LOG"))log_path=p;
     log(std::string("LOAD\tversion=")+app_version());
+#ifdef LRPK_TEST_HOOKS
+    log("DIAGNOSTIC_BUILD\tfault_hooks=1");
+#endif
     if(std::strncmp(app_version(),"7.79",4)){console("libreapeaks experimental plugin is pinned to REAPER 7.79; it was not loaded.\n");return 0;}
     if(!r->Register("<pcmsrc",&provider))return 0;
     r->Register("ext_name",const_cast<char*>("libreapeaks RPKX protection (experimental)"));
