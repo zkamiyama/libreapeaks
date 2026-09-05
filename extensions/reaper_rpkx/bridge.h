@@ -13,6 +13,8 @@ int32_t lrpk_read_standard(const char*,struct LrpkBuffer*);
 int32_t lrpk_recover(const char*);
 int32_t lrpk_replace(const char*,const uint8_t*,size_t,uint8_t,struct LrpkReport*);
 int32_t lrpk_generate(const void*,size_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint8_t,uint8_t,struct LrpkBuffer*);
+void* lrpk_try_read_guard(const char*);
+void lrpk_release_read_guard(void*);
 #ifdef __cplusplus
 }
 #endif

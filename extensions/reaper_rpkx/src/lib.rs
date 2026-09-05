@@ -1,5 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 pub mod store;
+mod read_guard;
 use std::cell::RefCell;
 use std::ffi::{c_char,c_void,CStr};
 use std::io;
