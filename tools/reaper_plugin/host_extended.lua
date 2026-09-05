@@ -73,38 +73,37 @@ local function main()
     return fallback_src,fallback_name
   end
   local function prepare_dummy_audio()
-    local got_old,old_mode=reaper.get_config_var_string('audiomode')
-    log('audio_mode_before_known',got_old);log('audio_mode_before',old_mode or '')
-    reaper.Audio_Quit()
-    local set_mode=reaper.set_config_var_string('audiomode','0',0)
-    local set_rate=reaper.set_config_var_string('dummy_srate','48000',0)
-    local set_block=reaper.set_config_var_string('dummy_blocksize','512',0)
-    log('dummy_mode_set',set_mode);log('dummy_rate_set',set_rate);log('dummy_block_set',set_block)
-    if set_mode==0 then error('REAPER rejected audiomode=0 for dummy audio') end
-    reaper.Audio_Init()
     local mode_ok,mode=reaper.GetAudioDeviceInfo('MODE')
+    if not mode_ok then
+      reaper.Audio_Init()
+      mode_ok,mode=reaper.GetAudioDeviceInfo('MODE')
+    end
     local rate_ok,rate=reaper.GetAudioDeviceInfo('SRATE')
     local block_ok,block=reaper.GetAudioDeviceInfo('BSIZE')
     log('audio_device_open',mode_ok);log('audio_mode',mode or '')
     log('audio_rate_known',rate_ok);log('audio_rate',rate or '')
     log('audio_block_known',block_ok);log('audio_block',block or '')
-    log('audio_running',reaper.Audio_IsRunning())
-    if not mode_ok then error('Dummy audio did not open') end
+    log('audio_running_before_record',reaper.Audio_IsRunning())
+    if not mode_ok then error('Configured dummy audio device did not open') end
   end
   log('phase','import_begin');reaper.InsertMedia(media,0);log('phase','import_returned')
   local item=reaper.GetMediaItem(0,0);if item then reaper.SetMediaItemSelected(item,true) end
   local track=item and reaper.GetMediaItemTrack(item) or nil
   if track then reaper.SetOnlyTrackSelected(track) end
   local initial=reaper.time_precise();local acted=false;local action_time=initial
-  local state='wait';local record_started=0;local last=-999
+  local state='wait';local record_started=0;local record_confirmed=false;local last=-999
   local creates=(op=='glue' or op=='render' or op=='record')
   local tick
   tick=function()
     local ok,err=xpcall(function()
       local now=reaper.time_precise();local age=now-initial
       if state=='recording' then
-        if now-record_started>1.5 then
+        local recording=(reaper.GetPlayState() & 4)~=0
+        if recording and not record_confirmed then record_confirmed=true;log('record_started',true) end
+        if recording and now-record_started>1.5 then
           action({'Transport: Stop (save all recorded media)','Transport: Stop'},{40667,1016});state='post';action_time=reaper.time_precise();log('record_stopped',true)
+        elseif not recording and now-record_started>3 then
+          error('Transport did not enter recording state with configured dummy audio')
         end
         reaper.defer(tick);return
       end
@@ -139,7 +138,7 @@ local function main()
           reaper.SetMediaTrackInfo_Value(track,'I_RECARM',1)
           reaper.SetMediaTrackInfo_Value(track,'I_RECMONITEMS',1)
           reaper.SetEditCurPos(0,false,false)
-          action({'Transport: Record'},{1013});state='recording';record_started=reaper.time_precise();log('record_started',true)
+          action({'Transport: Record'},{1013});state='recording';record_started=reaper.time_precise()
           reaper.defer(tick);return
         end
         state='post';action_time=reaper.time_precise();reaper.defer(tick);return
