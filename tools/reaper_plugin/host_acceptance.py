@@ -82,7 +82,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     paths=[pathlib.Path(kv[k]) for k in ('peak_write','peak_read') if kv.get(k)] + [cache]
     actual=next((p for p in paths if p.is_file()),cache)
     after=actual.read_bytes() if actual.exists() else None
-    row={'name':name,'exit':rc,'wall_s':time.perf_counter()-started,'action':action,'showpeaks':show,'genmode':genmode,'plugin':plugin,'diagnostic':fail,'cache_path':str(actual),'result':result,'trace':trace,'errors':[]}
+    row={'name':name,'exit':rc,'wall_s':time.perf_counter()-started,'action':action,'showpeaks':show,'genmode':genmode,'plugin':plugin,'diagnostic':fail,'cache_path':str(actual),'before_present':before is not None,'after_present':after is not None,'result':result,'trace':trace,'errors':[]}
     def require(test,msg):
         if not test: row['errors'].append(msg)
     require(rc==0,'REAPER did not exit successfully')
@@ -93,10 +93,13 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
         require('plugin=true' in result,'extension API missing');require('LOAD\t' in trace,'extension entrypoint not observed')
         require('final_status=-2' not in result,'source bypassed wrapper')
         if fail:
+            row['failure_no_write']=after==before
+            row['failure_before_sha256']=sha(before) if before is not None else None
+            row['failure_after_sha256']=sha(after) if after is not None else None
             require('TEST_GENERATOR_FAILURE_AFTER_GENERATE' in trace,'diagnostic hook not reached')
             require('GENERATED\t' in trace,'real generator did not return')
             require('failure_after_action=true' in result or 'final_status=-1' in result,'injected failure not surfaced')
-            require(after==before,'native fallback or unexpected write after generator failure')
+            require(row['failure_no_write'],'native fallback or unexpected write after generator failure')
         else:
             require('DIAGNOSTIC_BUILD' not in trace,'positive test accidentally used diagnostic binary')
             require('final_status=2' in result,'plugin job did not become ready')
@@ -163,7 +166,7 @@ def main():
                 compare_standard(row,data,expected,label)
             rows.append(row)
     else:rows.append({'name':'seeded-cases','passed':False,'errors':['BLOCKED: native control produced no cache']})
-    report={'environment':INFO,'cases':rows,'passed':all(r['passed'] for r in rows),'scope':'Real REAPER 7.79 ordinary import/project/rebuild/profile/offline-online paths with exact same-platform native controls, genmodes 0-3, RPKX byte preservation/relocation checks, float32 RPKL, and injected-failure no-write controls. Creation/long-source coverage is in extended-report.json.'}
+    report={'environment':INFO,'cases':rows,'passed':all(r['passed'] for r in rows),'scope':'Real REAPER 7.79 ordinary import/project/rebuild/profile/offline-online paths with exact same-platform native controls, genmodes 0-3, RPKX byte preservation/relocation checks, float32 RPKL, unwrapped-source public API safety, and injected-failure no-write controls. Creation/long-source coverage is in extended-report.json.'}
     (OUT/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     text=['# REAPER host acceptance',f"Commit: {INFO['commit']}",'','| Case | Result | Error |','|---|---|---|']
     for r in rows:text.append('| '+r['name']+' | '+('PASS' if r['passed'] else 'FAIL')+' | '+'; '.join(r['errors'])+' |')
