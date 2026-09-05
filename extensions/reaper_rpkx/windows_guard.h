@@ -33,7 +33,7 @@ static void lrpk_recover_guard(const std::string&cache,bool force){
     fs::rename(guard,target);
     log("GUARD_RECOVERED\tfile="+cache);
 }
-static void lrpk_prepare_guarded_clear(PCM_source*inner,const char*media){
+static std::string lrpk_prepare_guarded_clear(PCM_source*inner,const char*media){
     const std::string cache=lrpk_cache_path_for_media(media);
     lrpk_recover_guard(cache,false);
     const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
@@ -48,6 +48,10 @@ static void lrpk_prepare_guarded_clear(PCM_source*inner,const char*media){
     }
     // This is a clear/delete only. REAPER's native PeaksBuild_* is never called.
     Delegating d;inner->Peaks_Clear(true);
+    // REAPER may choose a different default write directory once the original
+    // filename disappears. Return the pre-clear path so the next plugin job
+    // commits through the guard and republishes that exact sidecar name.
+    return cache;
 }
 static std::string lrpk_commit_path(const std::string&cache){
     const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
@@ -82,7 +86,7 @@ static void lrpk_restore_guard(const std::string&cache){
 }
 #else
 static void lrpk_recover_guard(const std::string&,bool){}
-static void lrpk_prepare_guarded_clear(PCM_source*,const char*){}
+static std::string lrpk_prepare_guarded_clear(PCM_source*,const char*){return {};}
 static std::string lrpk_commit_path(const std::string&cache){return cache;}
 static void lrpk_finalize_guard(const std::string&,const std::string&){}
 static void lrpk_restore_guard(const std::string&){}

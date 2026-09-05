@@ -76,7 +76,7 @@ class Source final:public PCM_source{
     std::unique_ptr<PCM_source> inner;
     std::unique_ptr<REAPER_PeakGet_Interface> getter;
     Stamp getter_stamp;
-    std::string cache,error,clear_error;
+    std::string cache,error,clear_error,rebuild_cache;
     std::shared_ptr<Job> job;
     bool dirty=false,online=true,online_recheck=false,timer_owned=false;
     std::atomic<bool> displayed{false};
@@ -102,7 +102,7 @@ public:
     }
     const char*GetType()override{return inner->GetType();}
     const char*GetFileName()override{return inner->GetFileName();}
-    bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();clear_error.clear();return inner->SetFileName(s);}
+    bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();clear_error.clear();rebuild_cache.clear();return inner->SetFileName(s);}
     PCM_source*GetSource()override{return inner->GetSource();}
     void SetSource(PCM_source*p)override{inner->SetSource(p);}
     int GetNumChannels()override{return inner->GetNumChannels();}
@@ -114,15 +114,15 @@ public:
     int PropertiesWindow(HWND h)override{return inner->PropertiesWindow(h);}
     void GetSamples(PCM_source_transfer_t*b)override{inner->GetSamples(b);}
     void SaveState(ProjectStateContext*c)override{inner->SaveState(c);}
-    int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();clear_error.clear();return inner->LoadState(s,c);}
+    int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();clear_error.clear();rebuild_cache.clear();return inner->LoadState(s,c);}
     int Extended(int c,void*a,void*b,void*d)override{return inner->Extended(c,a,b,d);}
     void Peaks_Clear(bool remove)override{
-        getter.reset();job.reset();error.clear();clear_error.clear();timer_owned=false;
+        getter.reset();job.reset();error.clear();clear_error.clear();timer_owned=false;rebuild_cache.clear();
         log("CLEAR\tdelete_requested="+std::to_string(remove)+"\tfile="+(GetFileName()?GetFileName():""));
         try{
             if(remove){
 #ifdef _WIN32
-                lrpk_prepare_guarded_clear(inner.get(),GetFileName());
+                rebuild_cache=lrpk_prepare_guarded_clear(inner.get(),GetFileName());
 #else
                 Delegating g;inner->Peaks_Clear(false);
 #endif
@@ -143,8 +143,8 @@ public:
             for(auto it=jobs.begin();it!=jobs.end();){if(it->second.expired())it=jobs.erase(it);else ++it;}
             auto existing=jobs[key].lock();
             if(existing&&existing->state<3&&(!dirty||existing->force))job=existing;
-            else{job=std::make_shared<Job>(inner.get(),dirty,observed_mode);jobs[key]=job;}
-            dirty=false;cache=job->cache;return 1;
+            else{job=std::make_shared<Job>(inner.get(),dirty,observed_mode,dirty?rebuild_cache:std::string{});jobs[key]=job;}
+            dirty=false;rebuild_cache.clear();cache=job->cache;return 1;
         }catch(const std::exception&e){error=e.what();log("ERROR\tbegin\t"+error);if(console)console(("libreapeaks: "+error+"\n").c_str());return 0;}
     }
     int PeaksBuild_Run()override{return job?job->run():0;}

@@ -16,11 +16,11 @@ struct Job{
     size_t live_div=1,bucket_frames=0;double decode_s=0;
     Clock::time_point started=Clock::now();std::mutex mutex;bool reported=false;
     ~Job(){if(pending.valid())pending.wait();}
-    explicit Job(PCM_source*src,bool dirty,int required_mode):force(dirty){
+    explicit Job(PCM_source*src,bool dirty,int required_mode,const std::string&cache_override={}):force(dirty){
         media=src->GetFileName()?src->GetFileName():"";
         if(media.empty()||!supported(src->GetType()))throw std::runtime_error("unsupported source");
         source_stamp=stat_file(media);
-        cache=lrpk_cache_path_for_media(media.c_str());
+        cache=cache_override.empty()?lrpk_cache_path_for_media(media.c_str()):cache_override;
         lrpk_recover_guard(cache,force);
         const double sr=src->GetSampleRate(),len=src->GetLength();
         if(!std::isfinite(sr)||sr<1||sr>768000||!std::isfinite(len)||len<0||len*sr>double(SIZE_MAX/32))throw std::runtime_error("unsupported source geometry");
@@ -61,7 +61,7 @@ struct Job{
                 r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
             }catch(const std::exception&e){r.error=e.what();}return r;
         });
-        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
+        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tcache="+cache+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
     }
     void fail(const std::string&s){error=s;state=4;log("ERROR\tid="+std::to_string(id)+"\t"+s);}
     void finish_bucket(){

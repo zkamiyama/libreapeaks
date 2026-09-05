@@ -85,8 +85,9 @@ pub unsafe extern "C" fn lrpk_generate_wave_pcm16(
 )->i32{
     if out.is_null(){return -1;}*out=Buffer::empty();
     guard(||{
-        if channels==0||channels>32||rate==0||pps==0||pair_count>isize::MAX/std::mem::size_of::<stream_wave::I16Extrema>()||pairs.is_null(){return Err(err("invalid streamed waveform geometry"));}
-        let pairs=std::slice::from_raw_parts(pairs,pair_count);
+        let max_pairs=(isize::MAX as usize)/std::mem::size_of::<stream_wave::I16Extrema>();
+        if channels==0||channels>32||rate==0||pps==0||pair_count>max_pairs||(pair_count>0&&pairs.is_null()){return Err(err("invalid streamed waveform geometry"));}
+        let pairs=if pair_count==0{&[]}else{std::slice::from_raw_parts(pairs,pair_count)};
         let data=stream_wave::generate_pcm16(pairs,frames,channels as usize,rate,pps,mtime,size)?;
         if data.len() as u64>store::MAX_STANDARD{return Err(err("standard exceeds memory budget"));}
         *out=Buffer::take(data);Ok(())
