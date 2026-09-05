@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Final per-OS gate for the real-REAPER acceptance artifact.
 
-This intentionally duplicates a few high-value invariants from the individual
-suites. A green completion result therefore proves that all required reports are
-present, belong to this exact commit/build, contain the expected cases, and did
-not become green merely because a case or benchmark group was accidentally
-removed or skipped.
+This intentionally duplicates high-value invariants from the individual suites.
+A green completion result proves that all required reports are present, belong
+to this exact commit/build, contain the expected cases, and did not become green
+merely because a case, assertion, or benchmark group was removed or skipped.
 """
 from __future__ import annotations
 
@@ -90,6 +89,60 @@ def require_same_hash(cases: dict[str, dict[str, Any]], a: str, b: str, errors: 
         errors.append(f"standard-byte proof mismatch: {a} != {b}")
 
 
+def real_done(case: dict[str, Any]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for line in str(case.get("trace", "")).splitlines():
+        if not line.startswith("DONE\t"):
+            continue
+        fields = dict(part.split("=", 1) for part in line.split("\t")[1:] if "=" in part)
+        if fields.get("reuse") == "0":
+            out.append(fields)
+    return out
+
+
+def require_tail(case: dict[str, Any], name: str, move: str | None, errors: list[str]) -> None:
+    if not case.get("tail_sha256"):
+        errors.append(f"{name}: RPKX tail checksum proof is missing")
+    if move is None:
+        return
+    values: list[int] = []
+    for fields in real_done(case):
+        try:
+            values.append(int(fields.get("tail_moved", "-1")))
+        except ValueError:
+            pass
+    if not values:
+        errors.append(f"{name}: no real DONE record for RPKX relocation proof")
+    elif move == "zero" and any(value != 0 for value in values):
+        errors.append(f"{name}: same-size rebuild moved RPKX payload")
+    elif move == "positive" and not any(value > 0 for value in values):
+        errors.append(f"{name}: size-changing rebuild did not relocate RPKX payload")
+
+
+def require_unwrapped_api(case: dict[str, Any], name: str, errors: list[str]) -> None:
+    result = str(case.get("result", ""))
+    if "unwrapped_status=-2" not in result:
+        errors.append(f"{name}: unwrapped native source status safety proof is missing")
+    if "unwrapped_force=0" not in result:
+        errors.append(f"{name}: unwrapped native source ForceBuild safety proof is missing")
+
+
+def require_no_write(case: dict[str, Any], name: str, errors: list[str]) -> None:
+    if case.get("failure_no_write") is not True:
+        errors.append(f"{name}: injected post-generation failure no-write proof is missing")
+        return
+    before_present = case.get("before_present") is True
+    after_present = case.get("after_present") is True
+    before_hash = case.get("failure_before_sha256")
+    after_hash = case.get("failure_after_sha256")
+    if before_present != after_present:
+        errors.append(f"{name}: failure changed cache existence")
+    if before_present and (not before_hash or before_hash != after_hash):
+        errors.append(f"{name}: failure changed pre-existing cache bytes")
+    if not before_present and (before_hash is not None or after_hash is not None):
+        errors.append(f"{name}: absent-cache failure unexpectedly produced a cache hash")
+
+
 def main() -> None:
     errors: list[str] = []
     try:
@@ -139,15 +192,27 @@ def main() -> None:
     base_cases = index_cases(base, BASE_CASES, "base", errors)
     ext_cases = index_cases(extended, EXTENDED_CASES, "extended", errors)
 
+    # Every plugin base case must prove the public API safely rejects a real
+    # unwrapped native MIDI PCM_source. This is independent of the case's peak
+    # correctness and directly guards the pointer-validation boundary.
+    for name, case in sorted(base_cases.items()):
+        if case.get("plugin") is True:
+            require_unwrapped_api(case, name, errors)
+
     # Exact native-byte equivalence must remain represented in the reports.
     for a, b in (
         ("native-wave", "plugin-auto"),
         ("native-float32", "plugin-float32"),
         ("native-spectrogram", "plugin-spectrogram"),
+        ("native-stale", "plugin-project-stale"),
+        ("native-stale", "plugin-import-stale"),
         ("native-wave", "plugin-manual"),
         ("native-wave", "plugin-selected"),
         ("native-wave", "plugin-reverse"),
         ("native-wave", "plugin-online"),
+        ("native-wave", "plugin-genmode-0"),
+        ("native-wave", "plugin-genmode-1"),
+        ("native-wave", "plugin-genmode-2"),
         ("native-wave", "plugin-genmode-3"),
     ):
         require_same_hash(base_cases, a, b, errors)
@@ -165,6 +230,32 @@ def main() -> None:
         errors.append("normal-shrink does not return exactly to native waveform bytes")
     if base_cases.get("native-wave", {}).get("standard_sha256") != ext_cases.get("online-regenerate", {}).get("standard_sha256"):
         errors.append("online regeneration does not equal native waveform bytes")
+
+    # Recheck RPKX preservation and relocation using report checksums plus raw
+    # job trace, so deleting the suite-local assertions cannot make completion
+    # silently weaker.
+    for name in (
+        "plugin-manual", "plugin-selected", "plugin-project-stale",
+        "plugin-import-stale", "plugin-reverse", "plugin-genmode-0",
+        "plugin-genmode-1", "plugin-genmode-2", "plugin-genmode-3",
+    ):
+        require_tail(base_cases.get(name, {}), name, "zero", errors)
+    require_tail(base_cases.get("plugin-online", {}), "plugin-online", None, errors)
+    require_tail(base_cases.get("plugin-spectrogram", {}), "plugin-spectrogram", "positive", errors)
+    for name in ("spectral", "loudness", "normal-shrink"):
+        require_tail(ext_cases.get(name, {}), name, "positive", errors)
+    for name in (
+        "online-regenerate", "long-rebuild-rpkx", "glue-rpkx-rebuild",
+        "render-rpkx-rebuild", "record-rpkx-rebuild",
+    ):
+        require_tail(ext_cases.get(name, {}), name, "zero", errors)
+
+    # The diagnostic build fails only after the real generator has returned;
+    # these evidence fields prove that the failure leaves absent caches absent
+    # and pre-existing caches byte-identical.
+    require_no_write(base_cases.get("negative-auto", {}), "negative-auto", errors)
+    require_no_write(base_cases.get("negative-manual", {}), "negative-manual", errors)
+    require_no_write(ext_cases.get("extended-negative-reverse", {}), "extended-negative-reverse", errors)
 
     for name in ("long-import", "long-rebuild-rpkx"):
         case = ext_cases.get(name, {})
@@ -232,7 +323,8 @@ def main() -> None:
         lines += [
             "",
             "Verified in this artifact: required case inventory, same-commit/build hashes, exact native standard bytes,",
-            "25-minute streaming, Glue/Render/Record created-media rebuilds, injected-failure atomicity, and median performance budgets.",
+            "RPKX preservation/relocation, unwrapped-source public API safety, post-generation failure atomicity,",
+            "25-minute streaming, Glue/Render/Record created-media rebuilds, and median performance budgets.",
         ]
     (OUT / "COMPLETION.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if os.getenv("GITHUB_STEP_SUMMARY"):
