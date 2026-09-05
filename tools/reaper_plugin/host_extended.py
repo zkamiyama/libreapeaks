@@ -117,7 +117,7 @@ def run_ext(name:str,*,plugin:bool=True,action:str='import',seed:bytes|None=None
             if tail is not None:require(after[end:]==tail,'RPKX tail changed/lost');row['tail_sha256']=sha(after[end:])
             if expect_tail_move and plugin and real_ids:
                 moved=[int(done[j].get('tail_moved','-1')) for j in real_ids if j in done]
-                if expect_tail_move=='zero':require(bool(moved) and min(moved)==0,'same-size rebuild moved RPKX payload')
+                if expect_tail_move=='zero':require(bool(moved) and all(x==0 for x in moved),'same-size rebuild moved RPKX payload')
                 elif expect_tail_move=='positive':require(any(x>0 for x in moved),'size-changing rebuild did not exercise tail relocation')
         except (ValueError,struct.error) as e:require(False,str(e))
     if seed is not None and action in ('manual','online') and row['errors'] and after is not None and before is not None:
@@ -138,12 +138,18 @@ def read_base_standard(case_name:str)->bytes:
     return data[:standard_end(data)]
 
 def main():
-    rows=[];native=read_base_standard('native-wave');spectrogram=read_base_standard('plugin-spectrogram')
+    rows=[];native=read_base_standard('native-wave');spectrogram=read_base_standard('native-spectrogram')
+
+    native_spectral_row,native_spectral_data,_=run_ext('spectral-native',plugin=False,action='spectral',expect_tokens=(-115,-114));rows.append(native_spectral_row)
+    native_spectral=standalone(native_spectral_data)
+    native_loudness_row,native_loudness_data,_=run_ext('loudness-native',plugin=False,action='loudness',expect_tokens=(-114,));rows.append(native_loudness_row)
+    native_loudness=standalone(native_loudness_data)
+
     for name,kw in [
-        ('spectral',dict(action='spectral',seed=native,tail_mib=1,expect_tokens=(-115,-114),expect_tail_move='positive')),
-        ('loudness',dict(action='loudness',seed=native,tail_mib=1,expect_tokens=(-114,),expect_tail_move='positive')),
-        ('normal-shrink',dict(action='normal',seed=spectrogram,tail_mib=1,show=1345,forbid_tokens=(-115,-103,-114),expect_tail_move='positive')),
-        ('online-regenerate',dict(action='online',seed=native,tail_mib=1,expect_tail_move='zero')),
+        ('spectral',dict(action='spectral',seed=native,tail_mib=1,expect_tokens=(-115,-114),expected_standard=native_spectral,expect_tail_move='positive')),
+        ('loudness',dict(action='loudness',seed=native,tail_mib=1,expect_tokens=(-114,),expected_standard=native_loudness,expect_tail_move='positive')),
+        ('normal-shrink',dict(action='normal',seed=spectrogram,tail_mib=1,show=1345,forbid_tokens=(-115,-103,-114),expected_standard=native,expect_tail_move='positive')),
+        ('online-regenerate',dict(action='online',seed=native,tail_mib=1,expected_standard=native,expect_tail_move='zero')),
     ]:
         row,_,_=run_ext(name,**kw);rows.append(row)
     neg,_=base_run_case('extended-negative-reverse',seed=native,tail_mib=1,action='reverse',fail=True);rows.append(neg)
@@ -172,7 +178,7 @@ def main():
         else:rows.append({'name':opname+'-rpkx-rebuild','passed':False,'errors':['BLOCKED: creation operation did not yield wrapped readable file media']})
 
     passed=all(r.get('passed',False) for r in rows)
-    report={'environment':INFO,'cases':rows,'passed':passed,'scope':'Real REAPER 7.79 ordinary actions: spectral/loudness/normal+rebuild profile regeneration, offline/rebuild/online, reverse negative control, 25-minute PCM16 import+rebuild streaming, Glue, Render-items-to-new-take, Record-output, and RPKX-bearing rebuilds of newly-created media.'}
+    report={'environment':INFO,'cases':rows,'passed':passed,'scope':'Real REAPER 7.79 ordinary actions with same-platform exact native controls: spectral/loudness/normal profile grow+shrink, offline/online regeneration, reverse failure control, 25-minute PCM16 streaming import+RPKX rebuild, Glue, Render-items-to-new-take, Dummy-Audio Record-output, and RPKX-bearing rebuilds of newly-created media.'}
     (OUT/'extended-report.json').write_text(json.dumps(report,indent=2)+'\n')
     lines=['# Extended REAPER host acceptance',f"Commit: {INFO['commit']}",'','| Case | Result | Error |','|---|---|---|']
     for r in rows:lines.append('| '+r['name']+' | '+('PASS' if r.get('passed') else 'FAIL')+' | '+'; '.join(r.get('errors',[]))+' |')
