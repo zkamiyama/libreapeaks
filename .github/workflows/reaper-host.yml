@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: reaper-host-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   host:
     strategy:
@@ -55,5 +55,7 @@ jobs:
             host-results/
             host-build/reaper_rpkx.*
             host-build/Release/reaper_rpkx.*
+            host-diagnostic/reaper_rpkx.*
+            host-diagnostic/Release/reaper_rpkx.*
           if-no-files-found: error
           retention-days: 7
