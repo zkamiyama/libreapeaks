@@ -62,7 +62,11 @@ def run_ext(name:str,*,plugin:bool=True,action:str='import',seed:bytes|None=None
         tail=rpkx_tail(seed,tail_mib) if tail_mib is not None else b''
         cache.write_bytes(seed+tail)
     before=cache.read_bytes() if cache.exists() else None
-    cfg=case/'reaper.ini';cfg.write_text(f'[REAPER]\npeakcachegenmode={genmode}\npeakcachegenrs=300\nshowpeaks={show}\n',encoding='utf-8')
+    cfg=case/'reaper.ini'
+    cfg.write_text(
+        f'[REAPER]\npeakcachegenmode={genmode}\npeakcachegenrs=300\nshowpeaks={show}\n'
+        '[audioconfig]\nmode=5\ndummy_srate=48000\ndummy_blocksize=512\n',
+        encoding='utf-8')
     if plugin:
         (case/'UserPlugins').mkdir();src=pathlib.Path(INFO['plugin']);shutil.copy2(src,case/'UserPlugins'/src.name)
     env=dict(os.environ,LRPK_CASE=str(case),LRPK_MEDIA=str(media),LRPK_ACTION=action,LRPK_EXPECT_PLUGIN=str(int(plugin)),LIBREAPEAKS_PLUGIN_LOG=str(case/'plugin.tsv'))
@@ -81,6 +85,9 @@ def run_ext(name:str,*,plugin:bool=True,action:str='import',seed:bytes|None=None
         if not test:row['errors'].append(msg)
     require(rc==0,'REAPER did not exit successfully');require('finished=true' in result,'test script did not finish');require('error=' not in result,'script error')
     require(int(kv.get('peak_count','0') or 0)>0,'REAPER could not read the resulting cache')
+    if action=='record':
+        require(kv.get('record_started')=='true','record transport did not start')
+        require(kv.get('record_stopped')=='true','record transport did not stop/save media')
     target=pathlib.Path(source_file) if source_file else media
     if expect_new:require(bool(source_file) and norm(source_file)!=norm(media),'normal action did not produce a distinct media file')
     begins,generated,done=trace_jobs(trace);real_ids=set();target_ids=set()
