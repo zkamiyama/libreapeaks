@@ -1,0 +1,59 @@
+name: reaper-plugin-host-acceptance
+on:
+  push:
+    branches: [feature/reaper-rpkx-preserving-plugin]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: reaper-host-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb libgtk-3-0 libasound2t64 ffmpeg
+      - name: Build Rust and real extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/justinfrankel/reaper-sdk.git .host-sdk
+          git -C .host-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
+          cargo test --release --manifest-path extensions/reaper_rpkx/Cargo.toml
+          cargo build --release --manifest-path extensions/reaper_rpkx/Cargo.toml
+          python tools/reaper_plugin/setup_host.py --build-only
+      - name: Install REAPER 7.79 in isolated workspace
+        run: python tools/reaper_plugin/setup_host.py --install-only
+      - name: Real host actions and negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/host_acceptance.py
+          else
+            python tools/reaper_plugin/host_acceptance.py
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-host-${{ matrix.os }}
+          path: |
+            host-results/
+            host-build/reaper_rpkx.*
+            host-build/Release/reaper_rpkx.*
+          if-no-files-found: error
+          retention-days: 7
