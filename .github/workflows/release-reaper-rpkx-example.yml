@@ -143,6 +143,7 @@ jobs:
 
   publish:
     needs: verify-and-package
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -151,18 +152,32 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           pattern: release-reaper-rpkx-*
           path: release-assets
           merge-multiple: true
-      - name: Create release checksums
+      - name: Collect successfully verified platform packages
+        id: assets
         shell: bash
         run: |
           set -euo pipefail
-          cd release-assets
-          sha256sum *.zip > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          mkdir -p release-assets
+          shopt -s nullglob
+          files=(release-assets/*.zip)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No platform reached the release completion gate; no reference-extension assets will be attached."
+            echo "have_assets=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          (
+            cd release-assets
+            sha256sum *.zip > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          )
+          echo "have_assets=true" >> "$GITHUB_OUTPUT"
       - name: Attach verified reference binaries to the existing library Release
+        if: steps.assets.outputs.have_assets == 'true'
         shell: bash
         run: |
           set -euo pipefail
