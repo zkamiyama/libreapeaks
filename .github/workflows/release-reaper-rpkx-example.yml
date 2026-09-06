@@ -3,9 +3,18 @@ name: release-reaper-rpkx-example
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag to verify and attach assets to
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
 jobs:
   verify-and-package:
@@ -30,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
           fetch-depth: 0
       - name: Capture released source commit
@@ -91,7 +100,6 @@ jobs:
           RELEASE_ASSET: ${{ matrix.asset }}
           EXTENSION_SUFFIX: ${{ matrix.extension }}
           TARGET_SLUG: ${{ matrix.slug }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -148,7 +156,6 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@v4
