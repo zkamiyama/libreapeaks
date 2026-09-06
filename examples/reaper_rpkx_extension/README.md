@@ -181,20 +181,24 @@ CI keeps the example buildable and its claimed integration behavior testable.
 `.github/workflows/release-reaper-rpkx-example.yml` is an **optional post-release
 asset workflow**. It does not create or gate the libreapeaks library Release.
 When a library Release is published, the workflow checks out that Release tag and
-builds the reference extension for the validated Windows x86_64, Linux x86_64,
-and macOS arm64 targets.
+verifies the reference extension independently on the validated Windows x86_64,
+Linux x86_64, and macOS arm64 targets. The same workflow can also be dispatched
+manually for an already existing Release tag, which is useful when the Release
+was created by another automation.
 
 Before packaging, each target runs the same real-REAPER 7.79 base, extended,
-benchmark, and completion gates used by the host acceptance suite. Only if all
-three target jobs reach same-build completion PASS does the publish job attach
-the reference-extension archives to the already existing library Release. A
-failure therefore leaves the library Release intact; it merely means verified
-reference-extension binaries are not attached by that run.
+benchmark, and completion gates used by the host acceptance suite. A platform
+archive is created only after that platform reaches same-build completion PASS.
+The final publish job attaches whichever verified platform archives were
+successfully produced. If one platform fails its gate, that platform is omitted
+without blocking verified assets from other platforms, and the libreapeaks
+library Release itself remains untouched.
 
-The resulting archives contain the normal `reaper_rpkx` extension, this user
-guide, license/third-party notices, and selected completion/benchmark evidence.
-They do **not** contain the diagnostic extension. A `SHA256SUMS.txt` file is also
-attached to the existing GitHub Release.
+The resulting archives contain the normal `reaper_rpkx` extension,
+[`USER_GUIDE.md`](USER_GUIDE.md), license/third-party notices, and selected
+completion/benchmark evidence. They do **not** contain the diagnostic extension.
+A `SHA256SUMS.txt` covering the attached archives is also added to the existing
+GitHub Release.
 
 ## Related library documentation
 
