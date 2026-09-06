@@ -348,12 +348,12 @@ mod tests {
     #[test] fn roundtrip_same_grow_shrink_stale(){
         let d=Dir::new();let p=d.0.join("a.reapeaks");
         let old=standard(160,1);let original=extended(&old,BLOCK as usize+113);
-        std::fs::write(&p,&original).unwrap();
+        std::fs::write(&p,&original).unwrap();let mut prior_len=old.len();
         for div in [160,1,400,160]{
-            let new=standard(div,1);let r=replace(&p,&new,false).unwrap();
+            let new=standard(div,1);let same=prior_len==new.len();let r=replace(&p,&new,false).unwrap();
             let actual=std::fs::read(&p).unwrap();assert_eq!(&actual[..new.len()],new);
             assert_eq!(&actual[new.len()..],&original[old.len()..]);
-            if div==160 && new.len()==old.len(){assert_eq!(r.tail_bytes_moved,0);assert_eq!(r.syncs,3);}
+            if same{assert_eq!(r.tail_bytes_moved,0);assert_eq!(r.syncs,3);}prior_len=new.len();
         }
         let before=std::fs::read(&p).unwrap();assert!(replace(&p,&standard(160,2),false).is_err());assert_eq!(std::fs::read(&p).unwrap(),before);
         replace(&p,&standard(160,2),true).unwrap();
