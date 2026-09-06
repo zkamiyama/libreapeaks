@@ -8,7 +8,8 @@ local src
 local function log(k,v) f:write(k,'=',tostring(v),'\n');f:flush() end
 local ok,err=xpcall(function()
   log('version',reaper.GetAppVersion())
-  log('plugin',reaper.APIExists('RPKX_Status'))
+  local plugin=reaper.APIExists('RPKX_Status')
+  log('plugin',plugin)
   src=assert(reaper.PCM_Source_CreateFromFile(media),'Cannot create source')
   local started=reaper.time_precise()
   local begin=reaper.PCM_Source_BuildPeaks(src,0)
@@ -19,9 +20,24 @@ local ok,err=xpcall(function()
     if loops>100000 or reaper.time_precise()-started>120 then error('Build did not complete') end
   end
   if begin~=0 then reaper.PCM_Source_BuildPeaks(src,2) end
-  log('build_s',string.format('%.9f',reaper.time_precise()-started))
+  local peak_ready=reaper.time_precise()
+  log('build_s',string.format('%.9f',peak_ready-started))
   log('begin',begin);log('loops',loops)
-  if reaper.APIExists('RPKX_Status') then log('status',reaper.RPKX_Status(src)) end
+  if plugin then
+    -- Canonical waveform jobs may return peak-ready while the stronger WAL/fsync
+    -- durability work continues. Keep the source alive and independently prove
+    -- that persistence reaches the same durable-ready status before teardown.
+    local status=reaper.RPKX_Status(src)
+    local spins=0
+    while status==1 and reaper.time_precise()-peak_ready<120 do
+      status=reaper.RPKX_Status(src);spins=spins+1
+    end
+    log('settle_s',string.format('%.9f',reaper.time_precise()-peak_ready))
+    log('settle_spins',spins)
+    log('status',status)
+  else
+    log('settle_s','0.000000000')
+  end
   log('peak_read',reaper.GetPeakFileNameEx(media,'',false))
   log('peak_write',reaper.GetPeakFileNameEx(media,'',true))
 end,debug.traceback)
