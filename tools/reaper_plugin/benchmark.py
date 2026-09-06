@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Small reproducible per-host benchmark; correctness is checked before timing
-results are summarized. No cold-cache or device-level physical-I/O claim.
-See host_actions.lua for independent normal-operation acceptance coverage.
+"""Reproducible per-host benchmark with separate peak-ready and durability clocks.
+Correctness is checked before timing is summarized. No cold-cache or physical-I/O
+claim. See host_actions.lua for independent ordinary-operation acceptance.
 """
 from __future__ import annotations
 import json,math,os,pathlib,random,shutil,statistics,time
 from host_process import launch
 from host_acceptance import ROOT,OUT,INFO,FIXED_MTIME,fixture,rpkx_tail,standard_end,sha
 SCRIPT=ROOT/'tools/reaper_plugin/benchmark.lua'
-# This is deliberately a regression budget, not a parity claim. The plugin does
-# extra durable journal/sync work that native REAPER does not. Median timing must
-# nevertheless stay bounded, and a large untouched RPKX payload must not cause a
-# size-proportional same-size rebuild penalty.
+
+# Native REAPER does not perform the plugin's WAL/fsync durability work. Compare
+# native against the latency users actually wait for (build_s / peak-ready), then
+# gate the stronger background durability separately so an optimization cannot
+# hide a stuck commit or an RPKX-size-proportional copy.
 ABS_OVERHEAD_BUDGET_S=0.250
 NATIVE_MULTIPLIER_BUDGET=12.0
-RPKX_SIZE_OVERHEAD_BUDGET_S=0.250
+DURABLE_ABS_BUDGET_S=1.000
+RPKX_SIZE_OVERHEAD_BUDGET_S=0.500
 RPKX_SIZE_MULTIPLIER_BUDGET=8.0
 
 def one(name,profile,plugin,seed=None,mib=None):
@@ -46,12 +48,14 @@ def one(name,profile,plugin,seed=None,mib=None):
     if rc!=0 or kv.get('finished')!='true' or 'error' in kv: errors.append('host/build driver failed')
     if kv.get('plugin')!=str(plugin).lower():errors.append('wrong plugin presence')
     if kv.get('begin')=='0':errors.append('cache was reused, not built')
-    if plugin and (kv.get('status')!='2' or 'GENERATED\t' not in trace):errors.append('no successful real plugin generation')
+    if plugin and (kv.get('status')!='2' or 'GENERATED\t' not in trace or 'DONE\t' not in trace):errors.append('plugin did not reach durable successful generation')
     components={}
     for line in trace.splitlines():
         if line.startswith('DONE\t'):components=dict(x.split('=',1) for x in line.split('\t')[1:] if '=' in x)
     if plugin and components.get('syncs')!='3':errors.append('same-size rebuild did not use three-sync redo fast path')
-    if plugin and profile==1 and components.get('raw_pcm16')!='1':errors.append('canonical PCM16 waveform did not use raw streaming fast path')
+    if plugin and profile==1:
+        if components.get('raw_pcm16')!='1':errors.append('canonical PCM16 waveform did not use raw streaming fast path')
+        if components.get('async_commit')!='1':errors.append('canonical PCM16 waveform did not release peak-ready build before durable commit')
     image=None
     if data is None: errors.append('cache missing')
     else:
@@ -62,12 +66,13 @@ def one(name,profile,plugin,seed=None,mib=None):
             if seed is not None and len(image)!=len(seed):errors.append('unexpected standard-size change')
         except ValueError as e:errors.append(str(e))
     build_s=float(kv.get('build_s','nan'))
-    if not math.isfinite(build_s) or build_s<0:errors.append('invalid build timing')
-    row={'name':name,'profile':profile,'plugin':plugin,'rpkx_mib':mib,'rc':rc,'build_s':build_s,'process_wall_s':time.perf_counter()-started,'standard_sha256':sha(image) if image else None,'tail_sha256':sha(tail),'components':components,'errors':errors}
+    settle_s=float(kv.get('settle_s','0' if not plugin else 'nan'))
+    if not math.isfinite(build_s) or build_s<0:errors.append('invalid peak-ready build timing')
+    if not math.isfinite(settle_s) or settle_s<0:errors.append('invalid durable-settle timing')
+    durable_s=build_s+settle_s if math.isfinite(build_s) and math.isfinite(settle_s) else float('nan')
+    row={'name':name,'profile':profile,'plugin':plugin,'rpkx_mib':mib,'rc':rc,'build_s':build_s,'settle_s':settle_s,'durable_s':durable_s,'process_wall_s':time.perf_counter()-started,'standard_sha256':sha(image) if image else None,'tail_sha256':sha(tail),'components':components,'errors':errors}
     (case/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
     print('BENCHMARK',json.dumps(row),flush=True)
-    # Retain logs/checksums, not duplicate binaries or huge deterministic data
-    # in the CI artifact. Cleanup is only inside this disposable case workspace.
     if not errors:
         if (case/'UserPlugins').exists():shutil.rmtree(case/'UserPlugins')
         media.unlink(missing_ok=True)
@@ -95,34 +100,64 @@ def main():
             selected=[r for r in collected if r['plugin']==plugin and r['rpkx_mib']==mib]
             valid=len(selected)==3 and all(not r['errors'] for r in selected)
             times=[r['build_s'] for r in selected]
-            summary={'profile':label,'plugin':plugin,'rpkx_mib':mib,'valid':valid,'n':len(times),'median_s':statistics.median(times) if valid else None,'min_s':min(times) if valid else None,'max_s':max(times) if valid else None,'ratio_to_native':statistics.median(times)/native_median if valid and native_median else None}
+            durable=[r['durable_s'] for r in selected]
+            summary={
+                'profile':label,'plugin':plugin,'rpkx_mib':mib,'valid':valid,'n':len(times),
+                'median_s':statistics.median(times) if valid else None,
+                'min_s':min(times) if valid else None,'max_s':max(times) if valid else None,
+                'durable_median_s':statistics.median(durable) if valid else None,
+                'ratio_to_native':statistics.median(times)/native_median if valid and native_median else None,
+            }
             if plugin and valid and native_median:
-                budget=max(native_median*NATIVE_MULTIPLIER_BUDGET,native_median+ABS_OVERHEAD_BUDGET_S)
-                summary['native_regression_budget_s']=budget
-                summary['within_native_budget']=summary['median_s']<=budget
-                if not summary['within_native_budget']:
-                    performance_errors.append(f"{label} {mib}MiB median {summary['median_s']:.6f}s exceeds native regression budget {budget:.6f}s")
+                if label=='waveform':
+                    summary['beats_native']=summary['median_s']<native_median
+                    if not summary['beats_native']:
+                        performance_errors.append(f"waveform {mib}MiB peak-ready median {summary['median_s']:.6f}s did not beat native {native_median:.6f}s")
+                    summary['within_durable_budget']=summary['durable_median_s']<=DURABLE_ABS_BUDGET_S
+                    if not summary['within_durable_budget']:
+                        performance_errors.append(f"waveform {mib}MiB durable median {summary['durable_median_s']:.6f}s exceeds {DURABLE_ABS_BUDGET_S:.3f}s background durability budget")
+                else:
+                    budget=max(native_median*NATIVE_MULTIPLIER_BUDGET,native_median+ABS_OVERHEAD_BUDGET_S)
+                    summary['native_regression_budget_s']=budget
+                    summary['within_native_budget']=summary['median_s']<=budget
+                    if not summary['within_native_budget']:
+                        performance_errors.append(f"{label} {mib}MiB median {summary['median_s']:.6f}s exceeds native regression budget {budget:.6f}s")
             summaries.append(summary);profile_summaries.append(summary)
         p0=next((s for s in profile_summaries if s['plugin'] and s['rpkx_mib']==0 and s['valid']),None)
         p64=next((s for s in profile_summaries if s['plugin'] and s['rpkx_mib']==64 and s['valid']),None)
         if p0 and p64:
-            size_budget=max(p0['median_s']*RPKX_SIZE_MULTIPLIER_BUDGET,p0['median_s']+RPKX_SIZE_OVERHEAD_BUDGET_S)
+            size_budget=max(p0['durable_median_s']*RPKX_SIZE_MULTIPLIER_BUDGET,p0['durable_median_s']+RPKX_SIZE_OVERHEAD_BUDGET_S)
             p64['rpkx_size_regression_budget_s']=size_budget
-            p64['within_rpkx_size_budget']=p64['median_s']<=size_budget
+            p64['within_rpkx_size_budget']=p64['durable_median_s']<=size_budget
             if not p64['within_rpkx_size_budget']:
-                performance_errors.append(f"{label} 64MiB median {p64['median_s']:.6f}s exceeds 0MiB size-regression budget {size_budget:.6f}s")
+                performance_errors.append(f"{label} 64MiB durable median {p64['durable_median_s']:.6f}s exceeds 0MiB size-regression budget {size_budget:.6f}s")
     correctness=bool(rows) and all(not r['errors'] for r in rows)
-    report={'environment':INFO,'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16; timed direct build API, excluding startup. Shuffled order, 3 repeats; median gates. Warm/recently written files; no cache eviction. Plugin waveform cases must prove strict raw PCM16 streaming and all plugin cases must prove the three-sync same-size redo path. No claim of equal durability work or cold-device performance. Native baseline has no RPKX because native rebuild deletes it.','performance_policy':{'native_multiplier_budget':NATIVE_MULTIPLIER_BUDGET,'absolute_overhead_budget_s':ABS_OVERHEAD_BUDGET_S,'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S,'purpose':'Catch runaway regressions while allowing the plugin extra durable journal/sync work and hosted-runner timing noise.'},'rows':rows,'summaries':summaries,'performance_errors':performance_errors,'correctness_passed':correctness,'passed':correctness and not performance_errors}
+    report={
+        'environment':INFO,
+        'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16. build_s measures the direct build API until complete live peaks are available; plugin waveform durability may then finish in the same Job and settle_s is measured separately until status=2. Shuffled order, 3 repeats; median gates. Warm/recently written files; no cache eviction. Waveform plugin cases must prove raw PCM16 streaming, async durable handoff, exact native standard bytes, three-sync WAL completion, and untouched RPKX. Native baseline has no RPKX because native rebuild deletes it.',
+        'performance_policy':{
+            'waveform_peak_ready':'Every 0/16/64 MiB plugin median must be strictly faster than the same-host native median.',
+            'durable_absolute_budget_s':DURABLE_ABS_BUDGET_S,
+            'spectrogram_native_multiplier_budget':NATIVE_MULTIPLIER_BUDGET,
+            'spectrogram_absolute_overhead_budget_s':ABS_OVERHEAD_BUDGET_S,
+            'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,
+            'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S,
+            'purpose':'Require a real user-visible waveform win while independently proving stronger WAL/fsync durability completes and does not scale with untouched RPKX payload size.'
+        },
+        'rows':rows,'summaries':summaries,'performance_errors':performance_errors,
+        'correctness_passed':correctness,'passed':correctness and not performance_errors,
+    }
     (OUT/'benchmark.json').write_text(json.dumps(report,indent=2)+'\n')
-    lines=['# Host API benchmark',report['method'],'','| Profile | Writer | RPKX MiB | n | Median s | Min s | Max s | Ratio |','|---|---|---:|---:|---:|---:|---:|---:|']
+    lines=['# Host API benchmark',report['method'],'','| Profile | Writer | RPKX MiB | n | Peak-ready median s | Durable median s | Ratio to native | Native win |','|---|---|---:|---:|---:|---:|---:|---:|']
     for s in summaries:
         values=[s['profile'],'plugin' if s['plugin'] else 'native',str(s['rpkx_mib']),str(s['n'])]
-        values += [f'{s[k]:.6f}' if s[k] is not None else 'INVALID' for k in ('median_s','min_s','max_s','ratio_to_native')]
+        values += [f"{s[k]:.6f}" if s[k] is not None else 'INVALID' for k in ('median_s','durable_median_s','ratio_to_native')]
+        values.append(str(s.get('beats_native','-')))
         lines.append('| '+' | '.join(values)+' |')
     if performance_errors:
         lines += ['','Performance gate failures:']+[f'- {e}' for e in performance_errors]
     else:
-        lines += ['','Performance regression gates: PASS']
+        lines += ['','Performance gates: PASS']
     (OUT/'BENCHMARK.md').write_text('\n'.join(lines)+'\n')
     if os.getenv('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('\n'.join(lines)+'\n')
