@@ -66,6 +66,7 @@ struct Job{
     size_t live_div=1,bucket_frames=0;double decode_s=0;
     Clock::time_point started=Clock::now();std::mutex mutex;bool reported=false;
     ~Job(){if(pending.valid())pending.wait();if(durable.valid())durable.wait();}
+    static bool little_endian(){const uint16_t one=1;return *reinterpret_cast<const uint8_t*>(&one)==1;}
     Result inspect_cache(){
         Result r;try{
             fs::create_directories(fs::u8path(cache).parent_path());
@@ -117,9 +118,11 @@ struct Job{
             if(!decoder)throw std::runtime_error("native decoder duplication failed");
         }
         live_div=std::max<size_t>(1,rate/pps);bucket.resize(nch);
-        if(stream_wave){
+        if(stream_wave||raw_pcm16){
             wave_hi.assign(nch,std::numeric_limits<int16_t>::min());
             wave_lo.assign(nch,std::numeric_limits<int16_t>::max());
+        }
+        if(stream_wave){
             const size_t fine_count=expected/live_div+size_t(expected%live_div!=0);
             wave_i16.reserve(fine_count*nch);
         }
@@ -147,8 +150,12 @@ struct Job{
             if(!raw_pcm16)live.insert(live.end(),bucket.begin(),bucket.end());
             std::fill(wave_hi.begin(),wave_hi.end(),std::numeric_limits<int16_t>::min());
             std::fill(wave_lo.begin(),wave_lo.end(),std::numeric_limits<int16_t>::max());
+        }else if(raw_pcm16){
+            for(unsigned c=0;c<nch;++c)live.push_back({double(wave_hi[c])/32768.,double(wave_lo[c])/32768.});
+            std::fill(wave_hi.begin(),wave_hi.end(),std::numeric_limits<int16_t>::min());
+            std::fill(wave_lo.begin(),wave_lo.end(),std::numeric_limits<int16_t>::max());
         }else live.insert(live.end(),bucket.begin(),bucket.end());
-        if(!(stream_wave&&raw_pcm16))std::fill(bucket.begin(),bucket.end(),Pair{});
+        if(!raw_pcm16)std::fill(bucket.begin(),bucket.end(),Pair{});
         bucket_frames=0;
     }
     int run(){
@@ -168,7 +175,11 @@ struct Job{
                 const size_t bytes_per_sample=format?4:2;
                 if(!stream_wave&&expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget for spectral/spectrogram analysis; original cache preserved");
                 state=1;
-                if(!stream_wave){if(format)f32.reserve(expected*nch);else i16.reserve(expected*nch);}
+                if(!stream_wave){
+                    if(format)f32.reserve(expected*nch);
+                    else if(raw_pcm16)i16.resize(expected*nch);
+                    else i16.reserve(expected*nch);
+                }
             }
             const auto t=Clock::now();
             if(decoded<expected){
@@ -179,11 +190,15 @@ struct Job{
                         const size_t count=std::min<size_t>(65536,expected-decoded),got=raw.read_frames(count,nch);
                         if(got!=count)throw std::runtime_error("raw PCM16 WAV changed/truncated during peak decode");
                         const uint8_t*s=raw.block.data();
+                        int16_t*dst=stream_wave?nullptr:i16.data()+decoded*nch;
+                        const bool direct=!stream_wave&&little_endian();
+                        if(direct)std::memcpy(dst,s,got*size_t(nch)*sizeof(int16_t));
                         for(size_t f=0;f<got;++f){
                             for(unsigned c=0;c<nch;++c){
-                                const size_t off=(f*nch+c)*2;const uint16_t u=uint16_t(s[off])|(uint16_t(s[off+1])<<8);const int32_t v=(u&0x8000)?int32_t(u)-65536:int32_t(u);const int16_t q=int16_t(v);
-                                if(stream_wave){wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);}
-                                else{i16.push_back(q);const double x=double(q)/32768.;bucket[c].hi=std::max(bucket[c].hi,x);bucket[c].lo=std::min(bucket[c].lo,x);}
+                                const size_t sample=f*nch+c;int16_t q;
+                                if(direct)q=dst[sample];
+                                else{const size_t off=sample*2;const uint16_t u=uint16_t(s[off])|(uint16_t(s[off+1])<<8);const int32_t v=(u&0x8000)?int32_t(u)-65536:int32_t(u);q=int16_t(v);if(dst)dst[sample]=q;}
+                                wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);
                             }
                             if(++bucket_frames==live_div)finish_bucket();
                         }
