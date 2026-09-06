@@ -240,9 +240,9 @@ experimental REAPER 7.79 extension showing how an application can compose this
 library into a transparent RPKX-preserving host integration. **It is example
 code, not part of the libreapeaks public library API.**
 
-The example includes its C++ `PCM_source` wrapper, Rust preserving store/bridge,
-crash-safety logic, raw PCM16 fast path, real-REAPER acceptance harness, and
-native-vs-reference benchmarks in one directory. Start with its
+If you only want to install a verified prebuilt reference binary, go directly to
+[`USER_GUIDE.md`](examples/reaper_rpkx_extension/USER_GUIDE.md). For the
+implementation, build instructions, and scope, start with
 [`README.md`](examples/reaper_rpkx_extension/README.md), then see
 [`DESIGN.md`](examples/reaper_rpkx_extension/DESIGN.md) and
 [`TESTING.md`](examples/reaper_rpkx_extension/TESTING.md).
@@ -354,6 +354,8 @@ Start at [`docs/README.md`](docs/README.md).
 - [`docs/SOURCE_PCM_LOD.md`](docs/SOURCE_PCM_LOD.md) — exact-sample LOD and
   bounded PCM access;
 - [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview;
+- [`examples/reaper_rpkx_extension/USER_GUIDE.md`](examples/reaper_rpkx_extension/USER_GUIDE.md)
+  — install/use verified prebuilt REAPER reference binaries;
 - [`examples/reaper_rpkx_extension/README.md`](examples/reaper_rpkx_extension/README.md)
   — REAPER RPKX-preserving reference integration (example, not library API).
 
