@@ -50,6 +50,8 @@ def one(name,profile,plugin,seed=None,mib=None):
     components={}
     for line in trace.splitlines():
         if line.startswith('DONE\t'):components=dict(x.split('=',1) for x in line.split('\t')[1:] if '=' in x)
+    if plugin and components.get('syncs')!='3':errors.append('same-size rebuild did not use three-sync redo fast path')
+    if plugin and profile==1 and components.get('raw_pcm16')!='1':errors.append('canonical PCM16 waveform did not use raw streaming fast path')
     image=None
     if data is None: errors.append('cache missing')
     else:
@@ -110,7 +112,7 @@ def main():
             if not p64['within_rpkx_size_budget']:
                 performance_errors.append(f"{label} 64MiB median {p64['median_s']:.6f}s exceeds 0MiB size-regression budget {size_budget:.6f}s")
     correctness=bool(rows) and all(not r['errors'] for r in rows)
-    report={'environment':INFO,'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16; timed direct build API, excluding startup. Shuffled order, 3 repeats; median gates. Warm/recently written files; no cache eviction. No claim of equal durability work or cold-device performance. Native baseline has no RPKX because native rebuild deletes it.','performance_policy':{'native_multiplier_budget':NATIVE_MULTIPLIER_BUDGET,'absolute_overhead_budget_s':ABS_OVERHEAD_BUDGET_S,'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S,'purpose':'Catch runaway regressions while allowing the plugin extra durable journal/sync work and hosted-runner timing noise.'},'rows':rows,'summaries':summaries,'performance_errors':performance_errors,'correctness_passed':correctness,'passed':correctness and not performance_errors}
+    report={'environment':INFO,'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16; timed direct build API, excluding startup. Shuffled order, 3 repeats; median gates. Warm/recently written files; no cache eviction. Plugin waveform cases must prove strict raw PCM16 streaming and all plugin cases must prove the three-sync same-size redo path. No claim of equal durability work or cold-device performance. Native baseline has no RPKX because native rebuild deletes it.','performance_policy':{'native_multiplier_budget':NATIVE_MULTIPLIER_BUDGET,'absolute_overhead_budget_s':ABS_OVERHEAD_BUDGET_S,'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S,'purpose':'Catch runaway regressions while allowing the plugin extra durable journal/sync work and hosted-runner timing noise.'},'rows':rows,'summaries':summaries,'performance_errors':performance_errors,'correctness_passed':correctness,'passed':correctness and not performance_errors}
     (OUT/'benchmark.json').write_text(json.dumps(report,indent=2)+'\n')
     lines=['# Host API benchmark',report['method'],'','| Profile | Writer | RPKX MiB | n | Median s | Min s | Max s | Ratio |','|---|---|---:|---:|---:|---:|---:|---:|']
     for s in summaries:
