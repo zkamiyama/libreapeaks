@@ -11,6 +11,18 @@
 The example is currently pinned to **REAPER 7.79**. The extension refuses to load
 on other REAPER versions rather than silently extending an unvalidated host.
 
+## Want to install the extension?
+
+If you want to **use** a prebuilt extension rather than study or build the
+reference implementation, start with [`USER_GUIDE.md`](USER_GUIDE.md). It covers
+release-asset selection, installation into REAPER's `UserPlugins`, normal use,
+verification, uninstalling, platform limitations, and troubleshooting/safety
+notes.
+
+Verified release packages are produced from the normal extension build only. The
+CI-only diagnostic binary with fault-injection hooks is not a distributable
+plugin and is deliberately excluded from release packages.
+
 ## What the example demonstrates
 
 The reference extension wraps supported REAPER `PCM_source` instances and lets
@@ -36,7 +48,8 @@ supported.
 
 ```text
 examples/reaper_rpkx_extension/
-├── README.md                 # scope, build and usage
+├── README.md                 # scope, build and developer usage
+├── USER_GUIDE.md             # install/use prebuilt release binaries
 ├── DESIGN.md                 # integration boundaries and safety invariants
 ├── TESTING.md                # real-REAPER test/benchmark contract
 ├── CMakeLists.txt            # C++ REAPER extension build
@@ -115,11 +128,14 @@ python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
 `LRPK_ENABLE_TEST_HOOKS=ON` produces a diagnostic binary used only by negative
 controls. Do not distribute that build.
 
-## Installation for manual experiments
+## Manual installation of a local build
 
-Copy the normal CMake output named `reaper_rpkx` into REAPER's `UserPlugins`
-directory using the platform extension produced by CMake (`.dll`, `.dylib`, or
-`.so`). On load, the example registers itself as:
+For normal users, prefer the packaged instructions in
+[`USER_GUIDE.md`](USER_GUIDE.md).
+
+For a locally built normal extension, copy the CMake output named `reaper_rpkx`
+into REAPER's `UserPlugins` directory using the platform extension produced by
+CMake (`.dll`, `.dylib`, or `.so`). On load, the example registers itself as:
 
 ```text
 libreapeaks RPKX protection (experimental)
@@ -159,6 +175,20 @@ The host tests download/run REAPER and are intentionally separate from normal
 `libreapeaks` library tests. A failure of this example's host integration should
 not be interpreted as a change to the public Rust/Python/C library API, although
 CI keeps the example buildable and its claimed integration behavior testable.
+
+## Release binaries
+
+`.github/workflows/release-reaper-rpkx-example.yml` builds the normal extension
+for the validated Windows x86_64, Linux x86_64, and macOS arm64 targets when a
+`v*` tag is released through that workflow. Before packaging, each target runs
+the same real-REAPER 7.79 base, extended, benchmark, and completion gates used by
+the host acceptance suite. Only a target that reaches the same-build completion
+PASS is packaged.
+
+The resulting archives contain the normal `reaper_rpkx` extension, this user
+guide, license/third-party notices, and selected completion/benchmark evidence.
+They do **not** contain the diagnostic extension. A `SHA256SUMS.txt` file is also
+attached to the GitHub Release.
 
 ## Related library documentation
 
