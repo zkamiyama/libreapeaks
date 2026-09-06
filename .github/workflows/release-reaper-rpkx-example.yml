@@ -1,15 +1,8 @@
 name: release-reaper-rpkx-example
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing git tag to publish or update
-        required: true
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -37,9 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name }}
           submodules: recursive
           fetch-depth: 0
+      - name: Capture released source commit
+        shell: bash
+        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -55,45 +51,47 @@ jobs:
           git -C .host-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
           cargo test --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
           cargo build --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
-          python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
+          GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
       - name: Install pinned REAPER 7.79 for release verification
-        run: python examples/reaper_rpkx_extension/host_tests/setup_host.py --install-only
+        shell: bash
+        run: GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/setup_host.py --install-only
       - name: Real host actions and negative controls
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
           else
-            python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
           fi
       - name: Extended host workflows
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
+            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
           else
-            python examples/reaper_rpkx_extension/host_tests/host_extended.py
+            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_extended.py
           fi
       - name: Native and RPKX-size benchmarks
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/benchmark.py
+            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/benchmark.py
           else
-            python examples/reaper_rpkx_extension/host_tests/benchmark.py
+            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/benchmark.py
           fi
       - name: Verify same-build completion manifest
-        run: python examples/reaper_rpkx_extension/host_tests/completion.py
+        shell: bash
+        run: GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/completion.py
       - name: Package the verified normal extension
         shell: bash
         env:
           RELEASE_ASSET: ${{ matrix.asset }}
           EXTENSION_SUFFIX: ${{ matrix.extension }}
           TARGET_SLUG: ${{ matrix.slug }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -127,7 +125,7 @@ jobs:
               'Validated host: REAPER 7.79\n'
               f'Target: {os.environ["TARGET_SLUG"]}\n'
               f'Tag: {os.environ["RELEASE_TAG"]}\n'
-              f'Commit: {os.environ.get("GITHUB_SHA", "unknown")}\n',
+              f'Commit: {os.environ["SOURCE_SHA"]}\n',
               encoding='utf-8',
           )
           with zipfile.ZipFile(asset, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
@@ -149,7 +147,7 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@v4
@@ -164,16 +162,11 @@ jobs:
           cd release-assets
           sha256sum *.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - name: Attach verified reference binaries to the GitHub Release
+      - name: Attach verified reference binaries to the existing library Release
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$RELEASE_TAG" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --generate-notes \
-              --title "$RELEASE_TAG"
-          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
