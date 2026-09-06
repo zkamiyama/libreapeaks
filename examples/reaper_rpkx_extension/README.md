@@ -178,17 +178,23 @@ CI keeps the example buildable and its claimed integration behavior testable.
 
 ## Release binaries
 
-`.github/workflows/release-reaper-rpkx-example.yml` builds the normal extension
-for the validated Windows x86_64, Linux x86_64, and macOS arm64 targets when a
-`v*` tag is released through that workflow. Before packaging, each target runs
-the same real-REAPER 7.79 base, extended, benchmark, and completion gates used by
-the host acceptance suite. Only a target that reaches the same-build completion
-PASS is packaged.
+`.github/workflows/release-reaper-rpkx-example.yml` is an **optional post-release
+asset workflow**. It does not create or gate the libreapeaks library Release.
+When a library Release is published, the workflow checks out that Release tag and
+builds the reference extension for the validated Windows x86_64, Linux x86_64,
+and macOS arm64 targets.
+
+Before packaging, each target runs the same real-REAPER 7.79 base, extended,
+benchmark, and completion gates used by the host acceptance suite. Only if all
+three target jobs reach same-build completion PASS does the publish job attach
+the reference-extension archives to the already existing library Release. A
+failure therefore leaves the library Release intact; it merely means verified
+reference-extension binaries are not attached by that run.
 
 The resulting archives contain the normal `reaper_rpkx` extension, this user
 guide, license/third-party notices, and selected completion/benchmark evidence.
 They do **not** contain the diagnostic extension. A `SHA256SUMS.txt` file is also
-attached to the GitHub Release.
+attached to the existing GitHub Release.
 
 ## Related library documentation
 
