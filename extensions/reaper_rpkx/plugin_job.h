@@ -1,6 +1,55 @@
 // Implementation include for plugin.cpp. Ordinary PCM16 waveform jobs keep only
 // fine-bucket extrema; spectral/spectrogram modes retain the bounded batch path.
 #include "raw_pcm16_wave.h"
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <utility>
+
+#ifndef LRPK_TEST_HOOKS
+// Starting a fresh std::async worker was measurably slower than REAPER's native
+// 10-second waveform build on Windows even though raw decode+generation already
+// beat native. Start one durability worker with the DLL instead; peak builders
+// only enqueue a tiny closure after the complete standard image is available.
+class CommitWorker{
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::function<void()>> queue;
+    bool stopping=false;
+    std::thread worker;
+    void loop(){
+        for(;;){
+            std::function<void()> fn;
+            {
+                std::unique_lock<std::mutex>g(mutex);
+                cv.wait(g,[this](){return stopping||!queue.empty();});
+                if(stopping&&queue.empty())return;
+                fn=std::move(queue.front());queue.pop_front();
+            }
+            fn();
+        }
+    }
+public:
+    CommitWorker():worker([this](){loop();}){}
+    ~CommitWorker(){
+        {std::lock_guard<std::mutex>g(mutex);stopping=true;}
+        cv.notify_all();if(worker.joinable())worker.join();
+    }
+    template<class F>auto submit(F f)->std::future<decltype(f())>{
+        using R=decltype(f());
+        auto task=std::make_shared<std::packaged_task<R()>>(std::move(f));
+        auto future=task->get_future();
+        {
+            std::lock_guard<std::mutex>g(mutex);
+            if(stopping)throw std::runtime_error("waveform commit worker is stopping");
+            queue.emplace_back([task](){(*task)();});
+        }
+        cv.notify_one();return future;
+    }
+};
+static CommitWorker commit_worker;
+#endif
+
 struct Job{
     unsigned id=++serial;
     std::string media,cache;Stamp source_stamp;
@@ -9,14 +58,31 @@ struct Job{
     size_t expected=0,decoded=0;bool force=false,stream_wave=false,raw_pcm16=false,async_commit=false;
     // 0=loading,1=decode,2=peak-ready/durable-commit-pending,3=durable-ready,4=failed
     std::atomic<int>state{0};std::string error;
-    std::unique_ptr<PCM_source>decoder;std::future<Result>pending;RawPcm16Wave raw;
+    std::unique_ptr<PCM_source>decoder;std::future<Result>pending;std::future<void>durable;RawPcm16Wave raw;
     std::vector<int16_t>i16;std::vector<float>f32;std::vector<double>decode_block;
     std::vector<LrpkI16Extrema>wave_i16;
     std::vector<int16_t>wave_hi,wave_lo;
     std::vector<Pair>live,bucket;
     size_t live_div=1,bucket_frames=0;double decode_s=0;
     Clock::time_point started=Clock::now();std::mutex mutex;bool reported=false;
-    ~Job(){if(pending.valid())pending.wait();}
+    ~Job(){if(pending.valid())pending.wait();if(durable.valid())durable.wait();}
+    Result inspect_cache(){
+        Result r;try{
+            fs::create_directories(fs::u8path(cache).parent_path());
+            // A forced rebuild cannot reuse the current standard prefix. Do
+            // not take an avoidable cache handle before decoding.
+            if(force)return r;
+            if(!fs::exists(fs::u8path(cache)))return r;
+            if(lrpk_read_standard(cache.c_str(),&r.image.b))throw std::runtime_error(error_text());
+            const auto*b=r.image.b.data;const auto n=r.image.b.len;
+            if(n<18)return r;
+            bool spectral=false,gram=false;uint32_t fine=0;
+            if(n<18+size_t(b[5])*8)throw std::runtime_error("truncated cached layer table");
+            for(unsigned j=0;j<b[5];++j){const int32_t d=int32_t(u32(b+18+j*8));if(d>0&&!fine)fine=uint32_t(d);if(d==-115)spectral=true;if(d==-103)gram=true;}
+            const int cached_mode=gram?2:(spectral?1:0);
+            r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
+        }catch(const std::exception&e){r.error=e.what();}return r;
+    }
     explicit Job(PCM_source*src,bool dirty,int required_mode,const std::string&cache_override={}):force(dirty){
         media=src->GetFileName()?src->GetFileName():"";
         if(media.empty()||!supported(src->GetType()))throw std::runtime_error("unsupported source");
@@ -44,8 +110,7 @@ struct Job{
 #ifndef LRPK_TEST_HOOKS
         // REAPER can consume complete live waveform extrema immediately. Native
         // REAPER does not wait for fsync durability, so do not put our stronger
-        // WAL/fsync policy on the user-visible build critical path. The same Job
-        // keeps the cache alive until the durable commit reaches state 3.
+        // WAL/fsync policy on the user-visible build critical path.
         async_commit=raw_pcm16;
 #endif
         if(!raw_pcm16){
@@ -59,23 +124,10 @@ struct Job{
             const size_t fine_count=expected/live_div+size_t(expected%live_div!=0);
             wave_i16.reserve(fine_count*nch);
         }
-        pending=std::async(std::launch::async,[this](){
-            Result r;try{
-                fs::create_directories(fs::u8path(cache).parent_path());
-                // A forced rebuild cannot reuse the current standard prefix. Do
-                // not take an avoidable cache handle before decoding.
-                if(force)return r;
-                if(!fs::exists(fs::u8path(cache)))return r;
-                if(lrpk_read_standard(cache.c_str(),&r.image.b))throw std::runtime_error(error_text());
-                const auto*b=r.image.b.data;const auto n=r.image.b.len;
-                if(n<18)return r;
-                bool spectral=false,gram=false;uint32_t fine=0;
-                if(n<18+size_t(b[5])*8)throw std::runtime_error("truncated cached layer table");
-                for(unsigned j=0;j<b[5];++j){const int32_t d=int32_t(u32(b+18+j*8));if(d>0&&!fine)fine=uint32_t(d);if(d==-115)spectral=true;if(d==-103)gram=true;}
-                const int cached_mode=gram?2:(spectral?1:0);
-                r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
-            }catch(const std::exception&e){r.error=e.what();}return r;
-        });
+        // Raw waveform jobs inspect only the small standard prefix synchronously
+        // on their first Run call. This avoids a per-job OS thread launch in the
+        // measured peak-ready path. Other formats keep the existing async check.
+        if(!raw_pcm16)pending=std::async(std::launch::async,[this](){return inspect_cache();});
         log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tcache="+cache+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tasync_commit="+std::to_string(async_commit)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
     }
     void fail(const std::string&s){error=s;state=4;log("ERROR\tid="+std::to_string(id)+"\t"+s);}
@@ -104,12 +156,16 @@ struct Job{
     int run(){
         std::lock_guard<std::mutex>g(mutex);try{
             if(state==3||state==4)return 0;
-            // An async raw-wave commit is already peak-ready. REAPER may finish
-            // the build API now; the worker itself advances state 2 -> 3/4.
             if(state==2&&async_commit)return 0;
             if(state==0||state==2){
-                if(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){std::this_thread::sleep_for(std::chrono::milliseconds(1));return state==0?100:1;}
-                Result r=pending.get();if(!r.error.empty()){fail(r.error);return 0;}
+                Result r;
+                if(state==0&&raw_pcm16)r=inspect_cache();
+                else{
+                    if(!pending.valid())throw std::runtime_error("peak worker state lost");
+                    if(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){std::this_thread::sleep_for(std::chrono::milliseconds(1));return state==0?100:1;}
+                    r=pending.get();
+                }
+                if(!r.error.empty()){fail(r.error);return 0;}
                 if(state==2||r.reuse){done(r,r.reuse);return 0;}
                 const size_t bytes_per_sample=format?4:2;
                 if(!stream_wave&&expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget for spectral/spectrogram analysis; original cache preserved");
@@ -162,7 +218,8 @@ struct Job{
                 log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len)+"\tstream=1\traw_pcm16=1\tasync_commit=1");
                 if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during analysis");
                 state=2;
-                pending=std::async(std::launch::async,[this,r=std::move(r)]()mutable{
+#ifndef LRPK_TEST_HOOKS
+                durable=commit_worker.submit([this,r=std::move(r)]()mutable{
                     try{
                         auto t=Clock::now();const std::string commit=lrpk_commit_path(cache);
                         if(lrpk_replace(commit.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
@@ -173,8 +230,8 @@ struct Job{
                     }
                     std::lock_guard<std::mutex>g(mutex);
                     if(!r.error.empty())fail(r.error);else done(r,false);
-                    return Result{};
                 });
+#endif
                 return 0;
             }
             state=2;pending=std::async(std::launch::async,[this](){
