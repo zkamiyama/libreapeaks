@@ -1,0 +1,179 @@
+name: release-reaper-rpkx-example
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing git tag to publish or update
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            slug: linux-x86_64
+            extension: so
+            asset: libreapeaks-reaper-rpkx-example-linux-x86_64.zip
+          - os: macos-15
+            slug: macos-arm64
+            extension: dylib
+            asset: libreapeaks-reaper-rpkx-example-macos-arm64.zip
+          - os: windows-2025
+            slug: windows-x86_64
+            extension: dll
+            asset: libreapeaks-reaper-rpkx-example-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb libgtk-3-0 libasound2t64 ffmpeg
+      - name: Build normal and diagnostic verification binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/justinfrankel/reaper-sdk.git .host-sdk
+          git -C .host-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
+          cargo test --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          cargo build --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
+      - name: Install pinned REAPER 7.79 for release verification
+        run: python examples/reaper_rpkx_extension/host_tests/setup_host.py --install-only
+      - name: Real host actions and negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+          fi
+      - name: Extended host workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_extended.py
+          fi
+      - name: Native and RPKX-size benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/benchmark.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/benchmark.py
+          fi
+      - name: Verify same-build completion manifest
+        run: python examples/reaper_rpkx_extension/host_tests/completion.py
+      - name: Package the verified normal extension
+        shell: bash
+        env:
+          RELEASE_ASSET: ${{ matrix.asset }}
+          EXTENSION_SUFFIX: ${{ matrix.extension }}
+          TARGET_SLUG: ${{ matrix.slug }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          root = pathlib.Path.cwd()
+          suffix = os.environ['EXTENSION_SUFFIX']
+          asset = root / os.environ['RELEASE_ASSET']
+          candidates = sorted((root / 'host-build').rglob(f'reaper_rpkx.{suffix}'))
+          if len(candidates) != 1:
+              raise SystemExit(f'expected exactly one normal extension, found: {candidates}')
+
+          stage = root / 'release-package'
+          if stage.exists():
+              shutil.rmtree(stage)
+          stage.mkdir()
+          shutil.copy2(candidates[0], stage / f'reaper_rpkx.{suffix}')
+          shutil.copy2(root / 'examples/reaper_rpkx_extension/USER_GUIDE.md', stage / 'USER_GUIDE.md')
+          shutil.copy2(root / 'LICENSE', stage / 'LICENSE')
+          shutil.copy2(root / 'THIRD_PARTY_NOTICES.md', stage / 'THIRD_PARTY_NOTICES.md')
+          verification = stage / 'verification'
+          verification.mkdir()
+          for name in ('completion.json', 'benchmark.json'):
+              shutil.copy2(root / 'host-results' / name, verification / name)
+          (stage / 'RELEASE_INFO.txt').write_text(
+              'libreapeaks REAPER RPKX reference extension\n'
+              'Experimental example; not part of the libreapeaks public API.\n'
+              'Validated host: REAPER 7.79\n'
+              f'Target: {os.environ["TARGET_SLUG"]}\n'
+              f'Tag: {os.environ["RELEASE_TAG"]}\n'
+              f'Commit: {os.environ.get("GITHUB_SHA", "unknown")}\n',
+              encoding='utf-8',
+          )
+          with zipfile.ZipFile(asset, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              for path in sorted(stage.rglob('*')):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(stage))
+          print(asset)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-reaper-rpkx-${{ matrix.slug }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: verify-and-package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-reaper-rpkx-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Attach verified reference binaries to the GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "$RELEASE_TAG"
+          fi
