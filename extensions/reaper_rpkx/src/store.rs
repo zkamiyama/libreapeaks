@@ -17,6 +17,8 @@ pub const MAX_STANDARD: u64 = 256 * 1024 * 1024;
 const INIT: &[u8; 8] = b"LRPKINI1";
 const WAL: &[u8; 8] = b"LRPKWAL1";
 const STATE: &[u8; 8] = b"LRPKST01";
+const FAST_INIT: &[u8; 8] = b"LRPKIF01";
+const FAST_WAL: &[u8; 8] = b"LRPKWF01";
 fn bad(s: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, s.into()) }
 fn sum(a: u64, b: u64) -> io::Result<u64> { a.checked_add(b).ok_or_else(|| bad("offset overflow")) }
 fn align(n: u64) -> io::Result<u64> { Ok(sum(n, SLOT - 1)? / SLOT * SLOT) }
@@ -81,6 +83,33 @@ impl Io<'_> {
 }
 
 #[derive(Clone, Debug)]
+struct FastPlan {
+    old_len: u64, old_std: u64, new_std: u64, stage: u64, footer: u64,
+    new_hash: [u8; 32],
+}
+impl FastPlan {
+    fn new(old_len:u64, old_std:u64, new:&[u8]) -> io::Result<Self> {
+        let new_std=new.len() as u64;
+        if new_std!=old_std || new_std<18 || new_std>MAX_STANDARD {return Err(bad("same-size redo geometry"));}
+        let stage=align(sum(old_len,SLOT)?)?;
+        let footer=align(sum(stage,new_std)?)?;
+        Ok(Self{old_len,old_std,new_std,stage,footer,new_hash:hash(new)})
+    }
+    fn encode(&self,magic:&[u8;8])->Vec<u8>{
+        let mut b=vec![0;SLOT as usize];b[..8].copy_from_slice(magic);
+        for (i,v) in [self.old_len,self.old_std,self.new_std,self.stage,self.footer].iter().enumerate(){put(&mut b,8+i*8,*v);}
+        b[48..80].copy_from_slice(&self.new_hash);seal(&mut b);b
+    }
+    fn decode(b:&[u8],magic:&[u8;8])->io::Result<Self>{
+        if !valid(b,magic){return Err(bad("invalid same-size redo descriptor"));}
+        let p=Self{old_len:get(b,8),old_std:get(b,16),new_std:get(b,24),stage:get(b,32),footer:get(b,40),new_hash:b[48..80].try_into().unwrap()};
+        if p.old_std>p.old_len || p.old_std!=p.new_std || p.new_std<18 || p.new_std>MAX_STANDARD{return Err(bad("same-size redo geometry"));}
+        if p.stage!=align(sum(p.old_len,SLOT)?)? || p.footer!=align(sum(p.stage,p.new_std)?)?{return Err(bad("same-size redo offsets"));}
+        Ok(p)
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Plan {
     old_len: u64, old_std: u64, new_std: u64, stage: u64, scratch: u64,
     slot_a: u64, footer: u64, new_hash: [u8; 32],
@@ -136,6 +165,18 @@ impl Progress {
     }
 }
 
+fn apply_fast(io:&mut Io<'_>,p:&FastPlan)->io::Result<()>{
+    let image=io.read(p.stage,p.new_std as usize)?;
+    if hash(&image)!=p.new_hash{return Err(bad("new same-size standard redo hash mismatch"));}
+    for (i,b) in image.chunks(BLOCK as usize).enumerate(){io.write(i as u64*BLOCK,b,false)?;io.report.standard_bytes_written+=b.len() as u64;}
+    // Once the new prefix is durable the trailing FAST_WAL is sufficient to
+    // finish or replay the transaction after any crash. Only then remove it.
+    io.sync()?;
+    let actual=io.read(0,p.new_std as usize)?;
+    if hash(&actual)!=p.new_hash{return Err(bad("same-size prefix read-back mismatch"));}
+    io.truncate(p.old_len)
+}
+
 fn apply(io:&mut Io<'_>, p:&Plan) -> io::Result<()> {
     let a=Progress::decode(&io.read(p.slot_a,SLOT as usize)?,p);
     let b=Progress::decode(&io.read(p.slot_a+SLOT,SLOT as usize)?,p);
@@ -187,7 +228,14 @@ fn recover_io(io:&mut Io<'_>) -> io::Result<bool> {
     let len=io.file.metadata()?.len();
     if len>=SLOT {
         let footer=io.read(len-SLOT,SLOT as usize)?;
-        if &footer[..8]==WAL {
+        if &footer[..8]==FAST_WAL {
+            if let Ok(p)=FastPlan::decode(&footer,FAST_WAL){
+                if sum(p.footer,SLOT)?!=len{return Err(bad("unexpected same-size redo EOF"));}
+                apply_fast(io,&p)?;io.report.recovered=1;return Ok(true);
+            }
+            // A torn FAST_WAL can only occur during prepare: prefix writes start
+            // after the prepare sync returns. Fall through to FAST_INIT rollback.
+        } else if &footer[..8]==WAL {
             let p=Plan::decode(&footer,WAL)?;
             if sum(p.footer,SLOT)?!=len {return Err(bad("unexpected redo EOF"));}
             apply(io,&p)?; io.report.recovered=1; return Ok(true);
@@ -200,6 +248,16 @@ fn recover_io(io:&mut Io<'_>) -> io::Result<bool> {
     if old_end==len {return Ok(false);}
     if len-old_end<SLOT {return Err(bad("unknown/torn trailing bytes; preserving file"));}
     let init=io.read(old_end,SLOT as usize)?;
+    if &init[..8]==FAST_INIT {
+        let p=FastPlan::decode(&init,FAST_INIT)?;
+        if p.old_len!=old_end{return Err(bad("same-size INIT original length mismatch"));}
+        let complete=sum(p.footer,SLOT)?;
+        if len>complete{return Err(bad("unexpected bytes after same-size redo"));}
+        // If the footer was valid, the entry check above would have replayed it.
+        // Otherwise prefix mutation never began, so the append-only prepare can
+        // be discarded without touching the original standard or RPKX bytes.
+        io.truncate(p.old_len)?;io.report.recovered=1;return Ok(true);
+    }
     if &init[..8]!=INIT {return Err(bad("unrelated EOF suffix is unsupported; preserving it"));}
     let p=Plan::decode(&init,INIT)?;
     if p.old_len!=old_end {return Err(bad("INIT original length mismatch"));}
@@ -220,6 +278,17 @@ fn replace_io(io:&mut Io<'_>, image:&[u8], preserve_stale:bool) -> io::Result<()
         let index=scan_rpkx(io.file).map_err(|e|bad(e.to_string()))?.ok_or_else(||bad("missing RPKX"))?;
         let stamp=reapeaks::reapeaks_source_stamp(image).map_err(|e|bad(e.to_string()))?;
         if index.source_stamp!=stamp && !preserve_stale {return Err(bad("source changed: RPKX binding would be stale (explicit preserve-stale required)"));}
+    }
+    if old_std==image.len() as u64 && old_std!=0 {
+        let p=FastPlan::new(len,old_std,image)?;
+        // Same-size replacement never overlaps the RPKX tail. Prepare is wholly
+        // append-only; one sync makes INIT + staged standard + FAST_WAL durable.
+        // The live prefix is touched only after that sync, making replay idempotent.
+        io.write(len,&p.encode(FAST_INIT),true)?;
+        io.write(p.stage,image,true)?;
+        io.write(p.footer,&p.encode(FAST_WAL),true)?;
+        io.sync()?;
+        return apply_fast(io,&p);
     }
     let p=Plan::new(len,old_std,image)?;
     io.write(len,&p.encode(INIT),true)?;io.sync()?;
@@ -284,13 +353,13 @@ mod tests {
             let new=standard(div,1);let r=replace(&p,&new,false).unwrap();
             let actual=std::fs::read(&p).unwrap();assert_eq!(&actual[..new.len()],new);
             assert_eq!(&actual[new.len()..],&original[old.len()..]);
-            if div==160 && new.len()==old.len(){assert!(r.tail_bytes_moved==0 || r.tail_bytes_moved==original.len() as u64-old.len() as u64);}
+            if div==160 && new.len()==old.len(){assert_eq!(r.tail_bytes_moved,0);assert_eq!(r.syncs,3);}
         }
         let before=std::fs::read(&p).unwrap();assert!(replace(&p,&standard(160,2),false).is_err());assert_eq!(std::fs::read(&p).unwrap(),before);
         replace(&p,&standard(160,2),true).unwrap();
         assert_eq!(&std::fs::read(&p).unwrap()[old.len()..],&original[old.len()..]);
     }
-    #[test] fn same_size_never_moves_payload(){let d=Dir::new();let p=d.0.join("a");let s=standard(160,1);std::fs::write(&p,extended(&s,8*1024*1024)).unwrap();let r=replace(&p,&s,false).unwrap();assert_eq!(r.tail_bytes_moved,0);assert!(r.journal_bytes_written < 128*1024);}
+    #[test] fn same_size_never_moves_payload(){let d=Dir::new();let p=d.0.join("a");let s=standard(160,1);std::fs::write(&p,extended(&s,8*1024*1024)).unwrap();let r=replace(&p,&s,false).unwrap();assert_eq!(r.tail_bytes_moved,0);assert_eq!(r.syncs,3);assert!(r.journal_bytes_written < 64*1024);}
     #[test] fn empty_file_and_plain_file(){let d=Dir::new();let p=d.0.join("a");let s=standard(160,1);replace(&p,&s,false).unwrap();assert_eq!(std::fs::read(&p).unwrap(),s);replace(&p,&standard(1,1),false).unwrap();assert_eq!(read_standard(&p).unwrap(),standard(1,1));}
     #[test] fn unknown_suffix_preserved_on_refusal(){let d=Dir::new();let p=d.0.join("a");let s=standard(160,1);let mut b=extended(&s,20);b.extend_from_slice(b"unrelated suffix");std::fs::write(&p,&b).unwrap();assert!(replace(&p,&s,false).is_err());assert_eq!(std::fs::read(&p).unwrap(),b);}
     #[test] fn malformed_new_image_is_rejected(){let d=Dir::new();let p=d.0.join("a");let s=standard(160,1);std::fs::write(&p,&s).unwrap();assert!(replace(&p,b"RPKN",false).is_err());assert_eq!(std::fs::read(&p).unwrap(),s);}
