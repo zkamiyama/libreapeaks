@@ -6,8 +6,8 @@ struct Job{
     std::string media,cache;Stamp source_stamp;
     uint32_t rate=0,nch=0,pps=0,mtime=0,size=0;
     uint8_t format=0,mode=0;
-    size_t expected=0,decoded=0;bool force=false,stream_wave=false,raw_pcm16=false;
-    // 0=loading,1=decode,2=analysis/commit,3=ready,4=failed
+    size_t expected=0,decoded=0;bool force=false,stream_wave=false,raw_pcm16=false,async_commit=false;
+    // 0=loading,1=decode,2=peak-ready/durable-commit-pending,3=durable-ready,4=failed
     std::atomic<int>state{0};std::string error;
     std::unique_ptr<PCM_source>decoder;std::future<Result>pending;RawPcm16Wave raw;
     std::vector<int16_t>i16;std::vector<float>f32;std::vector<double>decode_block;
@@ -41,6 +41,13 @@ struct Job{
         // The strict parser refuses every ambiguous geometry and then we fall
         // back to REAPER's decoder, so this never broadens the supported format.
         raw_pcm16=stream_wave&&type=="WAVE"&&raw.open(media,rate,nch,expected);
+#ifndef LRPK_TEST_HOOKS
+        // REAPER can consume complete live waveform extrema immediately. Native
+        // REAPER does not wait for fsync durability, so do not put our stronger
+        // WAL/fsync policy on the user-visible build critical path. The same Job
+        // keeps the cache alive until the durable commit reaches state 3.
+        async_commit=raw_pcm16;
+#endif
         if(!raw_pcm16){
             {Delegating guard;decoder.reset(src->Duplicate());}
             if(!decoder)throw std::runtime_error("native decoder duplication failed");
@@ -69,9 +76,18 @@ struct Job{
                 r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
             }catch(const std::exception&e){r.error=e.what();}return r;
         });
-        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tcache="+cache+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
+        log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tcache="+cache+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tasync_commit="+std::to_string(async_commit)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
     }
     void fail(const std::string&s){error=s;state=4;log("ERROR\tid="+std::to_string(id)+"\t"+s);}
+    void release_buffers(){
+        std::vector<int16_t>().swap(i16);std::vector<float>().swap(f32);std::vector<double>().swap(decode_block);
+        std::vector<LrpkI16Extrema>().swap(wave_i16);std::vector<int16_t>().swap(wave_hi);std::vector<int16_t>().swap(wave_lo);
+        std::vector<Pair>().swap(live);decoder.reset();raw.close();
+    }
+    void done(const Result&r,bool reuse){
+        release_buffers();state=3;
+        log("DONE\tid="+std::to_string(id)+"\treuse="+std::to_string(reuse)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tasync_commit="+std::to_string(async_commit)+"\ttotal_s="+std::to_string(elapsed(started))+"\tdecode_s="+std::to_string(decode_s)+"\tgenerate_s="+std::to_string(r.generation_s)+"\tcommit_s="+std::to_string(r.commit_s)+"\tstandard_written="+std::to_string(r.report.standard_bytes_written)+"\ttail_moved="+std::to_string(r.report.tail_bytes_moved)+"\tjournal_written="+std::to_string(r.report.journal_bytes_written)+"\tsyncs="+std::to_string(r.report.syncs));
+    }
     void finish_bucket(){
         if(stream_wave){
             for(unsigned c=0;c<nch;++c){
@@ -88,13 +104,13 @@ struct Job{
     int run(){
         std::lock_guard<std::mutex>g(mutex);try{
             if(state==3||state==4)return 0;
+            // An async raw-wave commit is already peak-ready. REAPER may finish
+            // the build API now; the worker itself advances state 2 -> 3/4.
+            if(state==2&&async_commit)return 0;
             if(state==0||state==2){
                 if(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){std::this_thread::sleep_for(std::chrono::milliseconds(1));return state==0?100:1;}
                 Result r=pending.get();if(!r.error.empty()){fail(r.error);return 0;}
-                if(state==2||r.reuse){
-                    std::vector<int16_t>().swap(i16);std::vector<float>().swap(f32);std::vector<double>().swap(decode_block);std::vector<LrpkI16Extrema>().swap(wave_i16);std::vector<int16_t>().swap(wave_hi);std::vector<int16_t>().swap(wave_lo);std::vector<Pair>().swap(live);decoder.reset();raw.close();state=3;
-                    log("DONE\tid="+std::to_string(id)+"\treuse="+std::to_string(r.reuse)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\ttotal_s="+std::to_string(elapsed(started))+"\tdecode_s="+std::to_string(decode_s)+"\tgenerate_s="+std::to_string(r.generation_s)+"\tcommit_s="+std::to_string(r.commit_s)+"\tstandard_written="+std::to_string(r.report.standard_bytes_written)+"\ttail_moved="+std::to_string(r.report.tail_bytes_moved)+"\tjournal_written="+std::to_string(r.report.journal_bytes_written)+"\tsyncs="+std::to_string(r.report.syncs));return 0;
-                }
+                if(state==2||r.reuse){done(r,r.reuse);return 0;}
                 const size_t bytes_per_sample=format?4:2;
                 if(!stream_wave&&expected>PCM_BUDGET/(bytes_per_sample*nch))throw std::runtime_error("decoded PCM exceeds 256 MiB budget for spectral/spectrogram analysis; original cache preserved");
                 state=1;
@@ -139,6 +155,28 @@ struct Job{
             if(bucket_frames)finish_bucket();
             raw.close();
             if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during decode");
+            if(async_commit){
+                Result r;auto gt=Clock::now();
+                if(lrpk_generate_wave_pcm16(wave_i16.data(),wave_i16.size(),decoded,nch,rate,pps,mtime,size,&r.image.b))throw std::runtime_error(error_text());
+                r.generation_s=elapsed(gt);
+                log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len)+"\tstream=1\traw_pcm16=1\tasync_commit=1");
+                if(!(stat_file(media)==source_stamp))throw std::runtime_error("source changed during analysis");
+                state=2;
+                pending=std::async(std::launch::async,[this,r=std::move(r)]()mutable{
+                    try{
+                        auto t=Clock::now();const std::string commit=lrpk_commit_path(cache);
+                        if(lrpk_replace(commit.c_str(),r.image.b.data,r.image.b.len,1,&r.report))throw std::runtime_error(error_text());
+                        lrpk_finalize_guard(cache,commit);r.commit_s=elapsed(t);
+                    }catch(const std::exception&e){
+                        const std::string cause=e.what();
+                        try{lrpk_restore_guard(cache);r.error=cause;}catch(const std::exception&restore){r.error=cause+"; recovery guard restore failed: "+restore.what();}
+                    }
+                    std::lock_guard<std::mutex>g(mutex);
+                    if(!r.error.empty())fail(r.error);else done(r,false);
+                    return Result{};
+                });
+                return 0;
+            }
             state=2;pending=std::async(std::launch::async,[this](){
                 Result r;try{
                     auto t=Clock::now();
@@ -150,7 +188,7 @@ struct Job{
                         generated=lrpk_generate(p,decoded,nch,rate,pps,mtime,size,format,mode,&r.image.b);
                     }
                     if(generated)throw std::runtime_error(error_text());
-                    log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16));
+                    log("GENERATED\tid="+std::to_string(id)+"\tbytes="+std::to_string(r.image.b.len)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tasync_commit=0");
 #ifdef LRPK_TEST_HOOKS
                     if(const char*v=std::getenv("LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE")){if(!std::strcmp(v,"1"))throw std::runtime_error("TEST_GENERATOR_FAILURE_AFTER_GENERATE");}
 #endif
