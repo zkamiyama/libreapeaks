@@ -103,15 +103,14 @@ struct Job{
         // We never delegate a deleting clear here. A non-deleting clear is safe
         // and asks the native decoder to release any internal peak state.
         src->Peaks_Clear(false);
-        // Canonical PCM16 RIFF/WAVE needs no conversion through double samples.
-        // The strict parser refuses every ambiguous geometry and then we fall
-        // back to REAPER's decoder, so this never broadens the supported format.
-        raw_pcm16=stream_wave&&type=="WAVE"&&raw.open(media,rate,nch,expected);
+        // Canonical PCM16 RIFF/WAVE needs no conversion through double samples,
+        // including spectral/spectrogram jobs. The strict parser refuses every
+        // ambiguous geometry and then we fall back to REAPER's decoder.
+        raw_pcm16=format==0&&type=="WAVE"&&raw.open(media,rate,nch,expected);
 #ifndef LRPK_TEST_HOOKS
-        // REAPER can consume complete live waveform extrema immediately. Native
-        // REAPER does not wait for fsync durability, so do not put our stronger
-        // WAL/fsync policy on the user-visible build critical path.
-        async_commit=raw_pcm16;
+        // Only waveform mode can expose complete live extrema before durability.
+        // Spectral/spectrogram output still waits for its synchronous commit.
+        async_commit=raw_pcm16&&stream_wave;
 #endif
         if(!raw_pcm16){
             {Delegating guard;decoder.reset(src->Duplicate());}
@@ -124,9 +123,8 @@ struct Job{
             const size_t fine_count=expected/live_div+size_t(expected%live_div!=0);
             wave_i16.reserve(fine_count*nch);
         }
-        // Raw waveform jobs inspect only the small standard prefix synchronously
-        // on their first Run call. This avoids a per-job OS thread launch in the
-        // measured peak-ready path. Other formats keep the existing async check.
+        // Raw PCM16 jobs inspect only the small standard prefix synchronously on
+        // their first Run call, avoiding a per-job OS thread launch.
         if(!raw_pcm16)pending=std::async(std::launch::async,[this](){return inspect_cache();});
         log("BEGIN\tid="+std::to_string(id)+"\tfile="+media+"\tcache="+cache+"\tmode="+std::to_string(mode)+"\tforce="+std::to_string(force)+"\tformat="+std::to_string(format)+"\tstream="+std::to_string(stream_wave)+"\traw_pcm16="+std::to_string(raw_pcm16)+"\tasync_commit="+std::to_string(async_commit)+"\tschedule="+std::to_string(cfg("peakcachegenmode",3)));
     }
@@ -150,7 +148,7 @@ struct Job{
             std::fill(wave_hi.begin(),wave_hi.end(),std::numeric_limits<int16_t>::min());
             std::fill(wave_lo.begin(),wave_lo.end(),std::numeric_limits<int16_t>::max());
         }else live.insert(live.end(),bucket.begin(),bucket.end());
-        if(!raw_pcm16)std::fill(bucket.begin(),bucket.end(),Pair{});
+        if(!(stream_wave&&raw_pcm16))std::fill(bucket.begin(),bucket.end(),Pair{});
         bucket_frames=0;
     }
     int run(){
@@ -174,16 +172,19 @@ struct Job{
             }
             const auto t=Clock::now();
             if(decoded<expected){
-                // Waveform streaming is bounded by time rather than by one tiny
-                // scheduler quantum. The direct WAV reader uses larger chunks;
-                // decoder fallback retains smaller blocks for host responsiveness.
+                // Direct PCM16 reading can consume multiple large chunks inside
+                // the same scheduler slice. Decoder fallback keeps smaller blocks.
                 do{
                     if(raw_pcm16){
                         const size_t count=std::min<size_t>(65536,expected-decoded),got=raw.read_frames(count,nch);
                         if(got!=count)throw std::runtime_error("raw PCM16 WAV changed/truncated during peak decode");
                         const uint8_t*s=raw.block.data();
                         for(size_t f=0;f<got;++f){
-                            for(unsigned c=0;c<nch;++c){const size_t off=(f*nch+c)*2;const uint16_t u=uint16_t(s[off])|(uint16_t(s[off+1])<<8);const int32_t v=(u&0x8000)?int32_t(u)-65536:int32_t(u);const int16_t q=int16_t(v);wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);}
+                            for(unsigned c=0;c<nch;++c){
+                                const size_t off=(f*nch+c)*2;const uint16_t u=uint16_t(s[off])|(uint16_t(s[off+1])<<8);const int32_t v=(u&0x8000)?int32_t(u)-65536:int32_t(u);const int16_t q=int16_t(v);
+                                if(stream_wave){wave_hi[c]=std::max(wave_hi[c],q);wave_lo[c]=std::min(wave_lo[c],q);}
+                                else{i16.push_back(q);const double x=double(q)/32768.;bucket[c].hi=std::max(bucket[c].hi,x);bucket[c].lo=std::min(bucket[c].lo,x);}
+                            }
                             if(++bucket_frames==live_div)finish_bucket();
                         }
                         decoded+=got;
@@ -204,7 +205,7 @@ struct Job{
                         decoded+=size_t(b.samples_out);
                         if(size_t(b.samples_out)<count&&decoded!=expected)throw std::runtime_error("decoder length differs from source metadata");
                     }
-                }while(stream_wave&&decoded<expected&&elapsed(t)<0.008);
+                }while((stream_wave||raw_pcm16)&&decoded<expected&&elapsed(t)<0.008);
             }
             decode_s+=elapsed(t);
             if(decoded<expected)return std::max(2,100-int(decoded*95/std::max<size_t>(expected,1)));
