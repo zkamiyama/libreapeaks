@@ -1,4 +1,4 @@
-name: reaper-plugin-host-acceptance
+name: reaper-reference-host-acceptance
 on:
   push:
     branches: [feature/reaper-rpkx-preserving-plugin]
@@ -27,47 +27,47 @@ jobs:
       - name: Linux runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y xvfb libgtk-3-0 libasound2t64 ffmpeg
-      - name: Build Rust and real extension
+      - name: Build Rust and real reference extension
         shell: bash
         run: |
           set -euo pipefail
           git clone https://github.com/justinfrankel/reaper-sdk.git .host-sdk
           git -C .host-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
-          cargo test --release --manifest-path extensions/reaper_rpkx/Cargo.toml
-          cargo build --release --manifest-path extensions/reaper_rpkx/Cargo.toml
-          python tools/reaper_plugin/setup_host.py --build-only
+          cargo test --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          cargo build --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
       - name: Install REAPER 7.79 in isolated workspace
-        run: python tools/reaper_plugin/setup_host.py --install-only
+        run: python examples/reaper_rpkx_extension/host_tests/setup_host.py --install-only
       - name: Real host actions and negative controls
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/host_acceptance.py
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
           else
-            python tools/reaper_plugin/host_acceptance.py
+            python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
           fi
       - name: Extended ordinary edit and media-creation workflows
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/host_extended.py
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
           else
-            python tools/reaper_plugin/host_extended.py
+            python examples/reaper_rpkx_extension/host_tests/host_extended.py
           fi
       - name: Verified native and RPKX-size benchmarks
         shell: bash
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a -s '-screen 0 1280x800x24' python tools/reaper_plugin/benchmark.py
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/benchmark.py
           else
-            python tools/reaper_plugin/benchmark.py
+            python examples/reaper_rpkx_extension/host_tests/benchmark.py
           fi
       - name: Verify same-build completion manifest
         if: always()
-        run: python tools/reaper_plugin/completion.py
+        run: python examples/reaper_rpkx_extension/host_tests/completion.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

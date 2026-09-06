@@ -4,7 +4,7 @@ from __future__ import annotations
 import json,math,os,pathlib,random,shutil,statistics,time
 from host_process import launch
 from host_acceptance import ROOT,OUT,INFO,FIXED_MTIME,fixture,rpkx_tail,standard_end,sha
-SCRIPT=ROOT/'tools/reaper_plugin/benchmark.lua'
+SCRIPT=pathlib.Path(__file__).with_name('benchmark.lua')
 DURABLE_ABS_BUDGET_S=1.000
 RPKX_SIZE_OVERHEAD_BUDGET_S=0.500
 RPKX_SIZE_MULTIPLIER_BUDGET=8.0

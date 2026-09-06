@@ -78,6 +78,12 @@ jobs:
             examples/web_player/daw_server.py \
             examples/web_player/benchmark_webgl2.py \
             examples/web_player/webgl2_api.py \
+            examples/reaper_rpkx_extension/host_tests/setup_host.py \
+            examples/reaper_rpkx_extension/host_tests/host_process.py \
+            examples/reaper_rpkx_extension/host_tests/host_acceptance.py \
+            examples/reaper_rpkx_extension/host_tests/host_extended.py \
+            examples/reaper_rpkx_extension/host_tests/benchmark.py \
+            examples/reaper_rpkx_extension/host_tests/completion.py \
             tests/python/test_demo_cache_config.py \
             tests/python/test_player_common.py \
             tests/python/test_source_pcm.py \

@@ -2,7 +2,8 @@
 """Build real extensions and extract pinned REAPER on disposable CI workers."""
 from __future__ import annotations
 import argparse, hashlib, json, os, pathlib, platform, shutil, subprocess, tarfile, urllib.request
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+EXAMPLE = ROOT / 'examples/reaper_rpkx_extension'
 RESULTS = ROOT / 'host-results'
 HOST = ROOT / 'host-runtime'
 
@@ -11,11 +12,11 @@ def run(*args, input_text=None):
     subprocess.run(list(map(str,args)), check=True, cwd=ROOT, timeout=300, input=input_text, text=True)
 
 def build():
-    rel = ROOT / 'extensions/reaper_rpkx/target/release'
+    rel = EXAMPLE / 'target/release'
     lib = rel / ('rpkx_bridge.lib' if os.name == 'nt' else 'librpkx_bridge.a')
     if not lib.is_file(): raise RuntimeError(f'Rust static library missing: {lib}')
     for directory,hooks in [('host-build','OFF'),('host-diagnostic','ON')]:
-        run('cmake','-S',ROOT/'extensions/reaper_rpkx','-B',ROOT/directory,'-DCMAKE_BUILD_TYPE=Release',f'-DREAPER_SDK={ROOT / ".host-sdk"}',f'-DWDL_ROOT={ROOT / "third_party/WDL"}',f'-DBRIDGE_LIBRARY={lib}',f'-DLRPK_ENABLE_TEST_HOOKS={hooks}')
+        run('cmake','-S',EXAMPLE,'-B',ROOT/directory,'-DCMAKE_BUILD_TYPE=Release',f'-DREAPER_SDK={ROOT / ".host-sdk"}',f'-DWDL_ROOT={ROOT / "third_party/WDL"}',f'-DBRIDGE_LIBRARY={lib}',f'-DLRPK_ENABLE_TEST_HOOKS={hooks}')
         run('cmake','--build',ROOT/directory,'--config','Release','--parallel','2')
 
 def install():

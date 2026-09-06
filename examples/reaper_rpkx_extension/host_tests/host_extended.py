@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib,json,math,os,pathlib,shutil,struct,sys,time,wave
 from host_process import launch
 from host_acceptance import ROOT,OUT,INFO,FIXED_MTIME,standard_end,rpkx_tail,run_case as base_run_case
-SCRIPT=ROOT/'tools/reaper_plugin/host_extended.lua'
+SCRIPT=pathlib.Path(__file__).with_name('host_extended.lua')
 
 def sha(b:bytes)->str:return hashlib.sha256(b).hexdigest()
 def standalone(data:bytes|None)->bytes|None:return data[:standard_end(data)] if data is not None else None

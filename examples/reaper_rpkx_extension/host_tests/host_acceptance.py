@@ -6,9 +6,9 @@ separately hashed diagnostic build. Workspaces are isolated and disposable.
 from __future__ import annotations
 import hashlib,json,math,os,pathlib,shutil,struct,sys,time,wave
 from host_process import launch
-ROOT=pathlib.Path(__file__).resolve().parents[2]
+ROOT=pathlib.Path(__file__).resolve().parents[3]
 OUT=ROOT/'host-results'; INFO=json.loads((OUT/'environment.json').read_text())
-SCRIPT=ROOT/'tools/reaper_plugin/host_actions.lua'
+SCRIPT=pathlib.Path(__file__).with_name('host_actions.lua')
 FIXED_MTIME=1700000000
 
 def sha(b): return hashlib.sha256(b).hexdigest()

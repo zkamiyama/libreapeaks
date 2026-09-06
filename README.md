@@ -233,6 +233,20 @@ $env:CXXFLAGS="/DNOMINMAX"
 cargo test --release --features strict-wdl
 ```
 
+## REAPER extension reference implementation
+
+[`examples/reaper_rpkx_extension/`](examples/reaper_rpkx_extension/) contains an
+experimental REAPER 7.79 extension showing how an application can compose this
+library into a transparent RPKX-preserving host integration. **It is example
+code, not part of the libreapeaks public library API.**
+
+The example includes its C++ `PCM_source` wrapper, Rust preserving store/bridge,
+crash-safety logic, raw PCM16 fast path, real-REAPER acceptance harness, and
+native-vs-reference benchmarks in one directory. Start with its
+[`README.md`](examples/reaper_rpkx_extension/README.md), then see
+[`DESIGN.md`](examples/reaper_rpkx_extension/DESIGN.md) and
+[`TESTING.md`](examples/reaper_rpkx_extension/TESTING.md).
+
 ## Python
 
 The distribution name is `libreapeaks`; the import module is `reapeaks`.
@@ -339,7 +353,9 @@ Start at [`docs/README.md`](docs/README.md).
 - [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md) — waveform/spectral GUI model;
 - [`docs/SOURCE_PCM_LOD.md`](docs/SOURCE_PCM_LOD.md) — exact-sample LOD and
   bounded PCM access;
-- [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview.
+- [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview;
+- [`examples/reaper_rpkx_extension/README.md`](examples/reaper_rpkx_extension/README.md)
+  — REAPER RPKX-preserving reference integration (example, not library API).
 
 ## Third-party code and license
 

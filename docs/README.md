@@ -36,6 +36,20 @@ Read [`RPKX_EOF_EXTENSIONS.md`](RPKX_EOF_EXTENSIONS.md) for the experimental
 basis behind that design. It records the pinned REAPER 7.79 EOF-reuse,
 corrected `PCM_Source_GetPeaks`, rebuild-discard, and large-extension evidence.
 
+## I want to see a REAPER integration using RPKX
+
+Read [`../examples/reaper_rpkx_extension/README.md`](../examples/reaper_rpkx_extension/README.md).
+
+That directory is a **reference implementation / example**, not part of the
+libreapeaks public library API. It keeps the REAPER `PCM_source` wrapper, Rust
+preserving store/bridge, crash-safety policy, raw PCM16 optimization, and real
+REAPER host tests together under `examples/`.
+
+For implementation boundaries and invariants see
+[`DESIGN.md`](../examples/reaper_rpkx_extension/DESIGN.md); for the exact-byte,
+failure-injection, long-source, and benchmark gates see
+[`TESTING.md`](../examples/reaper_rpkx_extension/TESTING.md).
+
 ## I want the finite-f32 / RPKL proof
 
 Read [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md).
@@ -140,7 +154,10 @@ When documentation and code disagree, use this order:
 4. [`F32_FINITE_PROOF.md`](F32_FINITE_PROOF.md) for the finite-f32 proof
    boundary;
 5. the deeper explanatory documents in this directory;
-6. historical oracle reports/workflows, which may describe intermediate
+6. host-specific reference examples such as
+   `examples/reaper_rpkx_extension/`, which intentionally are not public library
+   API;
+7. historical oracle reports/workflows, which may describe intermediate
    reverse-engineering states rather than the current implementation.
 
 Compatibility claims should always name the validated REAPER version and scope.
