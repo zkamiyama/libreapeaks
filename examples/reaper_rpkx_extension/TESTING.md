@@ -13,8 +13,10 @@ The example is checked in increasing order of cost:
 2. C++ extension build and load on each supported CI host;
 3. ordinary real-REAPER acceptance cases;
 4. extended profile/media-lifecycle cases;
-5. real-host native-vs-reference benchmarks;
-6. a completion manifest that rechecks required evidence from the same build.
+5. adversarial path/RPKX/state-refusal cases;
+6. a source-change-during-generation race/no-write case;
+7. real-host native-vs-reference benchmarks;
+8. a completion manifest that rechecks all required evidence from the same build.
 
 The final completion step intentionally duplicates important assertions. Removing
 or accidentally skipping a case must not turn the example green.
@@ -115,6 +117,56 @@ For that reason live Record transport is not a mandatory completion gate. Once a
 recorded PCM file exists and its cache contains RPKX, regeneration uses the same
 ordinary PCM16/float32 preservation path that the base/long rebuild cases test.
 
+## 5. Adversarial RPKX/path/refusal suite
+
+Run:
+
+```bash
+python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+```
+
+These cases deliberately attack assumptions that are easy to miss in a normal
+workflow test:
+
+- Unicode, spaces, and symbols in the real media/cache path;
+- a non-page-aligned `4 MiB + 4097` opaque RPKX payload;
+- fake `RPKN`, `RPKL`, and `RPKX` magic embedded inside that opaque payload;
+- exact same-size preservation and intentional grow/shrink relocation;
+- an explicitly stale RPKX `SourceStamp` that must remain stale rather than being
+  silently rebound by the REAPER adapter;
+- a truncated RPKX entry that points beyond container EOF and therefore must be
+  rejected with the SHA-256 of the **entire pre-existing cache unchanged**.
+
+A passing result proves that the preserving path treats RPKX payload bytes as
+opaque application data rather than scanning them for convincing-looking cache
+magic.
+
+## 6. Source-change race gate
+
+Run after the base suite has produced its native control:
+
+```bash
+python examples/reaper_rpkx_extension/host_tests/host_source_race.py
+```
+
+This gate uses the **normal distributable extension**, not the diagnostic build.
+It starts a real import-triggered raw-PCM16 job on a roughly 25-minute source,
+waits until the extension logs a real `BEGIN`, and then changes the source file's
+mtime while decoding is still in progress.
+
+The only acceptable outcome for that raced job is safe refusal:
+
+- the mutation must really occur after `BEGIN`;
+- the production trace must report `source changed during decode`;
+- the raced job must not reach a successful `DONE reuse=0` commit;
+- REAPER must observe `final_status=-1`;
+- the SHA-256 of the **whole existing cache, including RPKX**, must be identical
+  before and after the refused operation.
+
+The harness intentionally performs no follow-up rebuild. A later rebuild after
+the new source stamp is stable would be a different, valid job and must not mask
+the atomicity result of the raced job.
+
 ## Exact-byte contract
 
 A positive preservation case does not pass merely because REAPER can display a
@@ -187,10 +239,12 @@ Run after the other real-host suites:
 python examples/reaper_rpkx_extension/host_tests/completion.py
 ```
 
-`completion.py` checks that `report.json`, `extended-report.json`, and
-`benchmark.json` all belong to the current `GITHUB_SHA` and to the same normal
-extension, diagnostic extension, REAPER binary, and downloaded REAPER archive.
-It also rechecks required case inventory and high-value invariants.
+`completion.py` checks that the base, extended, adversarial, source-race, and
+benchmark reports are all present and that the environment-bearing reports belong
+to the current `GITHUB_SHA` and same normal extension, diagnostic extension,
+REAPER binary, and downloaded REAPER archive. It then independently rechecks the
+required case inventory and high-value exactness/refusal invariants, including the
+source-race whole-cache no-write proof.
 
 A successful run writes:
 
@@ -199,14 +253,20 @@ host-results/completion.json
 host-results/COMPLETION.md
 ```
 
-## CI workflows
+## CI and release workflows
 
 The repository keeps the example separate from the normal library test suite:
 
 - `.github/workflows/reaper-plugin.yml` — bridge/example build and fault tests on
   Ubuntu, macOS, and Windows;
-- `.github/workflows/reaper-host.yml` — real REAPER 7.79 acceptance, extended
-  workflows, benchmarks, and completion manifest on the same OS matrix.
+- `.github/workflows/reaper-host.yml` — real REAPER 7.79 base, extended,
+  adversarial, source-race, benchmarks, and completion manifest on the same OS
+  matrix;
+- `.github/workflows/release-reaper-rpkx-example.yml` — for the explicit
+  `release: v0.1.0` main commit (or an existing Release tag), rebuilds and reruns
+  the same real-host gates on all three targets before packaging the normal
+  reference binaries. The v0.1.0 release path requires all three validated
+  platform packages before creating/updating the Release.
 
 The normal `.github/workflows/ci.yml` remains the library's primary CI and also
 syntax-checks the example's Python host helpers so directory/refactoring errors
@@ -219,7 +279,7 @@ Keep these categories separate:
 - **library exactness failure** — root strict-WDL/oracle tests changed;
 - **example build failure** — the reference host adapter no longer builds;
 - **host correctness failure** — real REAPER behavior, standard bytes, RPKX
-  preservation, recovery, or lifecycle proof failed;
+  preservation, race/refusal, recovery, or lifecycle proof failed;
 - **performance-only failure** — correctness passed but the strict native-speed
   policy was not met on that runner.
 
