@@ -1,9 +1,10 @@
 #pragma once
 // Windows REAPER can keep an RPKX-bearing peak file open without FILE_SHARE_WRITE.
-// For a host-requested destructive clear we first create a hard-link guard, then
-// allow only the native clear/delete operation. Native peak generation remains
-// intercepted by Source::PeaksBuild_*; the plugin updates the guarded inode with
-// the normal WAL transaction and moves the guard name back into place.
+// For a host-requested destructive clear we first prove the current cache is
+// structurally preservable, then create a hard-link guard, and only then allow
+// the native clear/delete operation. Native peak generation remains intercepted
+// by Source::PeaksBuild_*; the plugin updates the guarded inode with the normal
+// WAL transaction and moves the guard name back into place.
 static fs::path lrpk_guard_path(const std::string& cache){return fs::u8path(cache+".lrpk.guard");}
 static std::string lrpk_cache_path_for_media(const char* media){
     if(!media||!*media)throw std::runtime_error("source has no media path");
@@ -38,6 +39,12 @@ static std::string lrpk_prepare_guarded_clear(PCM_source*inner,const char*media)
     lrpk_recover_guard(cache,false);
     const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
     if(fs::exists(target)){
+        // Validate before creating a guard or asking REAPER to delete anything.
+        // lrpk_read_standard performs the read-only standard/RPKX boundary scan;
+        // malformed RPKX and unknown suffixes therefore fail while the original
+        // canonical cache path is still untouched and visible to REAPER.
+        Buffer validation;
+        if(lrpk_read_standard(cache.c_str(),&validation.b))throw std::runtime_error("cache is not safely preservable; refusing native clear: "+error_text());
         if(fs::exists(guard)){
             if(!lrpk_same_file(target,guard))throw std::runtime_error("existing recovery guard differs from cache; refusing native clear");
         }else{
