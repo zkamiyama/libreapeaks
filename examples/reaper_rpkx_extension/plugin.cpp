@@ -79,7 +79,10 @@ class Source final:public PCM_source{
     std::unique_ptr<PCM_source> inner;
     std::unique_ptr<REAPER_PeakGet_Interface> getter;
     Stamp getter_stamp;
-    std::string cache,error,clear_error,rebuild_cache;
+    // REAPER's Windows native source can return a lossy ANSI spelling from
+    // GetFileName() even when the provider was created from a valid UTF-8 path.
+    // Keep the exact provider/SetFileName bytes as the host-facing identity.
+    std::string media_path,cache,error,clear_error,rebuild_cache;
     std::shared_ptr<Job> job;
     bool dirty=false,online=true,online_recheck=false,timer_owned=false;
     std::atomic<bool> displayed{false};
@@ -87,11 +90,12 @@ class Source final:public PCM_source{
     int observed_mode=0,observed_pps=300;
     int desired_mode()const{return std::max(requested_mode(),peak_mode_hint.load());}
 public:
-    explicit Source(PCM_source*p):inner(p),observed_mode(requested_mode()),observed_pps(cfg("peakcachegenrs",300)){
+    explicit Source(PCM_source*p,std::string stable_path={}):inner(p),media_path(std::move(stable_path)),observed_mode(requested_mode()),observed_pps(cfg("peakcachegenrs",300)){
+        if(media_path.empty()){if(const char*fn=inner->GetFileName())media_path=fn;}
         std::lock_guard<std::mutex>g(sources_mu);sources.emplace(static_cast<PCM_source*>(this),this);
     }
     ~Source()override{std::lock_guard<std::mutex>g(sources_mu);sources.erase(static_cast<PCM_source*>(this));}
-    PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p):nullptr;}catch(...){return nullptr;}}
+    PCM_source*Duplicate()override{try{Delegating g;auto*p=inner->Duplicate();return p?new Source(p,media_path):nullptr;}catch(...){return nullptr;}}
     bool IsAvailable()override{return inner->IsAvailable();}
     void SetAvailable(bool v)override{
         getter.reset();cache.clear();error.clear();clear_error.clear();online=v;
@@ -104,8 +108,13 @@ public:
         log(std::string("AVAILABLE\tvalue=")+(v?"1":"0")+"\tfile="+(GetFileName()?GetFileName():""));
     }
     const char*GetType()override{return inner->GetType();}
-    const char*GetFileName()override{return inner->GetFileName();}
-    bool SetFileName(const char*s)override{getter.reset();job.reset();cache.clear();clear_error.clear();rebuild_cache.clear();return inner->SetFileName(s);}
+    const char*GetFileName()override{return media_path.empty()?inner->GetFileName():media_path.c_str();}
+    bool SetFileName(const char*s)override{
+        getter.reset();job.reset();cache.clear();clear_error.clear();rebuild_cache.clear();
+        const bool ok=inner->SetFileName(s);
+        if(ok)media_path=s?s:"";
+        return ok;
+    }
     PCM_source*GetSource()override{return inner->GetSource();}
     void SetSource(PCM_source*p)override{inner->SetSource(p);}
     int GetNumChannels()override{return inner->GetNumChannels();}
@@ -117,7 +126,12 @@ public:
     int PropertiesWindow(HWND h)override{return inner->PropertiesWindow(h);}
     void GetSamples(PCM_source_transfer_t*b)override{inner->GetSamples(b);}
     void SaveState(ProjectStateContext*c)override{inner->SaveState(c);}
-    int LoadState(const char*s,ProjectStateContext*c)override{getter.reset();cache.clear();job.reset();clear_error.clear();rebuild_cache.clear();return inner->LoadState(s,c);}
+    int LoadState(const char*s,ProjectStateContext*c)override{
+        getter.reset();cache.clear();job.reset();clear_error.clear();rebuild_cache.clear();
+        const int rv=inner->LoadState(s,c);
+        if(rv>=0&&media_path.empty()){if(const char*fn=inner->GetFileName())media_path=fn;}
+        return rv;
+    }
     int Extended(int c,void*a,void*b,void*d)override{return inner->Extended(c,a,b,d);}
     void Peaks_Clear(bool remove)override{
         getter.reset();job.reset();error.clear();clear_error.clear();timer_owned=false;rebuild_cache.clear();
@@ -150,7 +164,7 @@ public:
             for(auto it=jobs.begin();it!=jobs.end();){if(it->second.expired())it=jobs.erase(it);else ++it;}
             auto existing=jobs[key].lock();
             if(existing&&existing->state<3&&(!dirty||existing->force))job=existing;
-            else{job=std::make_shared<Job>(inner.get(),dirty,observed_mode,dirty?rebuild_cache:std::string{});jobs[key]=job;}
+            else{job=std::make_shared<Job>(inner.get(),dirty,observed_mode,dirty?rebuild_cache:std::string{},media);jobs[key]=job;}
             dirty=false;rebuild_cache.clear();cache=job->cache;return 1;
         }catch(const std::exception&e){error=e.what();log("ERROR\tbegin\t"+error);if(console)console(("libreapeaks: "+error+"\n").c_str());return 0;}
     }
@@ -229,7 +243,7 @@ static void service_sources(){
 }
 static PCM_source*from_file(const char*p,int priority){
     if(!p||priority||delegate_depth)return nullptr;
-    try{Delegating g;auto*src=create_file(p);if(!src)return nullptr;if(!supported(src->GetType())){log(std::string("UNWRAPPED\ttype=")+src->GetType()+"\tfile="+p);return src;}return new Source(src);}catch(...){return nullptr;}
+    try{Delegating g;auto*src=create_file(p);if(!src)return nullptr;if(!supported(src->GetType())){log(std::string("UNWRAPPED\ttype=")+src->GetType()+"\tfile="+p);return src;}return new Source(src,p);}catch(...){return nullptr;}
 }
 static PCM_source*from_type(const char*p,int priority){
     if(!supported(p)||priority||delegate_depth)return nullptr;
