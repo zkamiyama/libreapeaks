@@ -1,6 +1,18 @@
 -- Normal host actions only: never call PCM_Source_BuildPeaks or ForceBuild on wrapped media.
 local root=assert(os.getenv('LRPK_CASE'))
-local media=assert(os.getenv('LRPK_MEDIA'))
+local media=os.getenv('LRPK_MEDIA')
+-- Windows' CRT environment lookup can map non-ACP characters to '?'. For the
+-- Unicode adversarial case the Python harness writes the exact UTF-8 pathname
+-- into an ASCII-named file inside the ASCII resource workspace. Read those raw
+-- bytes here so InsertMedia, REAPER, and the plugin—not getenv/codepage glue—are
+-- what the test actually exercises.
+local media_path_file=root..'/media-path.txt'
+local mf=io.open(media_path_file,'rb')
+if mf then
+  media=assert(mf:read('*a'));mf:close()
+  media=media:gsub('[\r\n]+$','')
+end
+media=assert(media)
 local op=os.getenv('LRPK_ACTION') or 'import'
 local plugin=os.getenv('LRPK_EXPECT_PLUGIN')=='1'
 local diagnostic=os.getenv('LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE')=='1'
@@ -23,9 +35,9 @@ local function main()
     -- This catches unsafe Source* downcasts in RPKX_Status/ForceBuild under the
     -- same REAPER process that runs the rest of host acceptance.
     local midi=root..'/unwrapped.mid'
-    local mf=assert(io.open(midi,'wb'))
-    mf:write('MThd',string.char(0,0,0,6,0,0,0,1,0,96),'MTrk',string.char(0,0,0,4,0,255,47,0))
-    mf:close()
+    local uf=assert(io.open(midi,'wb'))
+    uf:write('MThd',string.char(0,0,0,6,0,0,0,1,0,96),'MTrk',string.char(0,0,0,4,0,255,47,0))
+    uf:close()
     local native=reaper.PCM_Source_CreateFromFile(midi)
     if not native then error('Could not create native unwrapped MIDI source') end
     local native_type=reaper.GetMediaSourceType(native,'') or ''
