@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +55,15 @@ jobs:
             xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
           else
             python examples/reaper_rpkx_extension/host_tests/host_extended.py
+          fi
+      - name: Adversarial RPKX state and safe-refusal cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
           fi
       - name: Verified native and RPKX-size benchmarks
         shell: bash
