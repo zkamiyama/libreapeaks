@@ -84,8 +84,8 @@ struct Job{
             r.reuse=b[4]==nch&&u32(b+6)==rate&&u32(b+10)==mtime&&u32(b+14)==size&&fine==std::max(1u,rate/pps)&&cached_mode>=mode;
         }catch(const std::exception&e){r.error=e.what();}return r;
     }
-    explicit Job(PCM_source*src,bool dirty,int required_mode,const std::string&cache_override={}):force(dirty){
-        media=src->GetFileName()?src->GetFileName():"";
+    explicit Job(PCM_source*src,bool dirty,int required_mode,const std::string&cache_override={},const std::string&media_override={}):force(dirty){
+        media=media_override.empty()?(src->GetFileName()?src->GetFileName():""):media_override;
         if(media.empty()||!supported(src->GetType()))throw std::runtime_error("unsupported source");
         source_stamp=stat_file(media);
         cache=cache_override.empty()?lrpk_cache_path_for_media(media.c_str()):cache_override;
