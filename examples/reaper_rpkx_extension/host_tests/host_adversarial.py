@@ -69,11 +69,11 @@ def hostile_payload() -> bytes:
     return bytes(data)
 
 
-def with_base_tail(name: str, standard: bytes, tail: bytes, *, action: str = "manual"):
+def with_base_tail(name: str, standard: bytes, tail: bytes, *, action: str = "manual", media_relpath: str | None = None):
     original = base.rpkx_tail
     base.rpkx_tail = lambda _std, _mib: tail
     try:
-        return base.run_case(name, seed=standard, tail_mib=1, action=action)
+        return base.run_case(name, seed=standard, tail_mib=1, action=action, media_relpath=media_relpath)
     finally:
         base.rpkx_tail = original
 
@@ -102,8 +102,13 @@ def finalize_positive(row: dict, data: bytes | None, expected_standard: bytes, t
             row["adversarial_tail_sha256"] = sha(tail)
         except Exception as exc:
             errors.append(f"could not parse resulting standard region: {exc}")
-    if path_probe and path_probe not in str(row.get("trace", "")):
-        errors.append("wrapped source trace lost the adversarial Unicode/path spelling")
+    if path_probe:
+        media_path = str(row.get("media_path", ""))
+        trace = str(row.get("trace", ""))
+        if path_probe not in media_path:
+            errors.append("adversarial Unicode spelling was not present in the actual media path")
+        if path_probe not in trace:
+            errors.append("wrapped source trace lost the adversarial Unicode/path spelling")
     row["errors"] = errors
     row["passed"] = not errors
     return row
@@ -181,11 +186,19 @@ def main() -> None:
     native = read_standard("native-wave")
     native_spec = read_standard("native-spectrogram")
 
-    # 1. Minimum practical opaque payload + path characters that exercise UTF-8
-    # and shell/filesystem boundaries on all three CI operating systems.
+    # 1. Keep REAPER's portable resource/config/script root ASCII-only (Windows
+    # ReaScript itself is not what this case is meant to test), but place the
+    # actual media and .reapeaks cache beneath a Unicode/space/symbol directory.
+    # The plugin must preserve the one-byte opaque RPKX through that real path.
     tiny_tail = make_tail(native, b"\xa5")
-    unicode_name = "adversarial-unicode-Δ_日本語 space # percent %"
-    row, data = with_base_tail(unicode_name, native, tiny_tail, action="manual")
+    unicode_rel = "media-Δ_日本語 space # percent %/audio.wav"
+    row, data = with_base_tail(
+        "adversarial-unicode-media-path",
+        native,
+        tiny_tail,
+        action="manual",
+        media_relpath=unicode_rel,
+    )
     rows.append(finalize_positive(row, data, native, tiny_tail, path_probe="Δ_日本語"))
 
     # 2-4. A non-page-aligned 4 MiB+4097 payload with fake RPKN/RPKL/RPKX magic
@@ -237,13 +250,13 @@ def main() -> None:
         "hostile_payload_bytes": len(payload),
         "hostile_payload_sha256": sha(payload),
         "scope": (
-            "New adversarial real-REAPER 7.79 cases: one-byte RPKX payload, Unicode/space/symbol path, "
+            "New adversarial real-REAPER 7.79 cases: one-byte RPKX payload on a Unicode/space/symbol media/cache path, "
             "4MiB+4097 opaque payload with deceptive cache/container magic across page boundaries, exact "
             "same-size/grow/shrink preservation, stale SourceStamp preservation without silent rebinding, "
             "and truncated RPKX chunk safe refusal with whole-cache no-write proof."
         ),
     }
-    (OUT / "adversarial-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    (OUT / "adversarial-report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     lines = [
         "# Adversarial REAPER RPKX host acceptance",
         f"Commit: {INFO['commit']}",
