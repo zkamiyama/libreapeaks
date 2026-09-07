@@ -109,6 +109,39 @@ def finalize_positive(row: dict, data: bytes | None, expected_standard: bytes, t
     return row
 
 
+def finalize_stale_binding(row: dict, data: bytes | None, expected_standard: bytes, tail: bytes, wrong_stamp: bytes) -> dict:
+    """Require the REAPER adapter to preserve an explicitly stale RPKX binding verbatim.
+
+    The generic libreapeaks mutation API rejects SourceStamp mismatch by default.
+    This host adapter deliberately opts into preserve-stale while REAPER rebuilds
+    its standard prefix: it must not silently rebind opaque application analysis
+    to new media. A stale RPKX therefore remains stale and byte-identical.
+    """
+    row = finalize_positive(row, data, expected_standard, tail)
+    errors = list(row.get("errors", []))
+    if data is not None:
+        try:
+            end = base.standard_end(data)
+            persisted = data[end + 24 : end + 32]
+            current = data[10:18]
+            if persisted != wrong_stamp:
+                errors.append("stale RPKX SourceStamp was rewritten instead of preserved verbatim")
+            if persisted == current:
+                errors.append("stale RPKX was silently rebound to the current standard SourceStamp")
+            row["standard_source_stamp_hex"] = current.hex()
+            row["rpkx_source_stamp_hex"] = persisted.hex()
+            row["binding_remains_stale"] = persisted != current
+        except Exception as exc:
+            errors.append(f"could not verify stale RPKX binding: {exc}")
+    trace = str(row.get("trace", ""))
+    if not base.real_done_fields(trace):
+        errors.append("stale-binding case did not prove a real preserving generation/commit")
+    row["errors"] = errors
+    row["passed"] = not errors
+    row["expected_stale_preservation"] = True
+    return row
+
+
 def expected_refusal(name: str, raw_row: dict, after: bytes | None, initial: bytes) -> dict:
     result = str(raw_row.get("result", ""))
     trace = str(raw_row.get("trace", ""))
@@ -178,14 +211,15 @@ def main() -> None:
     )
     rows.append(finalize_positive(row, data, native, hostile_spec_tail))
 
-    # 5. A valid container bound to a different SourceStamp must be rejected by
-    # the normal distributable plugin, with no fallback/native rewrite.
+    # 5. REAPER host rebuilds deliberately preserve an existing stale RPKX
+    # binding verbatim. The adapter must not silently rewrite that stamp to make
+    # old opaque analysis look current. This is distinct from the generic
+    # libreapeaks mutation API, whose default policy rejects a mismatch.
     wrong_stamp = bytearray(native[10:18])
     wrong_stamp[0] ^= 0x80
     mismatch_tail = make_tail(native, b"stamp-mismatch-adversarial", stamp=bytes(wrong_stamp))
-    mismatch_initial = native + mismatch_tail
-    raw, after = with_base_tail("adversarial-source-stamp-mismatch", native, mismatch_tail, action="manual")
-    rows.append(expected_refusal("adversarial-source-stamp-mismatch", raw, after, mismatch_initial))
+    row, data = with_base_tail("adversarial-source-stamp-stays-stale", native, mismatch_tail, action="manual")
+    rows.append(finalize_stale_binding(row, data, native, mismatch_tail, bytes(wrong_stamp)))
 
     # 6. A chunk table that claims bytes beyond the RPKX container EOF must be
     # rejected without trying to reinterpret, truncate, relocate, or rewrite it.
@@ -205,8 +239,8 @@ def main() -> None:
         "scope": (
             "New adversarial real-REAPER 7.79 cases: one-byte RPKX payload, Unicode/space/symbol path, "
             "4MiB+4097 opaque payload with deceptive cache/container magic across page boundaries, exact "
-            "same-size/grow/shrink preservation, SourceStamp mismatch safe refusal, and truncated RPKX chunk "
-            "safe refusal with whole-cache no-write proof."
+            "same-size/grow/shrink preservation, stale SourceStamp preservation without silent rebinding, "
+            "and truncated RPKX chunk safe refusal with whole-cache no-write proof."
         ),
     }
     (OUT / "adversarial-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
