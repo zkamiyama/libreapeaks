@@ -1,6 +1,8 @@
 name: release-reaper-rpkx-example
 
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -14,10 +16,11 @@ permissions:
   contents: read
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && 'v0.1.0' || (github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name) }}
 
 jobs:
   verify-and-package:
+    if: ${{ github.event_name != 'push' || startsWith(github.event.head_commit.message, 'release: v0.1.0') }}
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.event_name == 'push' && github.sha || env.RELEASE_TAG }}
           submodules: recursive
           fetch-depth: 0
       - name: Capture released source commit
@@ -169,7 +172,7 @@ jobs:
 
   publish:
     needs: verify-and-package
-    if: ${{ always() }}
+    if: ${{ needs.verify-and-package.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -177,36 +180,30 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           pattern: release-reaper-rpkx-*
           path: release-assets
           merge-multiple: true
-      - name: Collect successfully verified platform packages
-        id: assets
+      - name: Require all validated platform packages and create checksums
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-assets
-          shopt -s nullglob
-          files=(release-assets/*.zip)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No platform reached the release completion gate; no reference-extension assets will be attached."
-            echo "have_assets=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          cd release-assets
+          test -f libreapeaks-reaper-rpkx-example-linux-x86_64.zip
+          test -f libreapeaks-reaper-rpkx-example-macos-arm64.zip
+          test -f libreapeaks-reaper-rpkx-example-windows-x86_64.zip
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create or update the v0.1.0 library Release with verified reference binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
           fi
-          (
-            cd release-assets
-            sha256sum *.zip > SHA256SUMS.txt
-            cat SHA256SUMS.txt
-          )
-          echo "have_assets=true" >> "$GITHUB_OUTPUT"
-      - name: Attach verified reference binaries to the existing library Release
-        if: steps.assets.outputs.have_assets == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-          gh release upload "$RELEASE_TAG" release-assets/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
