@@ -35,7 +35,7 @@ jobs:
             extension: dll
             asset: libreapeaks-reaper-rpkx-example-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,6 +82,15 @@ jobs:
           else
             GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_extended.py
           fi
+      - name: Adversarial RPKX state and safe-refusal cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+          else
+            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+          fi
       - name: Native and RPKX-size benchmarks
         shell: bash
         run: |
@@ -125,7 +134,7 @@ jobs:
           shutil.copy2(root / 'THIRD_PARTY_NOTICES.md', stage / 'THIRD_PARTY_NOTICES.md')
           verification = stage / 'verification'
           verification.mkdir()
-          for name in ('completion.json', 'benchmark.json'):
+          for name in ('completion.json', 'benchmark.json', 'adversarial-report.json'):
               shutil.copy2(root / 'host-results' / name, verification / name)
           (stage / 'RELEASE_INFO.txt').write_text(
               'libreapeaks REAPER RPKX reference extension\n'
