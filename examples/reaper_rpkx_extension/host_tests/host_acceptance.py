@@ -11,6 +11,12 @@ OUT=ROOT/'host-results'; INFO=json.loads((OUT/'environment.json').read_text())
 SCRIPT=pathlib.Path(__file__).with_name('host_actions.lua')
 FIXED_MTIME=1700000000
 
+# Hosted Windows Python may inherit a legacy cp1252 console. Diagnostic output
+# must never crash the harness merely because the media/cache path is Unicode.
+for stream in (sys.stdout,sys.stderr):
+    try: stream.reconfigure(encoding='utf-8',errors='backslashreplace')
+    except (AttributeError,OSError): pass
+
 def sha(b): return hashlib.sha256(b).hexdigest()
 def standard_end(b):
     if len(b)<18 or b[:4] not in (b'RPKN',b'RPKL'): raise ValueError('missing/invalid standard cache')
@@ -31,6 +37,7 @@ def rpkx_tail(std,mib):
     return head+b'\x71'*16+b'TEST'+struct.pack('<IIIQQ',1,0,0,80,len(payload))+payload
 
 def fixture(path,fmt='pcm16'):
+    path.parent.mkdir(parents=True,exist_ok=True)
     rate=48000;frames=rate*10;ch=2
     vals=[int(16000*math.sin(2*math.pi*997*i/rate)) for i in range(frames)]
     if fmt=='pcm16':
@@ -51,9 +58,14 @@ def real_done_fields(trace):
         if fields.get('reuse')=='0': out.append(fields)
     return out
 
-def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm16',show=1,genmode=3,stale=False,fail=False):
+def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm16',show=1,genmode=3,stale=False,fail=False,media_relpath=None):
     case=OUT/name;case.mkdir(parents=True,exist_ok=False)
-    media=case/'audio.wav';fixture(media,fmt)
+    # Keep the REAPER resource/config/script workspace ASCII-safe while allowing
+    # a deliberately hostile Unicode media/cache pathname below it. This tests
+    # the plugin filesystem boundary rather than REAPER's ReaScript loader.
+    rel=pathlib.Path(media_relpath) if media_relpath is not None else pathlib.Path('audio.wav')
+    if rel.is_absolute() or '..' in rel.parts: raise ValueError('media_relpath must stay inside the case workspace')
+    media=case/rel;fixture(media,fmt)
     cache=pathlib.Path(str(media)+'.reapeaks');tail=None
     if seed is not None:
         tail=rpkx_tail(seed,tail_mib) if tail_mib is not None else b''
@@ -82,7 +94,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
     paths=[pathlib.Path(kv[k]) for k in ('peak_write','peak_read') if kv.get(k)] + [cache]
     actual=next((p for p in paths if p.is_file()),cache)
     after=actual.read_bytes() if actual.exists() else None
-    row={'name':name,'exit':rc,'wall_s':time.perf_counter()-started,'action':action,'showpeaks':show,'genmode':genmode,'plugin':plugin,'diagnostic':fail,'cache_path':str(actual),'before_present':before is not None,'after_present':after is not None,'result':result,'trace':trace,'errors':[]}
+    row={'name':name,'exit':rc,'wall_s':time.perf_counter()-started,'action':action,'showpeaks':show,'genmode':genmode,'plugin':plugin,'diagnostic':fail,'cache_path':str(actual),'media_path':str(media),'before_present':before is not None,'after_present':after is not None,'result':result,'trace':trace,'errors':[]}
     def require(test,msg):
         if not test: row['errors'].append(msg)
     require(rc==0,'REAPER did not exit successfully')
@@ -120,7 +132,7 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
             except (ValueError,struct.error) as e: require(False,str(e))
     row['passed']=not row['errors']
     (case/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
-    print(json.dumps(row),flush=True)
+    print(json.dumps(row,ensure_ascii=False),flush=True)
     if row['errors']:
         for filename in ('console.txt','actions.txt','startup-windows.json','startup-macos.txt','host-process.json'):
             p=case/filename
@@ -173,6 +185,6 @@ def main():
     text.append('\nPositive cases use the regular plugin; negative controls a separately hashed diagnostic build. Failures are not skips.')
     (OUT/'SUMMARY.md').write_text('\n'.join(text)+'\n')
     if os.getenv('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('\n'.join(text)+'\n')
+        with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as f:f.write('\n'.join(text)+'\n')
     if not report['passed']:sys.exit(1)
 if __name__=='__main__':main()
