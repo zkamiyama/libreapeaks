@@ -93,7 +93,10 @@ def main() -> None:
         os.environ,
         LRPK_CASE=str(case),
         LRPK_MEDIA=str(media),
-        LRPK_ACTION="manual",
+        # Import starts the real production peak job but deliberately performs
+        # no second explicit REAPER rebuild after the injected source change.
+        # The gate therefore observes the atomicity of the raced job itself.
+        LRPK_ACTION="import",
         LRPK_EXPECT_PLUGIN="1",
         LIBREAPEAKS_PLUGIN_LOG=str(trace_path),
     )
@@ -141,7 +144,7 @@ def main() -> None:
         "whole_cache_unchanged": after == initial,
         "result": result,
         "trace": trace,
-        "scope": "Normal distributable extension, 25-minute PCM16 WAVE, mtime mutation after real BEGIN and before commit; requires explicit source-change refusal and whole-cache/RPKX no-write proof.",
+        "scope": "Normal distributable extension, initial/import-triggered 25-minute PCM16 WAVE generation, mtime mutation after real BEGIN and before commit; requires explicit source-change refusal and whole-cache/RPKX no-write proof, with no follow-up rebuild allowed to mask the raced job.",
     }
     (OUT / "source-race-report.json").write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = [
