@@ -65,6 +65,24 @@ jobs:
           else
             python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
           fi
+      - name: Print adversarial report
+        if: always()
+        shell: bash
+        run: |
+          if [ -f host-results/adversarial-report.json ]; then
+            cat host-results/adversarial-report.json
+          else
+            echo 'host-results/adversarial-report.json was not produced'
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-adversarial-${{ matrix.os }}
+          path: |
+            host-results/adversarial-report.json
+            host-results/ADVERSARIAL_SUMMARY.md
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verified native and RPKX-size benchmarks
         shell: bash
         run: |
