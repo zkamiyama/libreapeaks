@@ -82,6 +82,7 @@ jobs:
             examples/reaper_rpkx_extension/host_tests/host_process.py \
             examples/reaper_rpkx_extension/host_tests/host_acceptance.py \
             examples/reaper_rpkx_extension/host_tests/host_extended.py \
+            examples/reaper_rpkx_extension/host_tests/host_adversarial.py \
             examples/reaper_rpkx_extension/host_tests/benchmark.py \
             examples/reaper_rpkx_extension/host_tests/completion.py \
             tests/python/test_demo_cache_config.py \
