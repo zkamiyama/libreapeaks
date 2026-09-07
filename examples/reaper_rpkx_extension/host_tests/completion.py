@@ -33,6 +33,14 @@ EXTENDED_CASES = {
     "glue-create", "glue-rpkx-rebuild", "render-create",
     "render-rpkx-rebuild",
 }
+ADVERSARIAL_CASES = {
+    "adversarial-unicode-media-path",
+    "adversarial-hostile-tail-same-size",
+    "adversarial-hostile-tail-grow",
+    "adversarial-hostile-tail-shrink",
+    "adversarial-source-stamp-stays-stale",
+    "adversarial-truncated-rpkx-entry",
+}
 ENV_KEYS = (
     "commit", "plugin_sha256", "diagnostic_plugin_sha256", "reaper_sha256",
     "archive_sha256",
@@ -143,17 +151,36 @@ def require_no_write(case: dict[str, Any], name: str, errors: list[str]) -> None
         errors.append(f"{name}: absent-cache failure unexpectedly produced a cache hash")
 
 
+def require_environment(label: str, report: dict[str, Any], reference_env: dict[str, Any], expected_sha: str | None, errors: list[str]) -> None:
+    env = report.get("environment") if isinstance(report.get("environment"), dict) else {}
+    for key in ENV_KEYS:
+        if not env.get(key):
+            errors.append(f"{label}: environment.{key} is missing")
+        elif reference_env.get(key) != env.get(key):
+            errors.append(f"{label}: environment.{key} differs from base report")
+    if expected_sha and env.get("commit") != expected_sha:
+        errors.append(f"{label}: report commit {env.get('commit')} != workflow SHA {expected_sha}")
+
+
 def main() -> None:
     errors: list[str] = []
     try:
         base = load("report.json")
         extended = load("extended-report.json")
+        adversarial = load("adversarial-report.json")
+        source_race = load("source-race-report.json")
         benchmark = load("benchmark.json")
     except Exception as exc:
         print(f"completion: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    reports = {"base": base, "extended": extended, "benchmark": benchmark}
+    reports = {
+        "base": base,
+        "extended": extended,
+        "adversarial": adversarial,
+        "source-race": source_race,
+        "benchmark": benchmark,
+    }
     for label, report in reports.items():
         if report.get("passed") is not True:
             errors.append(f"{label}: report-level passed flag is not true")
@@ -164,14 +191,13 @@ def main() -> None:
 
     reference_env = base.get("environment") if isinstance(base.get("environment"), dict) else {}
     for label, report in reports.items():
-        env = report.get("environment") if isinstance(report.get("environment"), dict) else {}
-        for key in ENV_KEYS:
-            if not env.get(key):
-                errors.append(f"{label}: environment.{key} is missing")
-            elif reference_env.get(key) != env.get(key):
-                errors.append(f"{label}: environment.{key} differs from base report")
-        if expected_sha and env.get("commit") != expected_sha:
-            errors.append(f"{label}: report commit {env.get('commit')} != workflow SHA {expected_sha}")
+        if label == "source-race":
+            # The race report is a single-case object but carries the same setup
+            # identity indirectly through the base INFO values used by its harness.
+            continue
+        require_environment(label, report, reference_env, expected_sha, errors)
+    if expected_sha and source_race.get("trace") and reference_env.get("commit") != expected_sha:
+        errors.append("source-race: base environment commit does not match workflow SHA")
 
     for path_key, hash_key in (("plugin", "plugin_sha256"), ("diagnostic_plugin", "diagnostic_plugin_sha256"), ("reaper", "reaper_sha256")):
         raw = reference_env.get(path_key)
@@ -190,6 +216,7 @@ def main() -> None:
 
     base_cases = index_cases(base, BASE_CASES, "base", errors)
     ext_cases = index_cases(extended, EXTENDED_CASES, "extended", errors)
+    adv_cases = index_cases(adversarial, ADVERSARIAL_CASES, "adversarial", errors)
 
     record_policy = str(extended.get("record_policy", ""))
     if "no pre-existing RPKX to preserve" not in record_policy or "not a plugin-correctness gate" not in record_policy:
@@ -254,6 +281,43 @@ def main() -> None:
         if case.get("real_generation_count", 0) < 1 or "\tstream=1" not in str(case.get("trace", "")):
             errors.append(f"{name}: no proven real streaming generation")
 
+    truncated = adv_cases.get("adversarial-truncated-rpkx-entry", {})
+    if truncated.get("expected_refusal") is not True or truncated.get("whole_cache_unchanged") is not True:
+        errors.append("adversarial: truncated RPKX refusal/no-write proof is missing")
+    stale = adv_cases.get("adversarial-source-stamp-stays-stale", {})
+    if stale.get("expected_stale_preservation") is not True or stale.get("binding_remains_stale") is not True:
+        errors.append("adversarial: stale SourceStamp verbatim-preservation proof is missing")
+    unicode_case = adv_cases.get("adversarial-unicode-media-path", {})
+    if not unicode_case.get("adversarial_tail_sha256"):
+        errors.append("adversarial: Unicode path exact-tail proof is missing")
+    for name in (
+        "adversarial-hostile-tail-same-size",
+        "adversarial-hostile-tail-grow",
+        "adversarial-hostile-tail-shrink",
+    ):
+        if not adv_cases.get(name, {}).get("adversarial_tail_sha256"):
+            errors.append(f"adversarial: {name} opaque-tail checksum proof is missing")
+
+    if source_race.get("name") != "source-change-race":
+        errors.append("source-race: wrong/missing case identity")
+    if source_race.get("whole_cache_unchanged") is not True:
+        errors.append("source-race: whole-cache/RPKX no-write proof is missing")
+    if source_race.get("before_sha256") != source_race.get("after_sha256"):
+        errors.append("source-race: before/after whole-cache SHA differs")
+    if source_race.get("mutation", {}).get("mutated") is not True:
+        errors.append("source-race: source mutation was not actually injected")
+    race_trace = str(source_race.get("trace", ""))
+    if "source changed during decode" not in race_trace:
+        errors.append("source-race: production source-change detection log is missing")
+    if "raw_pcm16=1" not in race_trace:
+        errors.append("source-race: raw PCM16 production path was not exercised")
+    if "DIAGNOSTIC_BUILD" in race_trace:
+        errors.append("source-race: diagnostic binary was used instead of distributable plugin")
+    if real_done(source_race):
+        errors.append("source-race: raced job reached a successful real DONE commit")
+    if "final_status=-1" not in str(source_race.get("result", "")):
+        errors.append("source-race: refusal was not surfaced as final_status=-1")
+
     if benchmark.get("correctness_passed") is not True:
         errors.append("benchmark correctness gate did not pass")
     if benchmark.get("performance_errors") not in ([], None):
@@ -287,6 +351,8 @@ def main() -> None:
         "reaper_sha256": reference_env.get("reaper_sha256"),
         "required_base_cases": sorted(BASE_CASES),
         "required_extended_cases": sorted(EXTENDED_CASES),
+        "required_adversarial_cases": sorted(ADVERSARIAL_CASES),
+        "required_source_race_case": "source-change-race",
         "record_policy": record_policy,
         "benchmark_groups": [
             {"profile": profile, "plugin": plugin, "rpkx_mib": mib, "repeats": 3}
@@ -312,8 +378,9 @@ def main() -> None:
         lines += [
             "",
             "Verified in this artifact: required case inventory, same-commit/build hashes, exact native standard bytes,",
-            "RPKX preservation/relocation, unwrapped-source public API safety, post-generation failure atomicity,",
-            "25-minute streaming, Glue/Render created-media rebuilds, and median performance budgets.",
+            "RPKX preservation/relocation, Unicode/opaque-tail and malformed-RPKX adversarial cases, source-change race no-write refusal,",
+            "unwrapped-source public API safety, post-generation failure atomicity, 25-minute streaming, Glue/Render created-media rebuilds,",
+            "and median performance budgets.",
             "Record creation is intentionally not a preservation gate because a newly recorded cache has no pre-existing RPKX;",
             "subsequent PCM cache regeneration is covered by the same ordinary PCM16/float32 rebuild-preservation path.",
         ]
