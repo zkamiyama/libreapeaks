@@ -72,6 +72,12 @@ def run_case(name,*,plugin=True,action='import',seed=None,tail_mib=None,fmt='pcm
         cache.write_bytes(seed+tail)
     before=cache.read_bytes() if cache.exists() else None
     if stale: os.utime(media,(FIXED_MTIME+120,FIXED_MTIME+120))
+    # Windows Lua os.getenv() can apply the active ANSI code page. For an
+    # adversarial non-ASCII path, hand REAPER the exact UTF-8 bytes through an
+    # ASCII-named file in the ASCII case root instead. host_actions.lua reads it
+    # in binary mode before calling InsertMedia/GetPeakFileNameEx.
+    if media_relpath is not None:
+        (case/'media-path.txt').write_bytes(str(media).encode('utf-8'))
     cfg=case/'reaper.ini'
     cfg.write_text(
         '[REAPER]\npeakcachegenmode='+str(genmode)+'\npeakcachegenrs=300\nshowpeaks='+str(show)+'\n'
