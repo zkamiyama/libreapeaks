@@ -119,6 +119,9 @@ jobs:
       - name: Verify same-build completion manifest
         if: always()
         run: python examples/reaper_rpkx_extension/host_tests/completion.py
+      - name: Verify independent-process race completion proof
+        if: always()
+        run: python examples/reaper_rpkx_extension/host_tests/completion_cross_process.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
