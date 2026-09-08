@@ -31,14 +31,16 @@ without losing an existing RPKX suffix. The implementation demonstrates:
 
 - byte-for-byte preservation of an existing RPKX suffix;
 - exact same-platform REAPER 7.79 standard-cache bytes for the validated paths;
-- conservative source-stamp validation instead of preserving stale metadata;
+- conservative source-stamp validation instead of committing a cache generated
+  from a source identity that can no longer be proven;
 - crash-safe redo/WAL replacement and recovery;
+- persistent cross-process writer locking for a shared `.reapeaks` cache;
 - same-size rebuilds that overwrite the standard region without moving a large
   RPKX payload;
 - safe refusal for unknown suffixes and unsupported/unwrapped source types;
 - a raw PCM16 WAVE fast path and bounded streaming waveform generation;
-- real-host regression tests for ordinary REAPER actions, including negative
-  controls and performance checks.
+- real-host regression tests for ordinary REAPER actions, hostile RPKX states,
+  process-level races, negative controls, and performance checks.
 
 This is a reference integration, not a promise that every REAPER version, codec,
 third-party `PCM_source` wrapper, preference combination, or host environment is
@@ -48,32 +50,38 @@ supported.
 
 ```text
 examples/reaper_rpkx_extension/
-├── README.md                 # scope, build and developer usage
-├── USER_GUIDE.md             # install/use prebuilt release binaries
-├── DESIGN.md                 # integration boundaries and safety invariants
-├── TESTING.md                # real-REAPER test/benchmark contract
-├── CMakeLists.txt            # C++ REAPER extension build
-├── Cargo.toml                # Rust bridge crate; depends on libreapeaks
-├── bridge.h                  # C ABI between the C++ host adapter and Rust
-├── plugin.cpp                # REAPER PCM_source provider/wrapper
-├── plugin_job.h              # generation jobs and host-facing scheduling
-├── raw_pcm16_wave.h          # canonical PCM16 WAVE fast-path reader
-├── windows_guard.h           # Windows guarded-clear handling
-├── src/                      # Rust bridge/store implementation
+├── README.md
+├── USER_GUIDE.md
+├── DESIGN.md
+├── TESTING.md
+├── CMakeLists.txt
+├── Cargo.toml
+├── bridge.h
+├── plugin.cpp
+├── plugin_job.h
+├── raw_pcm16_wave.h
+├── windows_guard.h
+├── src/
 │   ├── lib.rs
 │   ├── read_guard.rs
 │   ├── read_only.rs
 │   ├── store.rs
 │   └── stream_wave.rs
-└── host_tests/               # disposable real-REAPER acceptance harness
+└── host_tests/
     ├── setup_host.py
     ├── host_acceptance.py
     ├── host_actions.lua
     ├── host_extended.py
     ├── host_extended.lua
+    ├── host_adversarial.py
+    ├── host_source_race.py
+    ├── host_source_race.lua
+    ├── host_cross_process_race.py
+    ├── host_cross_process.lua
     ├── benchmark.py
     ├── benchmark.lua
     ├── completion.py
+    ├── completion_cross_process.py
     ├── host_process.py
     └── macos_startup.applescript
 ```
@@ -162,14 +170,19 @@ uses the same PCM preservation path demonstrated by the ordinary rebuild tests.
 
 Read [`DESIGN.md`](DESIGN.md) before adapting the example. In particular, do not
 copy only the visible source wrapper while omitting source-stamp validation,
-write-ahead recovery, read guards, or the Windows clear guard. Those pieces are
-part of the preservation contract.
+write-ahead recovery, read guards, cross-process locking, or the Windows clear
+guard. Those pieces are part of the preservation contract.
 
 ## Verification
 
 [`TESTING.md`](TESTING.md) documents the bridge tests, real REAPER 7.79
 acceptance suites, exact-byte controls, failure injection, long-source streaming,
-and native-vs-reference benchmarks.
+cross-process race gate, and native-vs-reference benchmarks.
+
+The timing-sensitive real-host `source-change race` is retained as an
+**Ubuntu-only advisory stress probe**. It is not a completion or Release hard
+gate. The production source-stamp checks remain in place, and deterministic
+source-identity/stale-binding tests remain required.
 
 The host tests download/run REAPER and are intentionally separate from normal
 `libreapeaks` library tests. A failure of this example's host integration should
@@ -178,27 +191,33 @@ CI keeps the example buildable and its claimed integration behavior testable.
 
 ## Release binaries
 
-`.github/workflows/release-reaper-rpkx-example.yml` is an **optional post-release
-asset workflow**. It does not create or gate the libreapeaks library Release.
-When a library Release is published, the workflow checks out that Release tag and
-verifies the reference extension independently on the validated Windows x86_64,
-Linux x86_64, and macOS arm64 targets. The same workflow can also be dispatched
-manually for an already existing Release tag, which is useful when the Release
-was created by another automation.
+`.github/workflows/release-reaper-rpkx-example.yml` builds release assets from
+the release/main source and reruns the required real-REAPER 7.79 gates on the
+validated Windows x86_64, Linux x86_64, and macOS arm64 targets.
 
-Before packaging, each target runs the same real-REAPER 7.79 base, extended,
-benchmark, and completion gates used by the host acceptance suite. A platform
-archive is created only after that platform reaches same-build completion PASS.
-The final publish job attaches whichever verified platform archives were
-successfully produced. If one platform fails its gate, that platform is omitted
-without blocking verified assets from other platforms, and the libreapeaks
-library Release itself remains untouched.
+The Release hard gates include:
+
+- normal bridge/example tests;
+- base and extended real-host workflows;
+- hostile RPKX/path/refusal cases;
+- the independent two-REAPER shared-cache race and its separate completion proof;
+- exact native-byte/RPKX correctness checks;
+- native-vs-reference performance budgets;
+- the normal completion manifest.
+
+The timing-sensitive `source-change race` is intentionally excluded from release
+blocking. This changes the test policy, not the production source-stamp
+validation behavior.
+
+For `v0.1.0`, all three validated platform jobs must pass before the workflow
+creates or updates the GitHub Release. A missing/failing platform therefore
+prevents the three-platform release bundle rather than silently publishing a
+partial set.
 
 The resulting archives contain the normal `reaper_rpkx` extension,
 [`USER_GUIDE.md`](USER_GUIDE.md), license/third-party notices, and selected
-completion/benchmark evidence. They do **not** contain the diagnostic extension.
-A `SHA256SUMS.txt` covering the attached archives is also added to the existing
-GitHub Release.
+completion/benchmark/adversarial/cross-process evidence. They do **not** contain
+the diagnostic extension. `SHA256SUMS.txt` covers all three platform archives.
 
 ## Related library documentation
 
