@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 85
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,11 +74,20 @@ jobs:
           else
             python examples/reaper_rpkx_extension/host_tests/host_source_race.py
           fi
+      - name: Independent REAPER processes must serialize shared-cache commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          fi
       - name: Print adversarial reports
         if: always()
         shell: bash
         run: |
-          for report in host-results/adversarial-report.json host-results/source-race-report.json; do
+          for report in host-results/adversarial-report.json host-results/source-race-report.json host-results/cross-process-race-report.json; do
             if [ -f "$report" ]; then
               cat "$report"
             else
@@ -94,6 +103,8 @@ jobs:
             host-results/ADVERSARIAL_SUMMARY.md
             host-results/source-race-report.json
             host-results/SOURCE_RACE_SUMMARY.md
+            host-results/cross-process-race-report.json
+            host-results/CROSS_PROCESS_RACE_SUMMARY.md
           if-no-files-found: warn
           retention-days: 14
       - name: Verified native and RPKX-size benchmarks
