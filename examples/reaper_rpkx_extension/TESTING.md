@@ -15,10 +15,11 @@ The example is checked in increasing order of cost:
 4. extended profile/media-lifecycle cases;
 5. adversarial path/RPKX/state-refusal cases;
 6. a source-change-during-generation race/no-write case;
-7. real-host native-vs-reference benchmarks;
-8. a completion manifest that rechecks all required evidence from the same build.
+7. an independent-REAPER cross-process shared-cache race;
+8. real-host native-vs-reference benchmarks;
+9. completion manifests that recheck all required evidence from the same build.
 
-The final completion step intentionally duplicates important assertions. Removing
+The final completion steps intentionally duplicate important assertions. Removing
 or accidentally skipping a case must not turn the example green.
 
 ## 1. Bridge/store tests
@@ -167,6 +168,43 @@ The harness intentionally performs no follow-up rebuild. A later rebuild after
 the new source stamp is stable would be a different, valid job and must not mask
 the atomicity result of the raced job.
 
+## 7. Cross-process shared-cache race
+
+Run after the base suite has produced the native waveform and spectrogram
+controls:
+
+```bash
+python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+python examples/reaper_rpkx_extension/host_tests/completion_cross_process.py
+```
+
+This is deliberately different from the source-change race. Two **independent
+REAPER 7.79 processes** load the normal extension and wait at a filesystem
+barrier. The harness then releases both processes together against the same
+five-minute PCM16 media file and the same `.reapeaks` cache carrying a 16 MiB
+RPKX suffix. One process requests a same-size waveform rebuild while the other
+requests a growing spectrogram rebuild.
+
+The persistent `<cache>.rpkx.lock` is the only mechanism allowed to serialize
+those two process-level writers. The gate requires:
+
+- both independent REAPER processes to load the normal, non-diagnostic extension;
+- both to prove the same deterministic start barrier and complete a real
+  `DONE reuse=0` generation/commit;
+- no production `ERROR` record in either process;
+- the cache observed immediately after the race to contain either the exact
+  same-platform native waveform prefix or exact native spectrogram prefix — no
+  mixed/torn third state is accepted;
+- the entire 16 MiB RPKX suffix to remain byte-for-byte identical;
+- a third clean REAPER process to rebuild the raced cache back to exact native
+  waveform bytes while preserving that same suffix, proving there is no latent
+  redo/WAL corruption left behind.
+
+`completion_cross_process.py` independently rereads the report, checks the
+current `GITHUB_SHA`, normal-plugin and REAPER identities, the >=16 MiB suffix,
+all three process traces, and the exact post-race/final suffix hashes. The release
+workflow runs this second-level proof before it is allowed to package a binary.
+
 ## Exact-byte contract
 
 A positive preservation case does not pass merely because REAPER can display a
@@ -231,12 +269,13 @@ the expected redo/sync path.
 Do not document one historical benchmark run as a permanent speed guarantee.
 The workflow result for the current commit is the source of truth.
 
-## Completion manifest
+## Completion manifests
 
 Run after the other real-host suites:
 
 ```bash
 python examples/reaper_rpkx_extension/host_tests/completion.py
+python examples/reaper_rpkx_extension/host_tests/completion_cross_process.py
 ```
 
 `completion.py` checks that the base, extended, adversarial, source-race, and
@@ -246,11 +285,16 @@ REAPER binary, and downloaded REAPER archive. It then independently rechecks the
 required case inventory and high-value exactness/refusal invariants, including the
 source-race whole-cache no-write proof.
 
-A successful run writes:
+`completion_cross_process.py` separately makes the new independent-process race a
+release-blocking proof rather than trusting only the test script's own `passed`
+field.
+
+Successful runs write:
 
 ```text
 host-results/completion.json
 host-results/COMPLETION.md
+host-results/cross-process-completion.json
 ```
 
 ## CI and release workflows
@@ -260,8 +304,8 @@ The repository keeps the example separate from the normal library test suite:
 - `.github/workflows/reaper-plugin.yml` — bridge/example build and fault tests on
   Ubuntu, macOS, and Windows;
 - `.github/workflows/reaper-host.yml` — real REAPER 7.79 base, extended,
-  adversarial, source-race, benchmarks, and completion manifest on the same OS
-  matrix;
+  adversarial, source-race, independent-process race, benchmarks, and both
+  completion proofs on the same OS matrix;
 - `.github/workflows/release-reaper-rpkx-example.yml` — for the explicit
   `release: v0.1.0` main commit (or an existing Release tag), rebuilds and reruns
   the same real-host gates on all three targets before packaging the normal
