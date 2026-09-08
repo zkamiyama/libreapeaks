@@ -38,7 +38,7 @@ jobs:
             extension: dll
             asset: libreapeaks-reaper-rpkx-example-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 100
+    timeout-minutes: 115
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,6 +103,15 @@ jobs:
           else
             GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_source_race.py
           fi
+      - name: Independent REAPER processes must serialize shared-cache commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          else
+            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          fi
       - name: Native and RPKX-size benchmarks
         shell: bash
         run: |
@@ -115,6 +124,9 @@ jobs:
       - name: Verify same-build completion manifest
         shell: bash
         run: GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/completion.py
+      - name: Verify independent-process race completion proof
+        shell: bash
+        run: GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/completion_cross_process.py
       - name: Package the verified normal extension
         shell: bash
         env:
@@ -146,7 +158,11 @@ jobs:
           shutil.copy2(root / 'THIRD_PARTY_NOTICES.md', stage / 'THIRD_PARTY_NOTICES.md')
           verification = stage / 'verification'
           verification.mkdir()
-          for name in ('completion.json', 'benchmark.json', 'adversarial-report.json', 'source-race-report.json'):
+          for name in (
+              'completion.json', 'benchmark.json', 'adversarial-report.json',
+              'source-race-report.json', 'cross-process-race-report.json',
+              'cross-process-completion.json',
+          ):
               shutil.copy2(root / 'host-results' / name, verification / name)
           (stage / 'RELEASE_INFO.txt').write_text(
               'libreapeaks REAPER RPKX reference extension\n'
