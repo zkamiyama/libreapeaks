@@ -89,7 +89,11 @@ local function wait_for_barrier()
   poll=function()
     local gf=io.open(go,'r')
     if gf then gf:close();log('barrier_go',true);local ok,err=xpcall(main,debug.traceback);if not ok then quit(err) end;return end
-    if reaper.time_precise()-started>30 then quit('barrier timeout');return end
+    -- macOS host startup is UI-mediated and a second independent REAPER can
+    -- legitimately need more than 30 seconds to reach its own ready marker.
+    -- This timeout only bounds the pre-GO idle wait; it does not change when
+    -- either process begins the shared-cache mutation.
+    if reaper.time_precise()-started>60 then quit('barrier timeout');return end
     reaper.defer(poll)
   end
   reaper.defer(poll)
