@@ -26,7 +26,7 @@ from host_process import launch
 OUT = base.OUT
 INFO = base.INFO
 SCRIPT = pathlib.Path(__file__).with_name("host_cross_process.lua")
-NATIVE_SCRIPT = pathlib.Path(__file__).with_name("host_actions.lua")
+NATIVE_SCRIPT = pathlib.Path(__file__).with_name("host_native_oracle.lua")
 
 
 def sha(data: bytes) -> str:
