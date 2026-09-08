@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import shutil
+import struct
 import time
 
 import host_acceptance as base
@@ -25,16 +26,71 @@ from host_process import launch
 OUT = base.OUT
 INFO = base.INFO
 SCRIPT = pathlib.Path(__file__).with_name("host_cross_process.lua")
+NATIVE_SCRIPT = pathlib.Path(__file__).with_name("host_actions.lua")
 
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def native_standard(case_name: str) -> bytes:
-    summary = json.loads((OUT / case_name / "summary.json").read_text(encoding="utf-8"))
-    data = pathlib.Path(summary["cache_path"]).read_bytes()
-    return data[: base.standard_end(data)]
+def same_source_native_standard(case_name: str, source_media: pathlib.Path, operation: str) -> bytes:
+    """Generate an exact native oracle from the same five-minute source bytes.
+
+    The ordinary host acceptance native controls use a ten-second fixture.  This
+    race deliberately uses a five-minute fixture, so reusing those controls would
+    compare different cache lengths and make every real long-source rebuild look
+    corrupt.  Build fresh plugin-free controls here instead.
+    """
+    root = OUT / case_name
+    root.mkdir(parents=True, exist_ok=False)
+    media = root / "audio.wav"
+    shutil.copy2(source_media, media)
+    cfg = root / "reaper.ini"
+    cfg.write_text(
+        "[REAPER]\npeakcachegenmode=3\npeakcachegenrs=300\nshowpeaks=1\n"
+        "[audioconfig]\nmode=5\ndummy_srate=48000\ndummy_blocksize=512\n",
+        encoding="utf-8",
+    )
+    env = dict(
+        os.environ,
+        LRPK_CASE=str(root),
+        LRPK_MEDIA=str(media),
+        LRPK_ACTION=operation,
+        LRPK_EXPECT_PLUGIN="0",
+        LIBREAPEAKS_PLUGIN_LOG=str(root / "plugin.tsv"),
+    )
+    env.pop("LIBREAPEAKS_TEST_FAIL_AFTER_GENERATE", None)
+    rc = launch(
+        [INFO["reaper"], "-newinst", "-cfgfile", str(cfg), "-new", "-nosplash", str(NATIVE_SCRIPT)],
+        env,
+        root,
+        timeout=150.0,
+    )
+    result = (root / "result.txt").read_text(encoding="utf-8", errors="replace") if (root / "result.txt").exists() else ""
+    kv = dict(line.split("=", 1) for line in result.splitlines() if "=" in line)
+    paths = [pathlib.Path(kv[k]) for k in ("peak_write", "peak_read") if kv.get(k)]
+    paths.append(pathlib.Path(str(media) + ".reapeaks"))
+    cache = next((path for path in paths if path.is_file()), paths[-1])
+    errors: list[str] = []
+    if rc != 0:
+        errors.append("native oracle REAPER did not exit cleanly")
+    if "finished=true" not in result:
+        errors.append("native oracle host script did not finish")
+    if "error=" in result:
+        errors.append("native oracle host script reported an error")
+    if "plugin=false" not in result:
+        errors.append("native oracle unexpectedly loaded the reference plugin")
+    if not cache.is_file():
+        errors.append("native oracle cache was not produced")
+    if errors:
+        raise RuntimeError(f"{case_name}: " + "; ".join(errors))
+    data = cache.read_bytes()
+    standard = data[: base.standard_end(data)]
+    if operation == "spectrogram":
+        layers = [struct.unpack_from("<i", standard, 18 + i * 8)[0] for i in range(standard[5])]
+        if -103 not in layers:
+            raise RuntimeError(f"{case_name}: native spectrogram oracle has no spectrogram layer")
+    return standard
 
 
 def prepare_runner(root: pathlib.Path, media: pathlib.Path, operation: str, ready: pathlib.Path, go: pathlib.Path) -> dict[str, str]:
@@ -126,8 +182,10 @@ def main() -> None:
     # decode/generate window while keeping the release gate practical on macOS.
     ext.repeated_pcm16(media, 300)
 
-    native_wave = native_standard("native-wave")
-    native_spec = native_standard("native-spectrogram")
+    # The strict oracle must describe this exact five-minute fixture, not the
+    # ten-second native controls produced by host_acceptance.py.
+    native_wave = same_source_native_standard("cross-native-wave", media, "manual")
+    native_spec = same_source_native_standard("cross-native-spectrogram", media, "spectrogram")
     tail = base.rpkx_tail(native_wave, 16)
     cache = pathlib.Path(str(media) + ".reapeaks")
     initial = native_wave + tail
@@ -142,11 +200,15 @@ def main() -> None:
     env_b = prepare_runner(runner_b, media, "spectrogram", ready_b, go)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        # Process startup is deliberately serialized only until each independent
+        # REAPER reaches the filesystem barrier.  This avoids two macOS startup
+        # UI handlers fighting over the frontmost application while preserving
+        # the property under test: both live processes begin the shared-cache
+        # rebuild only after the same GO file is published.
         future_a = pool.submit(run_runner, runner_a, env_a)
+        wait_ready([ready_a])
         future_b = pool.submit(run_runner, runner_b, env_b)
-        wait_ready([ready_a, ready_b])
-        # Both REAPER processes have loaded the plugin and script before either
-        # is allowed to import/rebuild the shared cache.
+        wait_ready([ready_b])
         go.write_text("go\n", encoding="ascii")
         result_a = future_a.result()
         result_b = future_b.result()
@@ -206,6 +268,9 @@ def main() -> None:
         "passed": not errors,
         "errors": errors,
         "environment": INFO,
+        "native_wave_standard_sha256": sha(native_wave),
+        "native_spectrogram_standard_sha256": sha(native_spec),
+        "native_source_seconds": 300,
         "initial_sha256": sha(initial),
         "rpkx_tail_sha256": sha(tail),
         "rpkx_tail_bytes": len(tail),
@@ -221,8 +286,9 @@ def main() -> None:
         "cleanup_runner": result_c,
         "scope": (
             "Two independent normal REAPER 7.79 processes, deterministic filesystem start barrier, shared five-minute PCM16 source/cache, "
-            "16 MiB RPKX suffix, simultaneous waveform same-size and spectrogram growth rebuilds, exact native-standard-oracle validation "
-            "immediately after the race, exact suffix preservation, and a third clean rebuild proving no residual redo/WAL corruption."
+            "same-source five-minute native waveform/spectrogram controls, 16 MiB RPKX suffix, simultaneous waveform same-size and "
+            "spectrogram growth rebuilds, exact native-standard-oracle validation immediately after the race, exact suffix preservation, "
+            "and a third clean rebuild proving no residual redo/WAL corruption."
         ),
     }
     (OUT / "cross-process-race-report.json").write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
