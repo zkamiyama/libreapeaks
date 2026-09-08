@@ -15,6 +15,55 @@ static std::string lrpk_cache_path_for_media(const char* media){
     return fs::weakly_canonical(fs::u8path(write)).u8string();
 }
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+struct LrpkWindowsCommitLease{
+    HANDLE mutex=nullptr;
+    HANDLE pin=INVALID_HANDLE_VALUE;
+};
+static thread_local LrpkWindowsCommitLease lrpk_windows_commit_lease;
+static uint64_t lrpk_windows_cache_hash(const std::string&cache){
+    uint64_t h=1469598103934665603ull;
+    for(unsigned char c:cache){h^=uint64_t(c);h*=1099511628211ull;}
+    return h;
+}
+static void lrpk_release_windows_commit_lease(){
+    auto&lease=lrpk_windows_commit_lease;
+    if(lease.pin!=INVALID_HANDLE_VALUE){CloseHandle(lease.pin);lease.pin=INVALID_HANDLE_VALUE;}
+    if(lease.mutex){ReleaseMutex(lease.mutex);CloseHandle(lease.mutex);lease.mutex=nullptr;}
+}
+static void lrpk_acquire_windows_commit_lease(const std::string&cache){
+    auto&lease=lrpk_windows_commit_lease;
+    if(lease.mutex)throw std::runtime_error("Windows cache commit lease was already held");
+    char name[96]{};
+    std::snprintf(name,sizeof name,"Local\\libreapeaks-rpkx-commit-%016llx",static_cast<unsigned long long>(lrpk_windows_cache_hash(cache)));
+    HANDLE mutex=CreateMutexA(nullptr,FALSE,name);
+    if(!mutex)throw std::runtime_error("could not create Windows cache commit mutex: "+std::system_category().message(int(GetLastError())));
+    const DWORD waited=WaitForSingleObject(mutex,10000);
+    if(waited!=WAIT_OBJECT_0&&waited!=WAIT_ABANDONED){
+        const DWORD err=waited==WAIT_TIMEOUT?ERROR_TIMEOUT:GetLastError();
+        CloseHandle(mutex);
+        throw std::runtime_error("could not acquire Windows cache commit mutex: "+std::system_category().message(int(err)));
+    }
+    lease.mutex=mutex;
+}
+static void lrpk_pin_windows_writable(const fs::path&target){
+    auto&lease=lrpk_windows_commit_lease;
+    if(lease.pin!=INVALID_HANDLE_VALUE)throw std::runtime_error("Windows cache write pin was already held");
+    const auto deadline=Clock::now()+std::chrono::seconds(5);
+    for(;;){
+        HANDLE pin=CreateFileW(target.c_str(),GENERIC_READ|GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(pin!=INVALID_HANDLE_VALUE){lease.pin=pin;return;}
+        const DWORD err=GetLastError();
+        if(err!=ERROR_SHARING_VIOLATION||Clock::now()>=deadline)
+            throw std::runtime_error("cache is not writable after guarded cross-process rebuild: "+std::system_category().message(int(err)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
 static bool lrpk_same_file(const fs::path&a,const fs::path&b){
     std::error_code ec;const bool same=fs::equivalent(a,b,ec);
     if(ec)throw std::runtime_error("guard identity check failed: "+ec.message());
@@ -61,8 +110,16 @@ static std::string lrpk_prepare_guarded_clear(PCM_source*inner,const char*media)
     return cache;
 }
 static std::string lrpk_commit_path(const std::string&cache){
+    lrpk_acquire_windows_commit_lease(cache);
     const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
-    if(!fs::exists(guard))return cache;
+    if(!fs::exists(guard)){
+        // Another REAPER process may have just published a complete cache and
+        // temporarily reopened it without FILE_SHARE_WRITE. Wait for that native
+        // reader to release the file, then keep a share-all write handle open so
+        // it cannot race back in between this probe and lrpk_replace().
+        if(fs::exists(target))lrpk_pin_windows_writable(target);
+        return cache;
+    }
     const auto deadline=Clock::now()+std::chrono::seconds(5);
     while(fs::exists(target)){
         if(!lrpk_same_file(target,guard))throw std::runtime_error("guarded cache path was replaced by another file; preserving both");
@@ -73,23 +130,31 @@ static std::string lrpk_commit_path(const std::string&cache){
     return guard.u8string();
 }
 static void lrpk_finalize_guard(const std::string&cache,const std::string&commit){
-    if(commit==cache)return;
-    const auto target=fs::u8path(cache),guard=fs::u8path(commit);
-    if(fs::exists(target))throw std::runtime_error("cache reappeared before guarded commit could be published; preserving guard");
-    fs::rename(guard,target);
-    log("GUARD_COMMITTED\tfile="+cache);
+    try{
+        if(commit!=cache){
+            const auto target=fs::u8path(cache),guard=fs::u8path(commit);
+            if(fs::exists(target))throw std::runtime_error("cache reappeared before guarded commit could be published; preserving guard");
+            fs::rename(guard,target);
+            log("GUARD_COMMITTED\tfile="+cache);
+        }
+    }catch(...){lrpk_release_windows_commit_lease();throw;}
+    lrpk_release_windows_commit_lease();
 }
 static void lrpk_restore_guard(const std::string&cache){
-    const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
-    if(!fs::exists(guard))return;
-    if(fs::exists(target)){
-        if(!lrpk_same_file(target,guard))throw std::runtime_error("cannot restore guard because cache path contains a different file");
-        return;
-    }
-    const auto g=guard.u8string();
-    if(lrpk_recover(g.c_str()))throw std::runtime_error("guard recovery after failed generation failed: "+error_text());
-    fs::rename(guard,target);
-    log("GUARD_RESTORED\tfile="+cache);
+    try{
+        const auto target=fs::u8path(cache),guard=lrpk_guard_path(cache);
+        if(fs::exists(guard)){
+            if(fs::exists(target)){
+                if(!lrpk_same_file(target,guard))throw std::runtime_error("cannot restore guard because cache path contains a different file");
+            }else{
+                const auto g=guard.u8string();
+                if(lrpk_recover(g.c_str()))throw std::runtime_error("guard recovery after failed generation failed: "+error_text());
+                fs::rename(guard,target);
+                log("GUARD_RESTORED\tfile="+cache);
+            }
+        }
+    }catch(...){lrpk_release_windows_commit_lease();throw;}
+    lrpk_release_windows_commit_lease();
 }
 #else
 static void lrpk_recover_guard(const std::string&,bool){}
