@@ -22,7 +22,7 @@ from host_process import launch
 
 OUT = base.OUT
 INFO = base.INFO
-SCRIPT = pathlib.Path(__file__).with_name("host_actions.lua")
+SCRIPT = pathlib.Path(__file__).with_name("host_source_race.lua")
 
 
 def sha(data: bytes) -> str:
@@ -93,10 +93,6 @@ def main() -> None:
         os.environ,
         LRPK_CASE=str(case),
         LRPK_MEDIA=str(media),
-        # Import starts the real production peak job but deliberately performs
-        # no second explicit REAPER rebuild after the injected source change.
-        # The gate therefore observes the atomicity of the raced job itself.
-        LRPK_ACTION="import",
         LRPK_EXPECT_PLUGIN="1",
         LIBREAPEAKS_PLUGIN_LOG=str(trace_path),
     )
@@ -124,14 +120,14 @@ def main() -> None:
 
     require(rc == 0, "REAPER process did not exit cleanly")
     require(seen.get("mutated") is True, f"source mutation was not injected after BEGIN: {seen}")
-    require("finished=true" in result, "host action script did not finish")
+    require("finished=true" in result, "source-race observer did not finish")
     require("plugin=true" in result, "normal extension API was not loaded")
     require("DIAGNOSTIC_BUILD" not in trace, "race gate accidentally used diagnostic binary")
     require("raw_pcm16=1" in trace, "race gate did not exercise the raw PCM16 production path")
     require("source changed during decode" in trace, "source-stamp race was not detected before commit")
-    require("final_status=-1" in result or "failure_after_action=true" in result, "source race was not surfaced as a plugin failure")
+    require("final_status=-1" in result, "the raced job was not observed at its first failed terminal state")
     require(after == initial, "source race changed the pre-existing cache/RPKX despite refusal")
-    require(not base.real_done_fields(trace), "source race unexpectedly reached a successful real DONE commit")
+    require(not base.real_done_fields(trace), "source race unexpectedly reached a successful real DONE commit before the failed job was isolated")
 
     row = {
         "name": "source-change-race",
@@ -144,7 +140,7 @@ def main() -> None:
         "whole_cache_unchanged": after == initial,
         "result": result,
         "trace": trace,
-        "scope": "Normal distributable extension, initial/import-triggered 25-minute PCM16 WAVE generation, mtime mutation after real BEGIN and before commit; requires explicit source-change refusal and whole-cache/RPKX no-write proof, with no follow-up rebuild allowed to mask the raced job.",
+        "scope": "Normal distributable extension, initial/import-triggered 25-minute PCM16 WAVE generation, mtime mutation after real BEGIN and before commit; a dedicated observer exits on the first failed terminal state so later stable-source REAPER rechecks cannot mask the raced job's whole-cache/RPKX no-write proof.",
     }
     (OUT / "source-race-report.json").write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = [
@@ -161,7 +157,7 @@ def main() -> None:
             handle.write("\n".join(summary) + "\n")
     print(json.dumps(row, ensure_ascii=False), flush=True)
     if errors:
-        for filename in ("console.txt", "actions.txt", "startup-windows.json", "startup-macos.txt", "host-process.json"):
+        for filename in ("console.txt", "startup-windows.json", "startup-macos.txt", "host-process.json"):
             path = case / filename
             if path.exists():
                 print("SOURCE_RACE_DIAGNOSTIC", filename, path.read_text(errors="replace")[-16000:], flush=True)
