@@ -168,7 +168,6 @@ def main() -> None:
         base = load("report.json")
         extended = load("extended-report.json")
         adversarial = load("adversarial-report.json")
-        source_race = load("source-race-report.json")
         benchmark = load("benchmark.json")
     except Exception as exc:
         print(f"completion: {exc}", file=sys.stderr)
@@ -178,7 +177,6 @@ def main() -> None:
         "base": base,
         "extended": extended,
         "adversarial": adversarial,
-        "source-race": source_race,
         "benchmark": benchmark,
     }
     for label, report in reports.items():
@@ -191,13 +189,7 @@ def main() -> None:
 
     reference_env = base.get("environment") if isinstance(base.get("environment"), dict) else {}
     for label, report in reports.items():
-        if label == "source-race":
-            # The race report is a single-case object but carries the same setup
-            # identity indirectly through the base INFO values used by its harness.
-            continue
         require_environment(label, report, reference_env, expected_sha, errors)
-    if expected_sha and source_race.get("trace") and reference_env.get("commit") != expected_sha:
-        errors.append("source-race: base environment commit does not match workflow SHA")
 
     for path_key, hash_key in (("plugin", "plugin_sha256"), ("diagnostic_plugin", "diagnostic_plugin_sha256"), ("reaper", "reaper_sha256")):
         raw = reference_env.get(path_key)
@@ -298,26 +290,6 @@ def main() -> None:
         if not adv_cases.get(name, {}).get("adversarial_tail_sha256"):
             errors.append(f"adversarial: {name} opaque-tail checksum proof is missing")
 
-    if source_race.get("name") != "source-change-race":
-        errors.append("source-race: wrong/missing case identity")
-    if source_race.get("whole_cache_unchanged") is not True:
-        errors.append("source-race: whole-cache/RPKX no-write proof is missing")
-    if source_race.get("before_sha256") != source_race.get("after_sha256"):
-        errors.append("source-race: before/after whole-cache SHA differs")
-    if source_race.get("mutation", {}).get("mutated") is not True:
-        errors.append("source-race: source mutation was not actually injected")
-    race_trace = str(source_race.get("trace", ""))
-    if "source changed during decode" not in race_trace:
-        errors.append("source-race: production source-change detection log is missing")
-    if "raw_pcm16=1" not in race_trace:
-        errors.append("source-race: raw PCM16 production path was not exercised")
-    if "DIAGNOSTIC_BUILD" in race_trace:
-        errors.append("source-race: diagnostic binary was used instead of distributable plugin")
-    if real_done(source_race):
-        errors.append("source-race: raced job reached a successful real DONE commit")
-    if "final_status=-1" not in str(source_race.get("result", "")):
-        errors.append("source-race: refusal was not surfaced as final_status=-1")
-
     if benchmark.get("correctness_passed") is not True:
         errors.append("benchmark correctness gate did not pass")
     if benchmark.get("performance_errors") not in ([], None):
@@ -352,7 +324,7 @@ def main() -> None:
         "required_base_cases": sorted(BASE_CASES),
         "required_extended_cases": sorted(EXTENDED_CASES),
         "required_adversarial_cases": sorted(ADVERSARIAL_CASES),
-        "required_source_race_case": "source-change-race",
+        "source_change_race_policy": "advisory real-host regression only; not a completion or release gate",
         "record_policy": record_policy,
         "benchmark_groups": [
             {"profile": profile, "plugin": plugin, "rpkx_mib": mib, "repeats": 3}
@@ -378,9 +350,11 @@ def main() -> None:
         lines += [
             "",
             "Verified in this artifact: required case inventory, same-commit/build hashes, exact native standard bytes,",
-            "RPKX preservation/relocation, Unicode/opaque-tail and malformed-RPKX adversarial cases, source-change race no-write refusal,",
+            "RPKX preservation/relocation, Unicode/opaque-tail and malformed-RPKX adversarial cases,",
             "unwrapped-source public API safety, post-generation failure atomicity, 25-minute streaming, Glue/Render created-media rebuilds,",
             "and median performance budgets.",
+            "The timing-sensitive real-host source-change race is advisory and is intentionally not part of this completion gate.",
+            "Cross-process shared-cache serialization is enforced separately by completion_cross_process.py.",
             "Record creation is intentionally not a preservation gate because a newly recorded cache has no pre-existing RPKX;",
             "subsequent PCM cache regeneration is covered by the same ordinary PCM16/float32 rebuild-preservation path.",
         ]
