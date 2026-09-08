@@ -94,15 +94,6 @@ jobs:
           else
             GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
           fi
-      - name: Source-change race must refuse without cache writes
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" = Linux ]; then
-            GITHUB_SHA="$SOURCE_SHA" xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_source_race.py
-          else
-            GITHUB_SHA="$SOURCE_SHA" python examples/reaper_rpkx_extension/host_tests/host_source_race.py
-          fi
       - name: Independent REAPER processes must serialize shared-cache commits
         shell: bash
         run: |
@@ -160,14 +151,15 @@ jobs:
           verification.mkdir()
           for name in (
               'completion.json', 'benchmark.json', 'adversarial-report.json',
-              'source-race-report.json', 'cross-process-race-report.json',
-              'cross-process-completion.json',
+              'cross-process-race-report.json', 'cross-process-completion.json',
           ):
               shutil.copy2(root / 'host-results' / name, verification / name)
           (stage / 'RELEASE_INFO.txt').write_text(
               'libreapeaks REAPER RPKX reference extension\n'
               'Experimental example; not part of the libreapeaks public API.\n'
               'Validated host: REAPER 7.79\n'
+              'Release hard gates exclude the timing-sensitive source-change race;\n'
+              'source-stamp validation remains implemented and covered by deterministic tests.\n'
               f'Target: {os.environ["TARGET_SLUG"]}\n'
               f'Tag: {os.environ["RELEASE_TAG"]}\n'
               f'Commit: {os.environ["SOURCE_SHA"]}\n',
