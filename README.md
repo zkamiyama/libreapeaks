@@ -10,6 +10,41 @@ second analysis database.
 A `.reapeaks` file is cache/analysis data, not source audio. libreapeaks never
 rewrites the media file.
 
+## What is RPKX, and why is there a REAPER plugin?
+
+**RPKX** is libreapeaks' versioned EOF-extension container for attaching
+application-owned data after the normal REAPER `.reapeaks` region. The standard
+REAPEAKS prefix remains a normal REAPER cache; RPKX gives other applications a
+structured place for extra chunks without putting that data in the source audio.
+
+REAPER itself does not know about RPKX. An ordinary native peak-cache rebuild can
+replace the standard cache file and therefore discard bytes that another
+application appended after the standard region. The experimental
+[`examples/reaper_rpkx_extension/`](examples/reaper_rpkx_extension/) plugin is a
+**reference implementation** showing how a host integration can let REAPER
+regenerate its normal cache while preserving an existing RPKX suffix exactly and
+failing safely when preservation cannot be proven.
+
+The plugin is not required to use libreapeaks, and it is not part of the library
+API. It exists as an implementation sample for applications that want their RPKX
+data to survive ordinary REAPER workflows. If you only read/write `.reapeaks` or
+RPKX from your own application, use the library directly.
+
+Related documentation:
+
+- [`docs/RPKX_SPEC.md`](docs/RPKX_SPEC.md) — RPKX v1 binary/container format and
+  library-facing contract;
+- [`docs/RPKX_EOF_EXTENSIONS.md`](docs/RPKX_EOF_EXTENSIONS.md) — experiments and
+  reasoning behind appending RPKX after REAPER's standard cache;
+- [`docs/SOURCE_STAMP.md`](docs/SOURCE_STAMP.md) — how RPKX is bound to the media
+  identity/freshness represented by a REAPEAKS cache;
+- [`examples/reaper_rpkx_extension/USER_GUIDE.md`](examples/reaper_rpkx_extension/USER_GUIDE.md)
+  — install and use verified prebuilt reference binaries;
+- [`examples/reaper_rpkx_extension/DESIGN.md`](examples/reaper_rpkx_extension/DESIGN.md)
+  — plugin/library responsibility boundary and preservation/crash-safety design;
+- [`examples/reaper_rpkx_extension/TESTING.md`](examples/reaper_rpkx_extension/TESTING.md)
+  — real-REAPER exactness, failure, performance, and release-validation gates.
+
 ## What it can do
 
 - parse RPKN and RPKL waveform layers;
@@ -233,6 +268,20 @@ $env:CXXFLAGS="/DNOMINMAX"
 cargo test --release --features strict-wdl
 ```
 
+## REAPER extension reference implementation
+
+[`examples/reaper_rpkx_extension/`](examples/reaper_rpkx_extension/) contains an
+experimental REAPER 7.79 extension showing how an application can compose this
+library into a transparent RPKX-preserving host integration. **It is example
+code, not part of the libreapeaks public library API.**
+
+If you only want to install a verified prebuilt reference binary, go directly to
+[`USER_GUIDE.md`](examples/reaper_rpkx_extension/USER_GUIDE.md). For the
+implementation, build instructions, and scope, start with
+[`README.md`](examples/reaper_rpkx_extension/README.md), then see
+[`DESIGN.md`](examples/reaper_rpkx_extension/DESIGN.md) and
+[`TESTING.md`](examples/reaper_rpkx_extension/TESTING.md).
+
 ## Python
 
 The distribution name is `libreapeaks`; the import module is `reapeaks`.
@@ -329,7 +378,7 @@ Start at [`docs/README.md`](docs/README.md).
 - [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — tested compatibility
   contract and known gaps;
 - [`docs/F32_FINITE_PROOF.md`](docs/F32_FINITE_PROOF.md) — exhaustive finite-f32
-  RPKL quantizer proof and finite whole-file evidence;
+  RPKL quantizer proof and finite whole-file finite evidence;
 - [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md) — recovered
   algorithms and oracle methodology;
 - [`docs/validation-summary.json`](docs/validation-summary.json) — validation
@@ -339,7 +388,11 @@ Start at [`docs/README.md`](docs/README.md).
 - [`docs/GUI_WAVEFORM.md`](docs/GUI_WAVEFORM.md) — waveform/spectral GUI model;
 - [`docs/SOURCE_PCM_LOD.md`](docs/SOURCE_PCM_LOD.md) — exact-sample LOD and
   bounded PCM access;
-- [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview.
+- [`docs/C_ABI.md`](docs/C_ABI.md) — C ABI overview;
+- [`examples/reaper_rpkx_extension/USER_GUIDE.md`](examples/reaper_rpkx_extension/USER_GUIDE.md)
+  — install/use verified prebuilt REAPER reference binaries;
+- [`examples/reaper_rpkx_extension/README.md`](examples/reaper_rpkx_extension/README.md)
+  — REAPER RPKX-preserving reference integration (example, not library API).
 
 ## Third-party code and license
 

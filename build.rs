@@ -19,6 +19,11 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .define("WDL_FFT_REALSIZE", Some("8"))
+        .define("NOMINMAX", None)
+        .flag_if_supported("/EHsc")
+        // Upstream fft.c is intentionally compiled as C++ for the existing ABI.
+        // Clang C++17 rejects its legacy register declarations without this.
+        .flag_if_supported("-Wno-register")
         // REAPER 7.79's ResampleOut temporarily enables MXCSR FTZ with the
         // exact SSE2 mask emitted by WDL when this define is active. Without
         // it, tiny IIR tails survive and produce non-zero spectral codes after

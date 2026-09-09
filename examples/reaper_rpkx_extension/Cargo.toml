@@ -1,0 +1,16 @@
+[package]
+name = "reaper-rpkx-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+description = "Internal Rust bridge for the libreapeaks REAPER RPKX reference example"
+
+[lib]
+name = "rpkx_bridge"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+reapeaks = { package = "libreapeaks", path = "../..", features = ["strict-wdl"] }
+sha2 = "0.10"

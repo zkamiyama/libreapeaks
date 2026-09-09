@@ -1,0 +1,43 @@
+name: reaper-rpkx-example
+on:
+  push:
+    branches: [feature/reaper-rpkx-preserving-plugin]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bridge:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Build and fault-test REAPER reference bridge
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p plugin-results
+          rustc -Vv > plugin-results/rustc.txt
+          cargo test --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml -- --nocapture 2>&1 | tee plugin-results/tests.txt
+          cargo build --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+      - name: Collect reference bridge
+        if: always()
+        shell: bash
+        run: |
+          cp examples/reaper_rpkx_extension/Cargo.lock plugin-results/ || true
+          tar --exclude=target --exclude=build -czf plugin-results/bridge-source.tar.gz examples/reaper_rpkx_extension
+          find examples/reaper_rpkx_extension/target/release -maxdepth 1 -type f \( -name '*rpkx_bridge*' \) -exec cp '{}' plugin-results/ \; || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plugin-bridge-${{ matrix.os }}
+          path: plugin-results/
+          retention-days: 7

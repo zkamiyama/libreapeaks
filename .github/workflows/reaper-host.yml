@@ -1,0 +1,134 @@
+name: reaper-reference-host-acceptance
+on:
+  push:
+    branches: [feature/reaper-rpkx-preserving-plugin]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: reaper-host-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb libgtk-3-0 libasound2t64 ffmpeg
+      - name: Build Rust and real reference extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/justinfrankel/reaper-sdk.git .host-sdk
+          git -C .host-sdk checkout 490ded57668727fba21482fabc50ba9853a457bb
+          cargo test --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          cargo build --release --manifest-path examples/reaper_rpkx_extension/Cargo.toml
+          python examples/reaper_rpkx_extension/host_tests/setup_host.py --build-only
+      - name: Install REAPER 7.79 in isolated workspace
+        run: python examples/reaper_rpkx_extension/host_tests/setup_host.py --install-only
+      - name: Real host actions and negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_acceptance.py
+          fi
+      - name: Extended ordinary edit and media-creation workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_extended.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_extended.py
+          fi
+      - name: Adversarial RPKX state and safe-refusal cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_adversarial.py
+          fi
+      - name: Advisory source-change race regression (Ubuntu only)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_source_race.py
+      - name: Independent REAPER processes must serialize shared-cache commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/host_cross_process_race.py
+          fi
+      - name: Print adversarial reports
+        if: always()
+        shell: bash
+        run: |
+          for report in host-results/adversarial-report.json host-results/source-race-report.json host-results/cross-process-race-report.json; do
+            if [ -f "$report" ]; then
+              cat "$report"
+            else
+              echo "$report was not produced (source-race is advisory Ubuntu-only)"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-adversarial-${{ matrix.os }}
+          path: |
+            host-results/adversarial-report.json
+            host-results/ADVERSARIAL_SUMMARY.md
+            host-results/source-race-report.json
+            host-results/SOURCE_RACE_SUMMARY.md
+            host-results/cross-process-race-report.json
+            host-results/CROSS_PROCESS_RACE_SUMMARY.md
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Verified native and RPKX-size benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1280x800x24' python examples/reaper_rpkx_extension/host_tests/benchmark.py
+          else
+            python examples/reaper_rpkx_extension/host_tests/benchmark.py
+          fi
+      - name: Verify same-build completion manifest
+        if: always()
+        run: python examples/reaper_rpkx_extension/host_tests/completion.py
+      - name: Verify independent-process race completion proof
+        if: always()
+        run: python examples/reaper_rpkx_extension/host_tests/completion_cross_process.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reaper-host-${{ matrix.os }}
+          path: |
+            host-results/
+            host-build/reaper_rpkx.*
+            host-build/Release/reaper_rpkx.*
+            host-diagnostic/reaper_rpkx.*
+            host-diagnostic/Release/reaper_rpkx.*
+          if-no-files-found: error
+          retention-days: 7
