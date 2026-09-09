@@ -267,13 +267,18 @@ The report distinguishes:
 - **durable-ready time** — peak-ready plus any required preserving WAL/fsync
   completion.
 
-Each group is a shuffled three-run median. Current policy requires the reference
-extension's 0/16/64 MiB peak-ready median to be strictly faster than the
-same-host native median for both waveform and spectrogram, while independently
-checking durability and RPKX-size regression budgets.
+Each group is a shuffled three-run median. For every 0/16/64 MiB group, the
+reference extension's peak-ready median must stay within the larger of **2× the
+same-host native median** or **native + 50 ms**. Whether the reference extension
+actually beats native is still recorded, but is informational rather than a
+cross-platform correctness requirement. Every plugin group also has a 1-second
+durable-ready ceiling, and the 64 MiB cases must satisfy the independent
+RPKX-size regression budget.
 
-That performance policy is deliberately strict and may expose host variance. A
-performance failure does **not** relax byte correctness: the benchmark first
+The bounded policy prevents a pathological performance regression from going
+green while avoiding an invalid cross-platform assumption that an extension doing
+extra preservation/WAL work must always beat REAPER's internal native writer.
+A performance failure does **not** relax byte correctness: the benchmark first
 requires exact standard bytes, untouched RPKX, the expected raw PCM16 path, and
 the expected redo/sync path.
 
@@ -342,8 +347,8 @@ Keep these categories separate:
   safe-refusal, recovery, lifecycle, or cross-process proof failed;
 - **source-change advisory failure** — investigate source-stamp behavior, but it
   does not by itself block release;
-- **performance-only failure** — correctness passed but the strict native-speed
-  policy was not met on that runner.
+- **performance-only failure** — correctness passed but a bounded native,
+  durability, or RPKX-size regression budget was not met on that runner.
 
 The reference extension should never weaken required correctness gates merely to
 make performance green.
