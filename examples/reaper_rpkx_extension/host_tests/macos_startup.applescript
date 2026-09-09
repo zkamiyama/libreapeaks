@@ -1,5 +1,7 @@
 -- Test-only UI automation. Scope to the REAPER PID started by this case.
--- Do not modify registration, binary signatures, or system privacy settings.
+-- Handle only the two known startup dialogs. Avoid `entire contents`, because
+-- walking REAPER's full accessibility tree can block System Events long enough
+-- for the cross-process barrier to time out on hosted macOS runners.
 on run argv
     set targetPID to (item 1 of argv) as integer
     set reportText to ""
@@ -9,34 +11,48 @@ on run argv
         tell item 1 of candidates
             repeat with win in windows
                 try
-                    set reportText to reportText & "WINDOW " & (name of win as text) & linefeed
-                    set elementsList to entire contents of win
-                    set audioPrompt to false
-                    repeat with el in elementsList
-                        try
-                            set roleText to role of el as text
-                            set nameText to name of el as text
-                            set reportText to reportText & roleText & " " & nameText & linefeed
-                            if roleText is "AXStaticText" and nameText contains "audio device" then
-                                set audioPrompt to true
-                            end if
-                        end try
-                    end repeat
-                    repeat with el in elementsList
-                        try
-                            set roleText to role of el as text
-                            set nameText to name of el as text
-                            if roleText is "AXButton" and enabled of el then
-                                if nameText contains "Still Evaluating" then
-                                    click el
-                                    set reportText to reportText & "CLICKED " & nameText & linefeed
-                                else if audioPrompt and nameText is "No" then
-                                    click el
-                                    set reportText to reportText & "CLICKED " & nameText & linefeed
+                    set winName to name of win as text
+                    set reportText to reportText & "WINDOW " & winName & linefeed
+
+                    -- Fresh isolated REAPER roots may ask for an audio device.
+                    -- This is a known modal dialog whose top-level buttons are
+                    -- directly exposed, so no recursive AX traversal is needed.
+                    if winName is "REAPER" then
+                        repeat with btn in buttons of win
+                            try
+                                set btnName to name of btn as text
+                                set reportText to reportText & "AXButton " & btnName & linefeed
+                                if btnName is "No" and enabled of btn then
+                                    click btn
+                                    set reportText to reportText & "CLICKED " & btnName & linefeed
+                                    exit repeat
                                 end if
-                            end if
-                        end try
-                    end repeat
+                            end try
+                        end repeat
+
+                    -- Evaluation startup window. Prefer the explicit button when
+                    -- Accessibility exposes its label. If it is temporarily
+                    -- unlabeled during the countdown, Escape is safe because the
+                    -- window identity is already pinned to REAPER's About dialog.
+                    else if winName starts with "About REAPER" then
+                        set dismissed to false
+                        repeat with btn in buttons of win
+                            try
+                                set btnName to name of btn as text
+                                set reportText to reportText & "AXButton " & btnName & linefeed
+                                if btnName contains "Still Evaluating" and enabled of btn then
+                                    click btn
+                                    set dismissed to true
+                                    set reportText to reportText & "CLICKED " & btnName & linefeed
+                                    exit repeat
+                                end if
+                            end try
+                        end repeat
+                        if not dismissed then
+                            key code 53
+                            set reportText to reportText & "KEY Escape" & linefeed
+                        end if
+                    end if
                 on error messageText
                     set reportText to reportText & "ERROR " & messageText & linefeed
                 end try
