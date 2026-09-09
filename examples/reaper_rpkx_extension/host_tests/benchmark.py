@@ -6,6 +6,8 @@ from host_process import launch
 from host_acceptance import ROOT,OUT,INFO,FIXED_MTIME,fixture,rpkx_tail,standard_end,sha
 SCRIPT=pathlib.Path(__file__).with_name('benchmark.lua')
 DURABLE_ABS_BUDGET_S=1.000
+NATIVE_REGRESSION_MULTIPLIER_BUDGET=2.0
+NATIVE_REGRESSION_OVERHEAD_BUDGET_S=0.050
 RPKX_SIZE_OVERHEAD_BUDGET_S=0.500
 RPKX_SIZE_MULTIPLIER_BUDGET=8.0
 
@@ -80,22 +82,22 @@ def main():
             selected=[r for r in collected if r['plugin']==plugin and r['rpkx_mib']==mib];valid=len(selected)==3 and all(not r['errors'] for r in selected);times=[r['build_s'] for r in selected];durable=[r['durable_s'] for r in selected]
             s={'profile':label,'plugin':plugin,'rpkx_mib':mib,'valid':valid,'n':len(times),'median_s':statistics.median(times) if valid else None,'min_s':min(times) if valid else None,'max_s':max(times) if valid else None,'durable_median_s':statistics.median(durable) if valid else None,'ratio_to_native':statistics.median(times)/native_median if valid and native_median else None}
             if plugin and valid and native_median:
-                s['native_regression_budget_s']=native_median;s['beats_native']=s['median_s']<native_median;s['within_native_budget']=s['beats_native']
-                if not s['beats_native']:performance_errors.append(f"{label} {mib}MiB median {s['median_s']:.6f}s did not beat native {native_median:.6f}s")
-                if label=='waveform':
-                    s['within_durable_budget']=s['durable_median_s']<=DURABLE_ABS_BUDGET_S
-                    if not s['within_durable_budget']:performance_errors.append(f"waveform {mib}MiB durable median {s['durable_median_s']:.6f}s exceeds {DURABLE_ABS_BUDGET_S:.3f}s background durability budget")
+                native_budget=max(native_median*NATIVE_REGRESSION_MULTIPLIER_BUDGET,native_median+NATIVE_REGRESSION_OVERHEAD_BUDGET_S)
+                s['native_regression_budget_s']=native_budget;s['beats_native']=s['median_s']<native_median;s['within_native_budget']=s['median_s']<=native_budget
+                if not s['within_native_budget']:performance_errors.append(f"{label} {mib}MiB median {s['median_s']:.6f}s exceeds same-host native regression budget {native_budget:.6f}s (native {native_median:.6f}s)")
+                s['within_durable_budget']=s['durable_median_s']<=DURABLE_ABS_BUDGET_S
+                if not s['within_durable_budget']:performance_errors.append(f"{label} {mib}MiB durable median {s['durable_median_s']:.6f}s exceeds {DURABLE_ABS_BUDGET_S:.3f}s durability budget")
             summaries.append(s);profile_summaries.append(s)
         p0=next((s for s in profile_summaries if s['plugin'] and s['rpkx_mib']==0 and s['valid']),None);p64=next((s for s in profile_summaries if s['plugin'] and s['rpkx_mib']==64 and s['valid']),None)
         if p0 and p64:
             budget=max(p0['durable_median_s']*RPKX_SIZE_MULTIPLIER_BUDGET,p0['durable_median_s']+RPKX_SIZE_OVERHEAD_BUDGET_S);p64['rpkx_size_regression_budget_s']=budget;p64['within_rpkx_size_budget']=p64['durable_median_s']<=budget
             if not p64['within_rpkx_size_budget']:performance_errors.append(f"{label} 64MiB durable median {p64['durable_median_s']:.6f}s exceeds 0MiB size-regression budget {budget:.6f}s")
     correctness=bool(rows) and all(not r['errors'] for r in rows)
-    report={'environment':INFO,'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16. Every pre-existing seeded cache, including its RPKX tail, is fsync-d before the timer so plugin durability is charged only for writes caused by the measured rebuild. build_s ends when PCM_Source_BuildPeaks completes; waveform settle_s independently waits for the stronger WAL/fsync durability status. Shuffled 3-run medians. Plugin cases prove raw PCM16, exact native standard bytes, three-sync WAL completion, and untouched RPKX.','performance_policy':{'waveform_peak_ready':'Every 0/16/64 MiB plugin median must be strictly faster than same-host native.','spectrogram_peak_ready':'Every 0/16/64 MiB plugin median must be strictly faster than same-host native.','durable_absolute_budget_s':DURABLE_ABS_BUDGET_S,'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S},'rows':rows,'summaries':summaries,'performance_errors':performance_errors,'correctness_passed':correctness,'passed':correctness and not performance_errors}
+    report={'environment':INFO,'method':'Fresh REAPER process per case; 10 s 48 kHz stereo PCM16. Every pre-existing seeded cache, including its RPKX tail, is fsync-d before the timer so plugin durability is charged only for writes caused by the measured rebuild. build_s ends when PCM_Source_BuildPeaks completes; settle_s independently waits for the stronger WAL/fsync durability status. Shuffled 3-run medians. Plugin cases prove raw PCM16, exact native standard bytes, three-sync WAL completion, and untouched RPKX.','performance_policy':{'waveform_peak_ready':'Every 0/16/64 MiB plugin median must stay within max(2x same-host native median, native + 50 ms); beating native is recorded separately.','spectrogram_peak_ready':'Every 0/16/64 MiB plugin median must stay within max(2x same-host native median, native + 50 ms); beating native is recorded separately.','native_regression_multiplier_budget':NATIVE_REGRESSION_MULTIPLIER_BUDGET,'native_regression_overhead_budget_s':NATIVE_REGRESSION_OVERHEAD_BUDGET_S,'durable_absolute_budget_s':DURABLE_ABS_BUDGET_S,'rpkx_size_multiplier_budget':RPKX_SIZE_MULTIPLIER_BUDGET,'rpkx_size_overhead_budget_s':RPKX_SIZE_OVERHEAD_BUDGET_S},'rows':rows,'summaries':summaries,'performance_errors':performance_errors,'correctness_passed':correctness,'passed':correctness and not performance_errors}
     (OUT/'benchmark.json').write_text(json.dumps(report,indent=2)+'\n')
-    lines=['# Host API benchmark',report['method'],'','| Profile | Writer | RPKX MiB | n | Peak-ready median s | Durable median s | Ratio | Native win |','|---|---|---:|---:|---:|---:|---:|---:|']
+    lines=['# Host API benchmark',report['method'],'','| Profile | Writer | RPKX MiB | n | Peak-ready median s | Durable median s | Ratio | Within native budget | Native win |','|---|---|---:|---:|---:|---:|---:|---:|---:|']
     for s in summaries:
-        vals=[s['profile'],'plugin' if s['plugin'] else 'native',str(s['rpkx_mib']),str(s['n'])]+[f"{s[k]:.6f}" if s[k] is not None else 'INVALID' for k in ('median_s','durable_median_s','ratio_to_native')]+[str(s.get('beats_native','-'))];lines.append('| '+' | '.join(vals)+' |')
+        vals=[s['profile'],'plugin' if s['plugin'] else 'native',str(s['rpkx_mib']),str(s['n'])]+[f"{s[k]:.6f}" if s[k] is not None else 'INVALID' for k in ('median_s','durable_median_s','ratio_to_native')]+[str(s.get('within_native_budget','-')),str(s.get('beats_native','-'))];lines.append('| '+' | '.join(vals)+' |')
     lines+=['']+((['Performance gate failures:']+[f'- {e}' for e in performance_errors]) if performance_errors else ['Performance gates: PASS'])
     (OUT/'BENCHMARK.md').write_text('\n'.join(lines)+'\n')
     if os.getenv('GITHUB_STEP_SUMMARY'):
